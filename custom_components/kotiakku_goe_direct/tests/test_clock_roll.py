@@ -388,7 +388,7 @@ def main():
     def test_surplus_split_hold_over_15_min():
         alloc = surplus.surplus_allocations
         plan = surplus.surplus_allocation_plan
-        a, b = "407436", "407427"
+        a, b = "111111", "222222"
         kwargs = dict(
             lops={a: 1, b: 50},
             plugged={a: True, b: True},

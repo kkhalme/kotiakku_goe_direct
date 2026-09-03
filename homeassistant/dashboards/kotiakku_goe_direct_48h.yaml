@@ -17,6 +17,9 @@
 #         filename: dashboards/kotiakku_goe_direct_48h.yaml
 #
 # Or paste `views:` into a UI dashboard's raw editor.
+#
+# Placeholders: replace 111111 / 222222 with your charger MQTT serials,
+# and sensor.nordpool_kwh_fi with your Nordpool entity.
 
 title: Kotiakku go-e Direct 48h
 views:
@@ -29,7 +32,7 @@ views:
         cards:
           - type: markdown
             content: >
-              **407436 Cheapest** · **407427 Force off** · leftover
+              **Charger 1 Cheapest** · **Charger 2 Force off** · leftover
               `|solar| − |house| + |ev|` · cheapest window 2–5 h, ceiling 0.10.
               Green on the price chart is `binary_sensor.kotiakku_goe_direct_cheapest_window_active`.
               Supercheap uses `binary_sensor.kotiakku_goe_direct_offsun_window_active` (cheapest
@@ -43,7 +46,7 @@ views:
             show_state: true
             columns: 7
             entities:
-              - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+              - entity: sensor.nordpool_kwh_fi
                 name: Spot
               - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
                 name: Cheapest
@@ -55,8 +58,8 @@ views:
                 name: Forecast solar
               - entity: sensor.kotiakku_goe_direct_leftover_kw
                 name: Leftover
-              - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
-                name: 407436 full power
+              - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
+                name: Charger 1 full power
 
           - type: custom:apexcharts-card
             header:
@@ -115,7 +118,7 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+              - entity: sensor.nordpool_kwh_fi
                 name: Spot
                 yaxis_id: price
                 type: line
@@ -238,8 +241,8 @@ views:
                   title:
                     text: phases
             series:
-              - entity: sensor.kotiakku_goe_direct_407436_session_amp
-                name: 407436 amp
+              - entity: sensor.kotiakku_goe_direct_111111_session_amp
+                name: Charger 1 amp
                 yaxis_id: amp
                 type: line
                 curve: stepline
@@ -249,8 +252,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407427_session_amp
-                name: 407427 amp
+              - entity: sensor.kotiakku_goe_direct_222222_session_amp
+                name: Charger 2 amp
                 yaxis_id: amp
                 type: line
                 curve: stepline
@@ -261,8 +264,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407436_phases
-                name: 407436 phases
+              - entity: sensor.kotiakku_goe_direct_111111_phases
+                name: Charger 1 phases
                 yaxis_id: phases
                 type: line
                 curve: stepline
@@ -275,8 +278,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407427_phases
-                name: 407427 phases
+              - entity: sensor.kotiakku_goe_direct_222222_phases
+                name: Charger 2 phases
                 yaxis_id: phases
                 type: line
                 curve: stepline
@@ -311,8 +314,8 @@ views:
                   title:
                     text: kW
             series:
-              - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
-                name: 407436 cheapest full-power
+              - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
+                name: Charger 1 cheapest full-power
                 yaxis_id: kw
                 type: area
                 curve: stepline
@@ -327,8 +330,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407436_commanded_kw
-                name: 407436 commanded
+              - entity: sensor.kotiakku_goe_direct_111111_commanded_kw
+                name: Charger 1 commanded
                 yaxis_id: kw
                 type: line
                 curve: stepline
@@ -338,8 +341,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407427_commanded_kw
-                name: 407427 commanded
+              - entity: sensor.kotiakku_goe_direct_222222_commanded_kw
+                name: Charger 2 commanded
                 yaxis_id: kw
                 type: line
                 curve: stepline
@@ -350,8 +353,8 @@ views:
                 group_by:
                   duration: 15min
                   func: last
-              - entity: sensor.kotiakku_goe_direct_407436_charge_kw
-                name: 407436 nrg
+              - entity: sensor.kotiakku_goe_direct_111111_charge_kw
+                name: Charger 1 nrg
                 yaxis_id: kw
                 type: line
                 curve: stepline
@@ -365,8 +368,8 @@ views:
                 group_by:
                   duration: 15min
                   func: avg
-              - entity: sensor.kotiakku_goe_direct_407427_charge_kw
-                name: 407427 nrg
+              - entity: sensor.kotiakku_goe_direct_222222_charge_kw
+                name: Charger 2 nrg
                 yaxis_id: kw
                 type: line
                 curve: stepline
@@ -396,7 +399,7 @@ views:
         hours_to_show: 48
         logarithmic: false
         entities:
-          - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+          - entity: sensor.nordpool_kwh_fi
             name: Spot
           - entity: number.kotiakku_goe_direct_electricity_price_ceiling
             name: Price ceiling
@@ -420,35 +423,35 @@ views:
         title: Amp + phases
         hours_to_show: 48
         entities:
-          - entity: sensor.kotiakku_goe_direct_407436_session_amp
-            name: 407436 A
-          - entity: sensor.kotiakku_goe_direct_407427_session_amp
-            name: 407427 A
-          - entity: sensor.kotiakku_goe_direct_407436_phases
-            name: 407436 phases
-          - entity: sensor.kotiakku_goe_direct_407427_phases
-            name: 407427 phases
+          - entity: sensor.kotiakku_goe_direct_111111_session_amp
+            name: Charger 1 A
+          - entity: sensor.kotiakku_goe_direct_222222_session_amp
+            name: Charger 2 A
+          - entity: sensor.kotiakku_goe_direct_111111_phases
+            name: Charger 1 phases
+          - entity: sensor.kotiakku_goe_direct_222222_phases
+            name: Charger 2 phases
 
       - type: history-graph
         title: Charge kW
         hours_to_show: 48
         entities:
-          - entity: sensor.kotiakku_goe_direct_407436_commanded_kw
-            name: 407436 commanded
-          - entity: sensor.kotiakku_goe_direct_407427_commanded_kw
-            name: 407427 commanded
-          - entity: sensor.kotiakku_goe_direct_407436_charge_kw
-            name: 407436 nrg
-          - entity: sensor.kotiakku_goe_direct_407427_charge_kw
-            name: 407427 nrg
+          - entity: sensor.kotiakku_goe_direct_111111_commanded_kw
+            name: Charger 1 commanded
+          - entity: sensor.kotiakku_goe_direct_222222_commanded_kw
+            name: Charger 2 commanded
+          - entity: sensor.kotiakku_goe_direct_111111_charge_kw
+            name: Charger 1 nrg
+          - entity: sensor.kotiakku_goe_direct_222222_charge_kw
+            name: Charger 2 nrg
 
       - type: entities
         title: Policies + full power
         entities:
-          - entity: select.kotiakku_goe_direct_policy_407436
-          - entity: select.kotiakku_goe_direct_policy_407427
-          - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
-          - entity: binary_sensor.kotiakku_goe_direct_407427_full_power
+          - entity: select.kotiakku_goe_direct_policy_111111
+          - entity: select.kotiakku_goe_direct_policy_222222
+          - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
+          - entity: binary_sensor.kotiakku_goe_direct_222222_full_power
           - entity: sensor.kotiakku_goe_direct_cheapest_window_start
           - entity: sensor.kotiakku_goe_direct_offsun_window_start
           - entity: binary_sensor.kotiakku_goe_direct_solar_enough

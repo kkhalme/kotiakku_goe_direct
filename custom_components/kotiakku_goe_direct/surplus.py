@@ -109,7 +109,8 @@ def enough_solar(upcoming_kwh, threshold_kwh):
     return float(upcoming_kwh) >= threshold
 
 
-# Home Assistant latitude/longitude override these. Used when HA has no site.
+# Home Assistant latitude/longitude override these. Fallback is southern
+# Finland (Helsinki) when the HA instance has no site location.
 DEFAULT_LAT = 60.17
 DEFAULT_LON = 24.94
 

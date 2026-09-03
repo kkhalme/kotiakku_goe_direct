@@ -6,7 +6,7 @@ Deploy from this GitHub repo: [§3](#3-deploy-in-home-assistant) (HACS custom re
 
 This is the only drop. Do not also run the old YAML surplus or charge automations — they would fight this.
 
-Controller serial `913231` is **read-only**. Never publish to `go-eController/…`. Never `frc=1`, `ama`, `loe`, `loty`. `lop` is **read-only** (app priorities).
+The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `frc=1`, `ama`, `loe`, `loty`. `lop` is **read-only** (app priorities).
 
 ## 1. App and MQTT
 
@@ -82,7 +82,7 @@ Do **not** copy the whole repo into `custom_components/`. Only the inner `kotiak
 - MQTT in Home Assistant can **publish** to `go-eCharger/<serial>/<key>/set`. This integration depends on the MQTT integration.
 - Chargers: MQTT writes allowed (`mcr=false`), load balancing on (`loe=true`), group total 50 A, charger max 32 A. Priorities stay in the go-e app (`lop`).
 - Sensors you will pick already exist: Nordpool (with `raw_today` / `raw_tomorrow`), go-e Controller Car-power 5-min mean, Kotiakku SoC / solar / house, charger entities. Optional: solar remaining-today and tomorrow kWh.
-- Controller serial `913231` is read-only. Never publish to `go-eController/…`.
+- The go-e Controller is read-only. Never publish to `go-eController/…`.
 
 ### A. HACS custom repository (recommended)
 
@@ -129,24 +129,24 @@ Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge unt
 
 After it exists, **Configure** edits charger entities/serials and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
-YAML import is optional. This is **one house’s** wiring, not names the integration requires:
+YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake):
 
 ```yaml
 kotiakku_goe_direct:
-  price_entity: sensor.nordpool_kwh_fi_eur_3_10_0
-  controller_entity: sensor.go_econtroller_913231_go_e_ev_power_5_min_mean
+  price_entity: sensor.nordpool_kwh_fi
+  controller_entity: sensor.go_econtroller_ev_power_5_min_mean
   controller_in_kw: false
-  soc_entity: sensor.kotiakku_state_of_charge_percent
-  solar_entity: sensor.kotiakku_solar_power_kw
-  house_entity: sensor.kotiakku_house_power_kw
+  soc_entity: sensor.battery_soc
+  solar_entity: sensor.solar_power
+  house_entity: sensor.house_power
   kotiakku_in_kw: true
   solar_remaining_entity: sensor.energy_production_today_remaining
   solar_tomorrow_entity: sensor.energy_production_tomorrow
   chargers:
-    - entity: sensor.go_echarger_407436_car_state
-      serial: "407436"
-    - entity: sensor.go_echarger_407427_car_state
-      serial: "407427"
+    - entity: sensor.go_echarger_111111_car_state
+      serial: "111111"
+    - entity: sensor.go_echarger_222222_car_state
+      serial: "222222"
 ```
 
 The two **kW** checkboxes are not day-to-day knobs. They say whether the picked power sensors report kilowatts or watts so leftover math can convert to watts. Kotiakku solar/house default to kW; the Controller Car-power mean defaults to watts.
@@ -159,12 +159,12 @@ Optional 48 h leftover / price graphs: [§7](#7-graphs). HACS does not copy thos
 
 Writes go to `go-eCharger/<serial>/<key>/set`. The serial is the MQTT path. It is **not** the entity id.
 
-Guessing the serial from `sensor.go_echarger_407436_…` alone is not robust: entity ids can be renamed, and firmware MQTT vs HACS `goecharger-mqtt` use different unique_id shapes. The form therefore **asks for the serial** and only pre-fills when something more stable agrees:
+Guessing the serial from `sensor.go_echarger_<serial>_…` alone is not robust: entity ids can be renamed, and firmware MQTT vs HACS `goecharger-mqtt` use different unique_id shapes. The form therefore **asks for the serial** and only pre-fills when something more stable agrees:
 
 1. State attributes `sse` / `serial` / `serial_number`
-2. Device registry serial and identifiers (`go-e_407436`, `(goecharger_mqtt, 407436)`, …)
+2. Device registry serial and identifiers (`go-e_<serial>`, `(goecharger_mqtt, <serial>)`, …)
 3. MQTT topic `go-eCharger/<serial>/…` when HA exposes it
-4. Entity `unique_id` (`go-e_407436_car_state` or `407436-sensor-car_state-…`)
+4. Entity `unique_id` (`go-e_<serial>_car_state` or `<serial>-sensor-car_state-…`)
 5. Entity id / name, last resort (skipped for Controller entities)
 
 Two high-confidence sources that disagree → no prefill; type it from the go-e app.
@@ -250,7 +250,7 @@ python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
 python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
 ```
 
-Live Home Assistant, same series (HACS does **not** install these): copy [`homeassistant/packages/kotiakku_goe_direct_graph.yaml`](homeassistant/packages/kotiakku_goe_direct_graph.yaml) into `<config>/packages/` (leftover, session amp, phases, commanded kW, `nrg` take). Add [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard. The first view uses [apexcharts-card](https://github.com/RomRider/apexcharts-card) so Nordpool `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) can share a 48 h-from-midnight axis with leftover and the chargers. Built-in `history-graph` is the second view; it can only show recorded past, not tomorrow's prices. These files are display-only — they do not write MQTT.
+Live Home Assistant, same series (HACS does **not** install these): copy [`homeassistant/packages/kotiakku_goe_direct_graph.yaml`](homeassistant/packages/kotiakku_goe_direct_graph.yaml) into `<config>/packages/` and replace the placeholder entity ids / fake serials `111111` and `222222`. Add [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard. The first view uses [apexcharts-card](https://github.com/RomRider/apexcharts-card) so Nordpool `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) can share a 48 h-from-midnight axis with leftover and the chargers. Built-in `history-graph` is the second view; it can only show recorded past, not tomorrow's prices. These files are display-only — they do not write MQTT.
 
 ## Tests
 

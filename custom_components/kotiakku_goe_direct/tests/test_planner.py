@@ -27,7 +27,7 @@ def run_plan(now, source_attrs, data=None, prev=None):
         ceiling=payload["ceiling"],
         rank=payload.get("rank", "cheapest"),
         prev=prev,
-        source_entity="sensor.nordpool_kwh_fi_eur_3_10_0",
+        source_entity="sensor.nordpool_kwh_fi",
     )
 
 
@@ -561,7 +561,7 @@ def main():
     def test_surplus_allocations_steal_second_charger_floor():
         alloc = surplus.surplus_allocations
         plan = surplus.surplus_allocation_plan
-        a, b = "407436", "407427"
+        a, b = "111111", "222222"
         lops = {a: 1, b: 50}
         plugged = {a: True, b: True}
         kwargs = dict(

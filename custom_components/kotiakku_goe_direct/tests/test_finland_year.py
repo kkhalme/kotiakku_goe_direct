@@ -181,8 +181,8 @@ def iter_ticks(start, hours=48):
         t += SLOT
 
 
-SERIAL_CHEAP = "407436"
-SERIAL_SURPLUS = "407427"
+SERIAL_CHEAP = "111111"
+SERIAL_SURPLUS = "222222"
 VOLTS = 230
 FULL_AMP = 32
 FULL_PSM = 2
@@ -264,12 +264,12 @@ def simulate(
     policy=POLICY_CHEAPEST,
     solar_enough_kwh=SOLAR_ENOUGH_KWH,
 ):
-    """48 h house: 407436 ranked policy, 407427 Force off (surplus).
+    """48 h house: charger A ranked policy, charger B Force off (surplus).
 
     Supercheap uses Off-sun windows (cheapest 2–5 h after dropping hours
     with at least 1 kWh of expected solar), then skips 22 kW when
     remaining-today or tomorrow PV energy is at least ``solar_enough_kwh``.
-    Surplus can still write 407436. Cheapest ignores the forecast.
+    Surplus can still write charger A. Cheapest ignores the forecast.
     """
     start = start.astimezone(HEL).replace(second=0, microsecond=0)
     days = build_days(start, int(hours // 24) + 3, price_fn)
@@ -656,7 +656,7 @@ def plot_sim(sim, path):
         gridspec_kw={"height_ratios": [1.15, 1.05, 1.0, 1.0, 1.15]},
     )
     fig.suptitle(
-        "%s  —  48 h Helsinki  ·  407436 %s  ·  407427 Force off"
+        "%s  —  48 h Helsinki  ·  charger A %s  ·  charger B Force off"
         % (sim["name"], policy),
         fontsize=13,
         fontweight="bold",
@@ -730,8 +730,8 @@ def plot_sim(sim, path):
     ax.grid(True, alpha=0.3)
 
     ax = axes[3]
-    ax.plot(times, a_amp, color="#1f77b4", lw=1.5, label="407436 amp")
-    ax.plot(times, b_amp, color="#17becf", lw=1.5, ls="--", label="407427 amp")
+    ax.plot(times, a_amp, color="#1f77b4", lw=1.5, label="charger A amp")
+    ax.plot(times, b_amp, color="#17becf", lw=1.5, ls="--", label="charger B amp")
     ax.set_ylabel("A")
     ax.set_ylim(-1, 34)
     ax.set_title("MQTT amp  ·  phase as 1 / 3 on the right axis")
@@ -745,8 +745,8 @@ def plot_sim(sim, path):
     ax2.set_yticks([0, 1, 3])
 
     ax = axes[4]
-    ax.plot(times, a_w, color="#1f77b4", lw=1.5, label="407436 kW (amp×230×phases)")
-    ax.plot(times, b_w, color="#17becf", lw=1.5, ls="--", label="407427 kW")
+    ax.plot(times, a_w, color="#1f77b4", lw=1.5, label="charger A kW (amp×230×phases)")
+    ax.plot(times, b_w, color="#17becf", lw=1.5, ls="--", label="charger B kW")
     ax.set_ylabel("kW")
     ax.set_title("Commanded charge wattage  ·  go-e may still split a shared group lot")
     ax.legend(loc="upper right", fontsize=8)
@@ -798,7 +798,7 @@ def plot_compare(sims, path):
     ax.set_xticklabels(names, rotation=20, ha="right")
     ax.legend(loc="upper right", fontsize=8, ncol=2)
     ax.grid(True, axis="y", alpha=0.3)
-    ax.set_title("407436 Supercheap  ·  407427 Force off still follows leftover")
+    ax.set_title("charger A Supercheap  ·  charger B Force off still follows leftover")
 
     ax = axes[1]
     ax.bar(x - 0.2, upcoming, 0.4, color="#9467bd", label="Max upcoming kWh (max remaining, tomorrow)")
@@ -822,8 +822,8 @@ def write_report(sims, out_dir):
     lines = [
         "# Supercheap 48 h Helsinki year-round",
         "",
-        "Same weather and Nordpool cases as the Cheapest run. **407436 Supercheap**",
-        "(Off-sun rank), **407427 Force off**. Off-sun is cheapest 2–5 h after dropping",
+        "Same weather and Nordpool cases as the Cheapest run. **Charger A Supercheap**",
+        "(Off-sun rank), **charger B Force off**. Off-sun is cheapest 2–5 h after dropping",
         "hours with at least 1 kWh of expected solar (remaining-today / tomorrow shaped",
         "by elevation). Supercheap then skips 22 kW whenever",
         "`max(remaining-today, tomorrow) ≥ 40 kWh`, including Off-sun night hours.",
@@ -1091,7 +1091,7 @@ def main():
         assert_true(overlap, "Force-off surplus keeps running in the skipped cheapest window")
         for t in overlap:
             assert_eq(t["cheap_full"], False, "no 22 kW during enough solar @ %s" % t["now"])
-            assert_true(t["a"]["w"] < 32 * VOLTS * 3, "407436 is leftover not full power @ %s" % t["now"])
+            assert_true(t["a"]["w"] < 32 * VOLTS * 3, "charger A is leftover not full power @ %s" % t["now"])
         for t in sim["ticks"]:
             assert_true(t["enough"], "clear midsummer upcoming stays ≥ 40 kWh @ %s" % t["now"])
             assert_true(t["upcoming_kwh"] >= SOLAR_ENOUGH_KWH, "upcoming %s" % t["upcoming_kwh"])
