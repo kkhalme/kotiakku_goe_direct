@@ -2,29 +2,56 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import UnitOfEnergy
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, RANKS, rank_label
+from .const import (
+    DOMAIN,
+    RANKS,
+    rank_label,
+    window_sensor_entity_id,
+    window_sensor_legacy_unique_id,
+    window_sensor_unique_id,
+)
 from .device import HubEntity
 
 
+def _migrate_window_sensor_ids(hass):
+    """Keep history: old unique_id ended in ``_window_start``."""
+    registry = er.async_get(hass)
+    for rank in RANKS:
+        old_uid = window_sensor_legacy_unique_id(rank)
+        new_uid = window_sensor_unique_id(rank)
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, old_uid)
+        if entity_id is None:
+            continue
+        new_entity_id = window_sensor_entity_id(rank)
+        kwargs = {"new_unique_id": new_uid}
+        if entity_id == f"sensor.{old_uid}" and registry.async_get(new_entity_id) is None:
+            kwargs["new_entity_id"] = new_entity_id
+        registry.async_update_entity(entity_id, **kwargs)
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
+    _migrate_window_sensor_ids(hass)
     controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [WindowStartSensor(controller, rank) for rank in RANKS]
+    entities = [WindowSensor(controller, rank) for rank in RANKS]
     entities.append(ForecastSolarSensor(controller))
     async_add_entities(entities)
 
 
-class WindowStartSensor(HubEntity, SensorEntity):
+class WindowSensor(HubEntity, SensorEntity):
+    """Current or next window. State is the start; end and the plan are attributes."""
+
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:ev-station"
 
     def __init__(self, controller, rank):
         super().__init__(controller)
         self._rank = rank
-        self.entity_id = f"sensor.kotiakku_goe_direct_{rank}_window_start"
-        self._attr_unique_id = f"kotiakku_goe_direct_{rank}_window_start"
-        self._attr_name = f"{rank_label(rank)} window start"
+        self.entity_id = window_sensor_entity_id(rank)
+        self._attr_unique_id = window_sensor_unique_id(rank)
+        self._attr_name = f"{rank_label(rank)} window"
 
     @property
     def native_value(self):

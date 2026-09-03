@@ -342,6 +342,18 @@ def priority_entity_id(serial) -> str:
     return f"number.kotiakku_goe_direct_priority_{serial}"
 
 
+def window_sensor_unique_id(rank) -> str:
+    return f"kotiakku_goe_direct_{rank}_window"
+
+
+def window_sensor_entity_id(rank) -> str:
+    return f"sensor.{window_sensor_unique_id(rank)}"
+
+
+def window_sensor_legacy_unique_id(rank) -> str:
+    return f"kotiakku_goe_direct_{rank}_window_start"
+
+
 def default_charger_priority(slot) -> int:
     """go-e scale: 1 is highest. Slot 0 (charger 1) defaults to 1."""
     try:

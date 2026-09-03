@@ -446,6 +446,25 @@ def main():
         assert_eq(const.EID_MIN, "number.kotiakku_goe_direct_window_min_h", "window min hours")
         assert_eq(const.EID_MAX, "number.kotiakku_goe_direct_window_max_h", "window max hours")
         assert_eq(
+            const.window_sensor_entity_id("cheapest"),
+            "sensor.kotiakku_goe_direct_cheapest_window",
+            "cheapest window entity",
+        )
+        assert_eq(
+            const.window_sensor_unique_id("offsun"),
+            "kotiakku_goe_direct_offsun_window",
+            "offsun window unique_id",
+        )
+        assert_eq(
+            const.window_sensor_legacy_unique_id("cheapest"),
+            "kotiakku_goe_direct_cheapest_window_start",
+            "legacy window unique_id",
+        )
+        for rank in const.RANKS:
+            eid = const.window_sensor_entity_id(rank)
+            assert_true(eid.endswith("_window"), "window entity %s" % eid)
+            assert_true(not eid.endswith("_window_start"), "no _start suffix %s" % eid)
+        assert_eq(
             const.EID_CEILING,
             "number.kotiakku_goe_direct_electricity_price_ceiling",
             "electricity price ceiling",

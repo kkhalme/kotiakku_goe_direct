@@ -452,8 +452,8 @@ views:
           - entity: select.kotiakku_goe_direct_policy_222222
           - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
           - entity: binary_sensor.kotiakku_goe_direct_222222_full_power
-          - entity: sensor.kotiakku_goe_direct_cheapest_window_start
-          - entity: sensor.kotiakku_goe_direct_offsun_window_start
+          - entity: sensor.kotiakku_goe_direct_cheapest_window
+          - entity: sensor.kotiakku_goe_direct_offsun_window
           - entity: binary_sensor.kotiakku_goe_direct_solar_enough
           - entity: sensor.kotiakku_goe_direct_solar_kwh
           - entity: number.kotiakku_goe_direct_solar_enough_kwh

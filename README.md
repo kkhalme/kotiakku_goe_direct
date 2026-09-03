@@ -196,6 +196,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | Entity | Default | Role |
 | --- | --- | --- |
 | `number.kotiakku_goe_direct_window_min_h` / `kotiakku_goe_direct_window_max_h` | 2–5 h | Window duration bounds |
+| `sensor.kotiakku_goe_direct_<rank>_window` | current-or-next start | Planned window (cheapest / longest / earliest / offsun). State is the start timestamp; `end`, avg, and later windows are attributes. `binary_sensor.kotiakku_goe_direct_<rank>_window_active` is on while now is inside a window |
 | `number.kotiakku_goe_direct_electricity_price_ceiling` | 0.1 | 15-min electricity price cap (same unit as the price sensor) |
 | `text.kotiakku_goe_direct_electricity_price_sensor` | from setup | Electricity price sensor id |
 | `number.kotiakku_goe_direct_soc_on_pct` / `kotiakku_goe_direct_soc_hyst_pct` | 92 / 2 | Surplus SoC start (92%) and low-hold below 90% |
