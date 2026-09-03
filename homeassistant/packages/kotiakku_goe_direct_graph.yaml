@@ -1,0 +1,196 @@
+# Template sensors for the 48 h leftover / cheapest-window graph.
+#
+# Same series as the Finnish year-round plots: spot, cheapest window,
+# leftover kW, per-charger phase / amp / charge watts.
+#
+# Copy to <config>/packages/kotiakku_goe_direct_graph.yaml
+# configuration.yaml:
+#   homeassistant:
+#     packages: !include_dir_named packages
+#
+# Entity ids match the YAML import example in README (this house).
+# Kotiakku solar/house are kW; Controller Car-power mean is watts.
+# Unknown Controller mean → 0 W (do not keep last sample).
+# Do not abs leftover; a negative value is a deficit.
+#
+# go-e MQTT / HACS entity names vary. Each charger template tries psm,
+# then phase_switch_mode; nrg JSON array index 11, else a power sensor.
+
+template:
+  - sensor:
+      - name: go-e leftover kW
+        unique_id: kotiakku_goe_direct_leftover_kw
+        default_entity_id: sensor.kotiakku_goe_direct_leftover_kw
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-power
+        availability: "{{ states('sensor.kotiakku_solar_power_kw') | is_number and states('sensor.kotiakku_house_power_kw') | is_number }}"
+        state: >-
+          {% set solar = states('sensor.kotiakku_solar_power_kw') | float(0) | abs %}
+          {% set house = states('sensor.kotiakku_house_power_kw') | float(0) | abs %}
+          {% set ev_s = states('sensor.go_econtroller_913231_go_e_ev_power_5_min_mean') %}
+          {% set ev_kw = (ev_s | float(0) | abs / 1000) if ev_s | is_number else 0 %}
+          {{ (solar - house + ev_kw) | round(3) }}
+        attributes:
+          solar_kw: "{{ states('sensor.kotiakku_solar_power_kw') | float(0) | abs | round(3) }}"
+          house_kw: "{{ states('sensor.kotiakku_house_power_kw') | float(0) | abs | round(3) }}"
+          ev_w: >-
+            {% set ev_s = states('sensor.go_econtroller_913231_go_e_ev_power_5_min_mean') %}
+            {{ (ev_s | float(0) | abs | int) if ev_s | is_number else 0 }}
+
+      - name: go-e 407436 phases
+        unique_id: kotiakku_goe_direct_407436_phases
+        default_entity_id: sensor.kotiakku_goe_direct_407436_phases
+        unit_of_measurement: " "
+        state_class: measurement
+        icon: mdi:sine-wave
+        state: >-
+          {% set ns = namespace(v='') %}
+          {% for e in ['select.go_echarger_407436_psm', 'select.go_echarger_407436_phase_switch_mode', 'sensor.go_echarger_407436_psm'] %}
+            {% if ns.v == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+              {% set ns.v = states(e) %}
+            {% endif %}
+          {% endfor %}
+          {% set p = ns.v | lower %}
+          {% if p in ['force 3-phase', 'force_3', 'force3', '2', '3'] %}3
+          {% elif p in ['force 1-phase', 'force_1', 'force1', '1'] %}1
+          {% else %}0{% endif %}
+        attributes:
+          psm: >-
+            {% set ns = namespace(v='') %}
+            {% for e in ['select.go_echarger_407436_psm', 'select.go_echarger_407436_phase_switch_mode', 'sensor.go_echarger_407436_psm'] %}
+              {% if ns.v == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+                {% set ns.v = states(e) %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.v }}
+
+      - name: go-e 407427 phases
+        unique_id: kotiakku_goe_direct_407427_phases
+        default_entity_id: sensor.kotiakku_goe_direct_407427_phases
+        unit_of_measurement: " "
+        state_class: measurement
+        icon: mdi:sine-wave
+        state: >-
+          {% set ns = namespace(v='') %}
+          {% for e in ['select.go_echarger_407427_psm', 'select.go_echarger_407427_phase_switch_mode', 'sensor.go_echarger_407427_psm'] %}
+            {% if ns.v == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+              {% set ns.v = states(e) %}
+            {% endif %}
+          {% endfor %}
+          {% set p = ns.v | lower %}
+          {% if p in ['force 3-phase', 'force_3', 'force3', '2', '3'] %}3
+          {% elif p in ['force 1-phase', 'force_1', 'force1', '1'] %}1
+          {% else %}0{% endif %}
+        attributes:
+          psm: >-
+            {% set ns = namespace(v='') %}
+            {% for e in ['select.go_echarger_407427_psm', 'select.go_echarger_407427_phase_switch_mode', 'sensor.go_echarger_407427_psm'] %}
+              {% if ns.v == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+                {% set ns.v = states(e) %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.v }}
+
+      - name: go-e 407436 session amp
+        unique_id: kotiakku_goe_direct_407436_session_amp
+        default_entity_id: sensor.kotiakku_goe_direct_407436_session_amp
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        icon: mdi:current-ac
+        state: >-
+          {% set phases = states('sensor.kotiakku_goe_direct_407436_phases') | int(0) %}
+          {% set amp = states('number.go_echarger_407436_amp') | int(0) %}
+          {{ amp if phases in [1, 3] and amp >= 6 else 0 }}
+
+      - name: go-e 407427 session amp
+        unique_id: kotiakku_goe_direct_407427_session_amp
+        default_entity_id: sensor.kotiakku_goe_direct_407427_session_amp
+        unit_of_measurement: A
+        device_class: current
+        state_class: measurement
+        icon: mdi:current-ac
+        state: >-
+          {% set phases = states('sensor.kotiakku_goe_direct_407427_phases') | int(0) %}
+          {% set amp = states('number.go_echarger_407427_amp') | int(0) %}
+          {{ amp if phases in [1, 3] and amp >= 6 else 0 }}
+
+      - name: go-e 407436 commanded kW
+        unique_id: kotiakku_goe_direct_407436_commanded_kw
+        default_entity_id: sensor.kotiakku_goe_direct_407436_commanded_kw
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        icon: mdi:ev-station
+        state: >-
+          {% set amp = states('sensor.kotiakku_goe_direct_407436_session_amp') | int(0) %}
+          {% set phases = states('sensor.kotiakku_goe_direct_407436_phases') | int(0) %}
+          {{ (amp * 230 * phases / 1000) | round(3) }}
+
+      - name: go-e 407427 commanded kW
+        unique_id: kotiakku_goe_direct_407427_commanded_kw
+        default_entity_id: sensor.kotiakku_goe_direct_407427_commanded_kw
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        icon: mdi:ev-station
+        state: >-
+          {% set amp = states('sensor.kotiakku_goe_direct_407427_session_amp') | int(0) %}
+          {% set phases = states('sensor.kotiakku_goe_direct_407427_phases') | int(0) %}
+          {{ (amp * 230 * phases / 1000) | round(3) }}
+
+      - name: go-e 407436 charge kW
+        unique_id: kotiakku_goe_direct_407436_charge_kw
+        default_entity_id: sensor.kotiakku_goe_direct_407436_charge_kw
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        icon: mdi:lightning-bolt
+        state: >-
+          {% set ns = namespace(raw='') %}
+          {% for e in ['sensor.go_echarger_407436_nrg', 'sensor.go_echarger_407436_power', 'sensor.go_echarger_407436_p_all', 'sensor.go_echarger_407436_charging_power'] %}
+            {% if ns.raw == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+              {% set ns.raw = states(e) %}
+            {% endif %}
+          {% endfor %}
+          {% set raw = ns.raw %}
+          {% if raw[:1] in ['[', '{'] %}
+            {% set data = raw | from_json %}
+            {% set nrg = data.nrg if data is mapping else data %}
+            {{ ((nrg[11] | float(0) | abs / 1000) if nrg is sequence and nrg | length > 11 else 0) | round(3) }}
+          {% elif ',' in raw %}
+            {% set parts = raw.split(',') %}
+            {{ ((parts[11] | float(0) | abs / 1000) if parts | length > 11 else 0) | round(3) }}
+          {% else %}
+            {% set v = raw | float(0) | abs %}
+            {{ (v / 1000 if v > 50 else v) | round(3) }}
+          {% endif %}
+
+      - name: go-e 407427 charge kW
+        unique_id: kotiakku_goe_direct_407427_charge_kw
+        default_entity_id: sensor.kotiakku_goe_direct_407427_charge_kw
+        unit_of_measurement: kW
+        device_class: power
+        state_class: measurement
+        icon: mdi:lightning-bolt
+        state: >-
+          {% set ns = namespace(raw='') %}
+          {% for e in ['sensor.go_echarger_407427_nrg', 'sensor.go_echarger_407427_power', 'sensor.go_echarger_407427_p_all', 'sensor.go_echarger_407427_charging_power'] %}
+            {% if ns.raw == '' and states(e) not in ['unknown', 'unavailable', 'none', ''] %}
+              {% set ns.raw = states(e) %}
+            {% endif %}
+          {% endfor %}
+          {% set raw = ns.raw %}
+          {% if raw[:1] in ['[', '{'] %}
+            {% set data = raw | from_json %}
+            {% set nrg = data.nrg if data is mapping else data %}
+            {{ ((nrg[11] | float(0) | abs / 1000) if nrg is sequence and nrg | length > 11 else 0) | round(3) }}
+          {% elif ',' in raw %}
+            {% set parts = raw.split(',') %}
+            {{ ((parts[11] | float(0) | abs / 1000) if parts | length > 11 else 0) | round(3) }}
+          {% else %}
+            {% set v = raw | float(0) | abs %}
+            {{ (v / 1000 if v > 50 else v) | round(3) }}
+          {% endif %}

@@ -1,0 +1,460 @@
+# 48 h leftover / cheapest-window dashboard (same series as the sim plots).
+#
+# Needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card)
+# for the first view. Nordpool tomorrow lives in attributes, not recorder
+# history; built-in history-graph cannot draw it. The second view is the
+# no-HACS fallback (past 48 h only).
+#
+# Also copy packages/kotiakku_goe_direct_graph.yaml so leftover / phase / amp / kW
+# sensors exist and are recorded.
+#
+# configuration.yaml:
+#   lovelace:
+#     dashboards:
+#       kotiakku-goe-direct-48h:
+#         mode: yaml
+#         title: Kotiakku go-e Direct 48h
+#         filename: dashboards/kotiakku_goe_direct_48h.yaml
+#
+# Or paste `views:` into a UI dashboard's raw editor.
+
+title: Kotiakku go-e Direct 48h
+views:
+  - title: 48h
+    path: kotiakku-goe-direct-48h
+    type: panel
+    icon: mdi:ev-station
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >
+              **407436 Cheapest** · **407427 Force off** · leftover
+              `|solar| − |house| + |ev|` · cheapest window 2–5 h, ceiling 0.10.
+              Green on the price chart is `binary_sensor.kotiakku_goe_direct_cheapest_window_active`.
+              Supercheap uses `binary_sensor.kotiakku_goe_direct_offsun_window_active` (cheapest
+              hours with under 1 kWh expected solar) unless
+              `binary_sensor.kotiakku_goe_direct_solar_enough` is on.
+              Amp / commanded kW are 0 while `psm` is Auto (MQTT `amp` stays 32 after stop).
+              Dotted charge kW is what the car actually takes (`nrg`).
+
+          - type: glance
+            show_name: true
+            show_state: true
+            columns: 7
+            entities:
+              - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+                name: Spot
+              - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
+                name: Cheapest
+              - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
+                name: Off-sun
+              - entity: binary_sensor.kotiakku_goe_direct_solar_enough
+                name: Enough solar
+              - entity: sensor.kotiakku_goe_direct_solar_kwh
+                name: Forecast solar
+              - entity: sensor.kotiakku_goe_direct_leftover_kw
+                name: Leftover
+              - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
+                name: 407436 full power
+
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Spot €/kWh · green = cheapest · dark = off-sun
+              show_states: true
+              colorize_states: true
+            graph_span: 2d
+            span:
+              start: day
+            now:
+              show: true
+              label: now
+            update_interval: 1min
+            apex_config:
+              legend:
+                show: true
+              grid:
+                borderColor: "#4444"
+            yaxis:
+              - id: price
+                decimals: 3
+                apex_config:
+                  title:
+                    text: €/kWh
+            series:
+              - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
+                name: Cheapest 2–5 h
+                yaxis_id: price
+                type: area
+                curve: stepline
+                color: "#2ca02c"
+                opacity: 0.28
+                stroke_width: 0
+                extend_to: false
+                show:
+                  in_header: false
+                  legend_value: false
+                transform: "return x === 'on' ? 0.10 : 0;"
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
+                name: Off-sun 2–5 h
+                yaxis_id: price
+                type: area
+                curve: stepline
+                color: "#1b7a1b"
+                opacity: 0.35
+                stroke_width: 0
+                extend_to: false
+                show:
+                  in_header: false
+                  legend_value: false
+                transform: "return x === 'on' ? 0.10 : 0;"
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+                name: Spot
+                yaxis_id: price
+                type: line
+                curve: stepline
+                color: "#1f4e79"
+                stroke_width: 2
+                extend_to: false
+                show:
+                  extremas: true
+                data_generator: |
+                  const today = entity.attributes.raw_today || entity.attributes.today || [];
+                  const tomorrow = entity.attributes.raw_tomorrow || entity.attributes.tomorrow || [];
+                  return today.concat(tomorrow).map((entry) => {
+                    const start = new Date(entry.start).getTime();
+                    const value = entry.value ?? entry.price;
+                    return [start, value];
+                  });
+              - entity: number.kotiakku_goe_direct_electricity_price_ceiling
+                name: Price ceiling
+                yaxis_id: price
+                type: line
+                curve: straight
+                color: "#d62728"
+                stroke_width: 1
+                stroke_dash: 4
+                extend_to: end
+                show:
+                  in_header: false
+
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Surplus leftover (solar − house; EV cancels)
+              show_states: true
+              colorize_states: true
+            graph_span: 2d
+            span:
+              start: day
+            now:
+              show: true
+              label: now
+            update_interval: 1min
+            experimental:
+              color_threshold: true
+            yaxis:
+              - id: leftover
+                decimals: 2
+                apex_config:
+                  title:
+                    text: kW
+            series:
+              - entity: sensor.kotiakku_goe_direct_leftover_kw
+                name: Leftover
+                yaxis_id: leftover
+                type: area
+                curve: straight
+                color: "#ff7f0e"
+                stroke_width: 2
+                opacity: 0.35
+                extend_to: false
+                group_by:
+                  duration: 15min
+                  func: last
+                color_threshold:
+                  - value: -100
+                    color: "#8c564b"
+                  - value: 0
+                    color: "#ff7f0e"
+              - entity: number.kotiakku_goe_direct_surplus_start_w
+                name: Start 2 kW
+                yaxis_id: leftover
+                type: line
+                color: "#c47d00"
+                stroke_width: 1
+                stroke_dash: 3
+                extend_to: end
+                transform: "return Number(x) / 1000;"
+                show:
+                  in_header: false
+              - entity: number.kotiakku_goe_direct_phase3_min_w
+                name: 3-phase 4.14 kW
+                yaxis_id: leftover
+                type: line
+                color: "#6a3d9a"
+                stroke_width: 1
+                stroke_dash: 3
+                extend_to: end
+                transform: "return Number(x) / 1000;"
+                show:
+                  in_header: false
+
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: MQTT amp · phases 1 / 3 on the right
+              show_states: true
+              colorize_states: true
+            graph_span: 2d
+            span:
+              start: day
+            now:
+              show: true
+              label: now
+            update_interval: 1min
+            yaxis:
+              - id: amp
+                min: 0
+                max: 36
+                decimals: 0
+                apex_config:
+                  title:
+                    text: A
+              - id: phases
+                opposite: true
+                min: 0
+                max: 4
+                decimals: 0
+                apex_config:
+                  tickAmount: 4
+                  title:
+                    text: phases
+            series:
+              - entity: sensor.kotiakku_goe_direct_407436_session_amp
+                name: 407436 amp
+                yaxis_id: amp
+                type: line
+                curve: stepline
+                color: "#1f77b4"
+                stroke_width: 2
+                extend_to: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407427_session_amp
+                name: 407427 amp
+                yaxis_id: amp
+                type: line
+                curve: stepline
+                color: "#17becf"
+                stroke_width: 2
+                stroke_dash: 4
+                extend_to: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407436_phases
+                name: 407436 phases
+                yaxis_id: phases
+                type: line
+                curve: stepline
+                color: "#1f77b4"
+                opacity: 0.45
+                stroke_width: 1
+                extend_to: false
+                show:
+                  in_header: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407427_phases
+                name: 407427 phases
+                yaxis_id: phases
+                type: line
+                curve: stepline
+                color: "#17becf"
+                opacity: 0.45
+                stroke_width: 1
+                stroke_dash: 4
+                extend_to: false
+                show:
+                  in_header: false
+                group_by:
+                  duration: 15min
+                  func: last
+
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Charge kW · solid = commanded (amp×230×phases) · dotted = nrg take
+              show_states: true
+              colorize_states: true
+            graph_span: 2d
+            span:
+              start: day
+            now:
+              show: true
+              label: now
+            update_interval: 1min
+            yaxis:
+              - id: kw
+                decimals: 2
+                apex_config:
+                  title:
+                    text: kW
+            series:
+              - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
+                name: 407436 cheapest full-power
+                yaxis_id: kw
+                type: area
+                curve: stepline
+                color: "#2ca02c"
+                opacity: 0.18
+                stroke_width: 0
+                extend_to: false
+                transform: "return x === 'on' ? 22.08 : 0;"
+                show:
+                  in_header: false
+                  legend_value: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407436_commanded_kw
+                name: 407436 commanded
+                yaxis_id: kw
+                type: line
+                curve: stepline
+                color: "#1f77b4"
+                stroke_width: 2
+                extend_to: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407427_commanded_kw
+                name: 407427 commanded
+                yaxis_id: kw
+                type: line
+                curve: stepline
+                color: "#17becf"
+                stroke_width: 2
+                stroke_dash: 4
+                extend_to: false
+                group_by:
+                  duration: 15min
+                  func: last
+              - entity: sensor.kotiakku_goe_direct_407436_charge_kw
+                name: 407436 nrg
+                yaxis_id: kw
+                type: line
+                curve: stepline
+                color: "#1f77b4"
+                opacity: 0.7
+                stroke_width: 1
+                stroke_dash: 2
+                extend_to: false
+                show:
+                  in_header: true
+                group_by:
+                  duration: 15min
+                  func: avg
+              - entity: sensor.kotiakku_goe_direct_407427_charge_kw
+                name: 407427 nrg
+                yaxis_id: kw
+                type: line
+                curve: stepline
+                color: "#17becf"
+                opacity: 0.7
+                stroke_width: 1
+                stroke_dash: 2
+                extend_to: false
+                show:
+                  in_header: true
+                group_by:
+                  duration: 15min
+                  func: avg
+
+  - title: History
+    path: goe-history
+    icon: mdi:chart-timeline-variant
+    cards:
+      - type: markdown
+        content: >
+          Built-in cards only (no HACS). This is **past 48 h** recorder history.
+          It cannot draw Nordpool `raw_tomorrow` after 14:00 — use the 48h view
+          with apexcharts-card for that.
+
+      - type: history-graph
+        title: Spot + cheapest window
+        hours_to_show: 48
+        logarithmic: false
+        entities:
+          - entity: sensor.nordpool_kwh_fi_eur_3_10_0
+            name: Spot
+          - entity: number.kotiakku_goe_direct_electricity_price_ceiling
+            name: Price ceiling
+          - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
+            name: Cheapest
+          - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
+            name: Off-sun
+          - entity: binary_sensor.kotiakku_goe_direct_solar_enough
+            name: Enough solar
+          - entity: sensor.kotiakku_goe_direct_solar_kwh
+            name: Forecast solar
+
+      - type: history-graph
+        title: Leftover kW
+        hours_to_show: 48
+        entities:
+          - entity: sensor.kotiakku_goe_direct_leftover_kw
+            name: Leftover
+
+      - type: history-graph
+        title: Amp + phases
+        hours_to_show: 48
+        entities:
+          - entity: sensor.kotiakku_goe_direct_407436_session_amp
+            name: 407436 A
+          - entity: sensor.kotiakku_goe_direct_407427_session_amp
+            name: 407427 A
+          - entity: sensor.kotiakku_goe_direct_407436_phases
+            name: 407436 phases
+          - entity: sensor.kotiakku_goe_direct_407427_phases
+            name: 407427 phases
+
+      - type: history-graph
+        title: Charge kW
+        hours_to_show: 48
+        entities:
+          - entity: sensor.kotiakku_goe_direct_407436_commanded_kw
+            name: 407436 commanded
+          - entity: sensor.kotiakku_goe_direct_407427_commanded_kw
+            name: 407427 commanded
+          - entity: sensor.kotiakku_goe_direct_407436_charge_kw
+            name: 407436 nrg
+          - entity: sensor.kotiakku_goe_direct_407427_charge_kw
+            name: 407427 nrg
+
+      - type: entities
+        title: Policies + full power
+        entities:
+          - entity: select.kotiakku_goe_direct_policy_407436
+          - entity: select.kotiakku_goe_direct_policy_407427
+          - entity: binary_sensor.kotiakku_goe_direct_407436_full_power
+          - entity: binary_sensor.kotiakku_goe_direct_407427_full_power
+          - entity: sensor.kotiakku_goe_direct_cheapest_window_start
+          - entity: sensor.kotiakku_goe_direct_offsun_window_start
+          - entity: binary_sensor.kotiakku_goe_direct_solar_enough
+          - entity: sensor.kotiakku_goe_direct_solar_kwh
+          - entity: number.kotiakku_goe_direct_solar_enough_kwh
+          - entity: number.kotiakku_goe_direct_offsun_hour_kwh
+          - entity: number.kotiakku_goe_direct_window_min_h
+          - entity: number.kotiakku_goe_direct_window_max_h
+          - entity: number.kotiakku_goe_direct_electricity_price_ceiling

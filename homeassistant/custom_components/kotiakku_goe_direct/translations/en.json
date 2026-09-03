@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Kotiakku go-e Direct",
+        "description": "Direct lot/amp/psm/frc surplus plus per-charger charge windows. Controller is read-only. Do not also enable the YAML surplus automations.",
+        "data": {
+          "price_entity": "Spot-price sensor (raw_today / raw_tomorrow)"
+        }
+      },
+      "chargers": {
+        "title": "Chargers",
+        "description": "Pick any entity on each go-e charger device (car state is ideal). Serials are asked next — MQTT uses the serial, not the entity id.",
+        "data": {
+          "charger_1_entity": "Charger 1",
+          "charger_2_entity": "Charger 2",
+          "charger_3_entity": "Charger 3 (optional)",
+          "charger_4_entity": "Charger 4 (optional)"
+        }
+      },
+      "serials": {
+        "title": "Charger serials",
+        "description": "MQTT writes go-eCharger/<serial>/…/set. That is the device serial, not the Home Assistant entity id (entity ids can be renamed). Prefill: {serial_hint}",
+        "data": {
+          "charger_1_serial": "Charger 1 serial",
+          "charger_2_serial": "Charger 2 serial",
+          "charger_3_serial": "Charger 3 serial",
+          "charger_4_serial": "Charger 4 serial"
+        }
+      },
+      "house": {
+        "title": "Controller and Kotiakku",
+          "description": "Pick the sensors in this Home Assistant. Controller is the go-e Controller Car-power 5-min mean used to add EV watts back into leftover. Never written to. Kotiakku sensors are read-only. Off-sun / Supercheap uses remaining-today and tomorrow solar energy (kWh) to shape expected kWh per hour, not Kotiakku PV power.",
+        "data": {
+          "controller_entity": "Controller Car-power 5-min mean",
+          "controller_in_kw": "Controller sensor is in kW (off = watts)",
+          "soc_entity": "Kotiakku state of charge",
+          "solar_entity": "Kotiakku solar power",
+          "house_entity": "Kotiakku house power (includes EV)",
+          "kotiakku_in_kw": "Kotiakku power sensors are in kW",
+          "solar_remaining_entity": "Solar remaining today",
+          "solar_tomorrow_entity": "Solar tomorrow"
+        }
+      }
+    },
+    "error": {
+      "charger_required": "Pick at least one charger entity.",
+      "entity_required": "Each charger needs an entity.",
+      "serial_required": "Each charger needs its MQTT serial (go-eCharger/<serial>).",
+      "duplicate_serial": "Each charger serial must be unique."
+    },
+    "abort": {
+      "already_configured": "Kotiakku go-e Direct is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Kotiakku go-e Direct",
+        "description": "Chargers are entities plus a serial. MQTT publishes to go-eCharger/<serial>/set. Pick the Controller and Kotiakku sensors here; surplus numbers, ECO phase, window bounds, Enough solar, and policies live on the Kotiakku go-e Direct device.",
+        "data": {
+          "price_entity": "Spot-price sensor (raw_today / raw_tomorrow)",
+          "charger_1_entity": "Charger 1 entity",
+          "charger_1_serial": "Charger 1 serial (MQTT)",
+          "charger_2_entity": "Charger 2 entity",
+          "charger_2_serial": "Charger 2 serial (MQTT)",
+          "charger_3_entity": "Charger 3 entity (optional)",
+          "charger_3_serial": "Charger 3 serial",
+          "charger_4_entity": "Charger 4 entity (optional)",
+          "charger_4_serial": "Charger 4 serial",
+          "controller_entity": "Controller Car-power 5-min mean",
+          "controller_in_kw": "Controller sensor is in kW (off = watts)",
+          "soc_entity": "Kotiakku state of charge",
+          "solar_entity": "Kotiakku solar power",
+          "house_entity": "Kotiakku house power (includes EV)",
+          "kotiakku_in_kw": "Kotiakku power sensors are in kW",
+          "solar_remaining_entity": "Solar remaining today",
+          "solar_tomorrow_entity": "Solar tomorrow"
+        }
+      }
+    },
+    "error": {
+      "charger_required": "Pick at least one charger entity.",
+      "entity_required": "Each charger needs an entity.",
+      "serial_required": "Each charger needs its MQTT serial (go-eCharger/<serial>).",
+      "duplicate_serial": "Each charger serial must be unique."
+    }
+  }
+}
