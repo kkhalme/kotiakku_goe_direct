@@ -1,8 +1,8 @@
 # Kotiakku leftover + go-e smart charge
 
-Clean copy of the Home Assistant custom integration. Copy the folder into HA and run it. There are no YAML surplus/charge automations here.
-
 Home Assistant custom integration for two go-e Gemini chargers behind an Elisa Kotiakku (Huawei hybrid + LUNA). It writes charger `lot` / `amp` / `psm` / `frc` (`fup` stays false) from Kotiakku leftover solar, and can force full power on a charger during cheap charge windows.
+
+Deploy from this GitHub repo: [§3](#3-deploy-in-home-assistant) (HACS custom repository, manual copy, or git). There are no YAML surplus/charge automations here.
 
 This is the only drop. Do not also run the old YAML surplus or charge automations — they would fight this.
 
@@ -71,11 +71,63 @@ Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ star
 
 MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=0` first.
 
-## 3. Install
+## 3. Deploy in Home Assistant
 
-1. Copy [`homeassistant/custom_components/kotiakku_goe_direct`](homeassistant/custom_components/kotiakku_goe_direct) to `<config>/custom_components/kotiakku_goe_direct/`.
+This GitHub repo is the source. Home Assistant loads the integration from **`<config>/custom_components/kotiakku_goe_direct/`**. `<config>` is the directory that also holds `configuration.yaml` (HAOS: `/config`, or the Samba `config` share).
+
+Do **not** copy the whole repo into `custom_components/`. Only the inner `kotiakku_goe_direct` folder belongs there. Do not also run the old YAML surplus or charge automations.
+
+### Prerequisites
+
+- MQTT in Home Assistant can **publish** to `go-eCharger/<serial>/<key>/set`. This integration depends on the MQTT integration.
+- Chargers: MQTT writes allowed (`mcr=false`), load balancing on (`loe=true`), group total 50 A, charger max 32 A. Priorities stay in the go-e app (`lop`).
+- Sensors you will pick already exist: Nordpool (with `raw_today` / `raw_tomorrow`), go-e Controller Car-power 5-min mean, Kotiakku SoC / solar / house, charger entities. Optional: solar remaining-today and tomorrow kWh.
+- Controller serial `913231` is read-only. Never publish to `go-eController/…`.
+
+### A. HACS custom repository (recommended)
+
+The integration is not in the HACS default store. Add this repo as a custom repository, then download it.
+
+1. Install [HACS](https://www.hacs.xyz/docs/use/download/download/) if it is not already there, and finish **Settings → Devices & services → Add integration → HACS**.
+2. Open **HACS**.
+3. Top-right **⋮ → Custom repositories**.
+4. Repository: `https://github.com/kkhalme/kotiakku_goe_direct`
+5. Type: **Integration** → **Add**.
+6. Search **Kotiakku go-e Direct** → **Download**.
+7. **Restart Home Assistant**.
+8. **Settings → Devices & services → Add integration → Kotiakku go-e Direct**. Pick the price sensor, charger entities, each charger’s **MQTT serial** (pre-filled when a guess is confident), then Controller / Kotiakku sensors.
+
+Later updates: HACS shows a pending update; download it and restart.
+
+### B. Manual copy (no HACS)
+
+1. Copy [`custom_components/kotiakku_goe_direct`](custom_components/kotiakku_goe_direct) to `<config>/custom_components/kotiakku_goe_direct/`.
+   - HAOS: Samba `config` share, the File editor add-on, or the SSH add-on.
+   - Container / Core: the same path you mount as `/config`.
 2. Restart Home Assistant.
-3. **Settings → Devices & services → Add integration → Kotiakku go-e Direct**. Pick the price sensor, charger entities, each charger’s **MQTT serial** (pre-filled when a guess is confident), then Controller / Kotiakku sensors.
+3. Add the integration as in A.8.
+
+Replace the folder on updates, then restart. Do not leave a second copy under another name.
+
+### C. Git on the Home Assistant host (easy `git pull`)
+
+SSH into the machine that has `<config>`. Do **not** clone the repo *as* `custom_components/kotiakku_goe_direct` — that would nest the files wrong.
+
+```bash
+cd /config
+mkdir -p custom_components
+git clone https://github.com/kkhalme/kotiakku_goe_direct.git /config/kotiakku_goe_direct
+ln -sfn /config/kotiakku_goe_direct/custom_components/kotiakku_goe_direct \
+        /config/custom_components/kotiakku_goe_direct
+```
+
+Restart, then add the integration as in A.8. Update with `git -C /config/kotiakku_goe_direct pull` and restart.
+
+### After it is installed
+
+Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
+
+After it exists, **Configure** edits charger entities/serials and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. This is **one house’s** wiring, not names the integration requires:
 
@@ -99,9 +151,9 @@ kotiakku_goe_direct:
 
 The two **kW** checkboxes are not day-to-day knobs. They say whether the picked power sensors report kilowatts or watts so leftover math can convert to watts. Kotiakku solar/house default to kW; the Controller Car-power mean defaults to watts.
 
-After it exists, **Configure** edits charger entities/serials and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
+If **Kotiakku go-e Direct** is missing from Add integration, the files are not at `<config>/custom_components/kotiakku_goe_direct/manifest.json` (do not nest an extra `kotiakku_goe_direct` inside that folder). Restart once more. Check **Settings → System → Logs** for `kotiakku_goe_direct`. MQTT must already be configured.
 
-Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
+Optional 48 h leftover / price graphs: [§7](#7-graphs). HACS does not copy those YAML files.
 
 ## 4. Charger serials
 
@@ -194,19 +246,19 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 The 48 h Finnish year-round cases (spot, cheapest 2–5 h window, leftover, per-charger phase / amp / commanded kW) can be drawn. Default `--plot` is **Supercheap** (Off-sun hour 1 kWh, skip 22 kW when upcoming ≥ 40 kWh). Add `--cheapest` for the ungated Cheapest run:
 
 ```bash
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
+python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
+python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
 ```
 
-Live Home Assistant, same series: copy [`homeassistant/packages/kotiakku_goe_direct_graph.yaml`](homeassistant/packages/kotiakku_goe_direct_graph.yaml) into `<config>/packages/` (leftover, session amp, phases, commanded kW, `nrg` take). Add [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard. The first view uses [apexcharts-card](https://github.com/RomRider/apexcharts-card) so Nordpool `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) can share a 48 h-from-midnight axis with leftover and the chargers. Built-in `history-graph` is the second view; it can only show recorded past, not tomorrow's prices. These files are display-only — they do not write MQTT.
+Live Home Assistant, same series (HACS does **not** install these): copy [`homeassistant/packages/kotiakku_goe_direct_graph.yaml`](homeassistant/packages/kotiakku_goe_direct_graph.yaml) into `<config>/packages/` (leftover, session amp, phases, commanded kW, `nrg` take). Add [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard. The first view uses [apexcharts-card](https://github.com/RomRider/apexcharts-card) so Nordpool `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) can share a 48 h-from-midnight axis with leftover and the chargers. Built-in `history-graph` is the second view; it can only show recorded past, not tomorrow's prices. These files are display-only — they do not write MQTT.
 
 ## Tests
 
 ```bash
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_serial.py
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_planner.py
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_clock_roll.py
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_finland_year.py
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
-python3 homeassistant/custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
+python3 custom_components/kotiakku_goe_direct/tests/test_serial.py
+python3 custom_components/kotiakku_goe_direct/tests/test_planner.py
+python3 custom_components/kotiakku_goe_direct/tests/test_clock_roll.py
+python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py
+python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
+python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
 ```
