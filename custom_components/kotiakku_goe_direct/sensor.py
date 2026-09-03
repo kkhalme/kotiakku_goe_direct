@@ -8,28 +8,16 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DOMAIN,
     RANKS,
+    migrate_window_sensor_ids,
     rank_label,
     window_sensor_entity_id,
-    window_sensor_legacy_unique_id,
     window_sensor_unique_id,
 )
 from .device import HubEntity
 
 
 def _migrate_window_sensor_ids(hass):
-    """Keep history: old unique_id ended in ``_window_start``."""
-    registry = er.async_get(hass)
-    for rank in RANKS:
-        old_uid = window_sensor_legacy_unique_id(rank)
-        new_uid = window_sensor_unique_id(rank)
-        entity_id = registry.async_get_entity_id("sensor", DOMAIN, old_uid)
-        if entity_id is None:
-            continue
-        new_entity_id = window_sensor_entity_id(rank)
-        kwargs = {"new_unique_id": new_uid}
-        if entity_id == f"sensor.{old_uid}" and registry.async_get(new_entity_id) is None:
-            kwargs["new_entity_id"] = new_entity_id
-        registry.async_update_entity(entity_id, **kwargs)
+    migrate_window_sensor_ids(er.async_get(hass))
 
 
 async def async_setup_entry(hass, entry, async_add_entities):

@@ -464,6 +464,157 @@ def main():
             eid = const.window_sensor_entity_id(rank)
             assert_true(eid.endswith("_window"), "window entity %s" % eid)
             assert_true(not eid.endswith("_window_start"), "no _start suffix %s" % eid)
+
+    def test_window_sensor_registry_migration():
+        class Registry:
+            def __init__(self, rows):
+                self.by_uid = {}
+                self.by_eid = {}
+                for row in rows:
+                    self.by_uid[(row["domain"], row["platform"], row["unique_id"])] = row["entity_id"]
+                    self.by_eid[row["entity_id"]] = dict(row)
+                self.updates = []
+
+            def async_get_entity_id(self, domain, platform, unique_id):
+                return self.by_uid.get((domain, platform, unique_id))
+
+            def async_get(self, entity_id):
+                return self.by_eid.get(entity_id)
+
+            def async_update_entity(self, entity_id, **kwargs):
+                self.updates.append((entity_id, dict(kwargs)))
+                row = self.by_eid[entity_id]
+                old_uid = row["unique_id"]
+                new_uid = kwargs.get("new_unique_id", old_uid)
+                new_eid = kwargs.get("new_entity_id", entity_id)
+                del self.by_uid[(row["domain"], row["platform"], old_uid)]
+                del self.by_eid[entity_id]
+                row = dict(row)
+                row["unique_id"] = new_uid
+                row["entity_id"] = new_eid
+                self.by_uid[(row["domain"], row["platform"], new_uid)] = new_eid
+                self.by_eid[new_eid] = row
+
+        default = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_offsun_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_offsun_window_start",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(default)
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window"
+            ),
+            "sensor.kotiakku_goe_direct_cheapest_window",
+            "default cheapest entity_id moved",
+        )
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window_start"
+            ),
+            None,
+            "legacy cheapest unique_id gone",
+        )
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_offsun_window"
+            ),
+            "sensor.kotiakku_goe_direct_offsun_window",
+            "default offsun entity_id moved",
+        )
+        renamed = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_longest_window_start",
+                    "entity_id": "sensor.my_longest_plan",
+                }
+            ]
+        )
+        const.migrate_window_sensor_ids(renamed)
+        assert_eq(
+            renamed.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_longest_window"
+            ),
+            "sensor.my_longest_plan",
+            "custom entity_id kept",
+        )
+        taken = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_earliest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_earliest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "other",
+                    "entity_id": "sensor.kotiakku_goe_direct_earliest_window",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(taken)
+        assert_eq(
+            taken.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_earliest_window"
+            ),
+            "sensor.kotiakku_goe_direct_earliest_window_start",
+            "do not steal a taken entity_id",
+        )
+        fresh = Registry([])
+        const.migrate_window_sensor_ids(fresh)
+        assert_eq(fresh.updates, [], "new install has nothing to migrate")
+        already = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window",
+                }
+            ]
+        )
+        const.migrate_window_sensor_ids(already)
+        assert_eq(already.updates, [], "already migrated is a no-op")
+        collision = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(collision)
+        assert_eq(collision.updates, [], "do not overwrite an existing unique_id")
+        assert_eq(
+            collision.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window_start"
+            ),
+            "sensor.kotiakku_goe_direct_cheapest_window_start",
+            "legacy row left alone when new unique_id exists",
+        )
         assert_eq(
             const.EID_CEILING,
             "number.kotiakku_goe_direct_electricity_price_ceiling",
@@ -516,6 +667,7 @@ def main():
     case("persistable_does_not_invent_entities", test_persistable_does_not_invent_entities)
     case("persistable_legacy_solar_keys", test_persistable_legacy_solar_keys)
     case("psm_and_surplus_eids", test_psm_and_surplus_eids)
+    case("window_sensor_registry_migration", test_window_sensor_registry_migration)
 
     run()
 
