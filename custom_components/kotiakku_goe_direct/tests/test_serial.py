@@ -21,100 +21,100 @@ def main():
     case, run = case_runner()
 
     def test_extract_firmware_and_hacs():
-        assert_eq(extract("go-e_407436"), ["407436"], "firmware id")
-        assert_eq(extract("go-e_407436_car_state"), ["407436"], "unique_id")
-        assert_eq(extract("go-eCharger/407436/status"), ["407436"], "mqtt topic")
-        assert_eq(extract("407436-sensor-car_state-169"), ["407436"], "hacs unique_id")
+        assert_eq(extract("go-e_111111"), ["111111"], "firmware id")
+        assert_eq(extract("go-e_111111_car_state"), ["111111"], "unique_id")
+        assert_eq(extract("go-eCharger/111111/status"), ["111111"], "mqtt topic")
+        assert_eq(extract("111111-sensor-car_state-169"), ["111111"], "hacs unique_id")
         assert_eq(
-            extract("sensor.go_echarger_407436_car_state"),
-            ["407436"],
+            extract("sensor.go_echarger_111111_car_state"),
+            ["111111"],
             "entity_id",
         )
         assert_eq(
-            extract("sensor.go_econtroller_913231_go_e_ev_power_5_min_mean"),
+            extract("sensor.go_econtroller_000000_go_e_ev_power_5_min_mean"),
             [],
             "controller entity_id skipped",
         )
-        assert_eq(extract("go-eController/913231/status"), [], "controller topic")
-        assert_eq(extract("sensor.nordpool_kwh_fi_eur_3_10_0"), [], "nordpool")
+        assert_eq(extract("go-eController/000000/status"), [], "controller topic")
+        assert_eq(extract("sensor.nordpool_kwh_fi"), [], "nordpool")
 
     def test_guess_sse_and_identifiers():
-        serial, source = guess_serial(attributes={"sse": "407436"})
-        assert_eq(serial, "407436", "sse")
+        serial, source = guess_serial(attributes={"sse": "111111"})
+        assert_eq(serial, "111111", "sse")
         assert_eq(source, "attr:sse", "sse source")
         serial, source = guess_serial(
-            identifiers={("mqtt", "go-e_407436")},
+            identifiers={("mqtt", "go-e_111111")},
             entity_id="sensor.garage_left",
         )
-        assert_eq(serial, "407436", "identifier beats renamed entity")
+        assert_eq(serial, "111111", "identifier beats renamed entity")
         serial, source = guess_serial(
-            unique_id="go-e_407436_car_state",
-            entity_id="sensor.go_echarger_407427_car_state",
+            unique_id="go-e_111111_car_state",
+            entity_id="sensor.go_echarger_222222_car_state",
         )
-        assert_eq(serial, "407436", "unique_id beats entity_id")
+        assert_eq(serial, "111111", "unique_id beats entity_id")
         serial, source = guess_serial(
-            identifiers={("goecharger_mqtt", "407436")},
-            unique_id="go-e_407427_car",
+            identifiers={("goecharger_mqtt", "111111")},
+            unique_id="go-e_222222_car",
         )
-        assert_eq(serial, "407436", "identifier beats unique_id")
+        assert_eq(serial, "111111", "identifier beats unique_id")
 
     def test_high_conflict_is_empty():
         serial, source = guess_serial(
-            identifiers={("mqtt", "go-e_407436")},
-            attributes={"sse": "407427"},
+            identifiers={("mqtt", "go-e_111111")},
+            attributes={"sse": "222222"},
         )
         assert_eq(serial, None, "conflict")
         assert_eq(source, "", "no source on conflict")
 
     def test_controller_entity_not_guessed():
         serial, source = guess_serial(
-            entity_id="sensor.go_econtroller_913231_go_e_ev_power_5_min_mean"
+            entity_id="sensor.go_econtroller_000000_go_e_ev_power_5_min_mean"
         )
         assert_eq(serial, None, "no charger serial from controller")
 
     def test_mqtt_topic():
-        serial, source = guess_serial(mqtt_topics=["go-eCharger/407436/nrg"])
-        assert_eq(serial, "407436", "mqtt")
-        serial, source = guess_serial(mqtt_topics=["go-eController/913231/status"])
+        serial, source = guess_serial(mqtt_topics=["go-eCharger/111111/nrg"])
+        assert_eq(serial, "111111", "mqtt")
+        serial, source = guess_serial(mqtt_topics=["go-eController/000000/status"])
         assert_eq(serial, None, "controller mqtt skipped")
 
     def test_device_serial_number():
         serial, source = guess_serial(
-            serial_number="407436",
+            serial_number="111111",
             entity_id="sensor.renamed_car",
         )
-        assert_eq(serial, "407436", "device serial_number")
+        assert_eq(serial, "111111", "device serial_number")
 
     def test_car_state_detection():
-        assert_true(looks("sensor.go_echarger_407436_car_state"), "car_state suffix")
-        assert_true(looks("sensor.go_echarger_407436_car", "go-e_407436_car"), "car key")
-        assert_true(looks(None, "407436-sensor-car_state-1"), "hacs car_state")
-        assert_true(not looks("sensor.go_echarger_407436_nrg"), "nrg is not car")
-        assert_true(not looks("sensor.go_echarger_407436_amp"), "amp is not car")
+        assert_true(looks("sensor.go_echarger_111111_car_state"), "car_state suffix")
+        assert_true(looks("sensor.go_echarger_111111_car", "go-e_111111_car"), "car key")
+        assert_true(looks(None, "111111-sensor-car_state-1"), "hacs car_state")
+        assert_true(not looks("sensor.go_echarger_111111_nrg"), "nrg is not car")
+        assert_true(not looks("sensor.go_echarger_111111_amp"), "amp is not car")
 
     def test_lop_detection():
-        assert_true(looks_lop("number.go_echarger_407436_lop"), "lop suffix")
-        assert_true(looks_lop(None, "407436-number-lop-1"), "hacs lop")
-        assert_true(looks_lop("number.go_echarger_407436_load_priority"), "load_priority")
-        assert_true(not looks_lop("number.go_echarger_407436_lot"), "lot is not lop")
-        assert_true(not looks_lop("number.go_echarger_407436_loty"), "loty is not lop")
-        assert_true(not looks_lop("sensor.go_echarger_407436_car_state"), "car is not lop")
+        assert_true(looks_lop("number.go_echarger_111111_lop"), "lop suffix")
+        assert_true(looks_lop(None, "111111-number-lop-1"), "hacs lop")
+        assert_true(looks_lop("number.go_echarger_111111_load_priority"), "load_priority")
+        assert_true(not looks_lop("number.go_echarger_111111_lot"), "lot is not lop")
+        assert_true(not looks_lop("number.go_echarger_111111_loty"), "loty is not lop")
+        assert_true(not looks_lop("sensor.go_echarger_111111_car_state"), "car is not lop")
 
     def test_resolve_lop_entity():
         assert_eq(
-            resolve_lop("number.go_echarger_407436_lop", "407436"),
-            "number.go_echarger_407436_lop",
+            resolve_lop("number.go_echarger_111111_lop", "111111"),
+            "number.go_echarger_111111_lop",
             "already lop",
         )
         assert_eq(
             resolve_lop(
-                "sensor.go_echarger_407436_car_state",
-                "407436",
-                unique_id="go-e_407436_car",
+                "sensor.go_echarger_111111_car_state",
+                "111111",
+                unique_id="go-e_111111_car",
                 siblings=[
                     {
                         "entity_id": "number.garage_priority",
-                        "unique_id": "407436-number-lop-1",
+                        "unique_id": "111111-number-lop-1",
                     }
                 ],
             ),
@@ -122,38 +122,38 @@ def main():
             "sibling lop on same device",
         )
         assert_eq(
-            resolve_lop("sensor.go_echarger_407436_car_state", "407436"),
-            "number.go_echarger_407436_lop",
+            resolve_lop("sensor.go_echarger_111111_car_state", "111111"),
+            "number.go_echarger_111111_lop",
             "synthesized fallback",
         )
 
     def test_power_detection():
-        assert_true(looks_power("sensor.go_echarger_407436_nrg_11"), "nrg 11")
-        assert_true(looks_power("sensor.go_echarger_407436_charging_power"), "charging_power")
-        assert_true(looks_power("sensor.go_echarger_407436_power"), "power suffix")
-        assert_true(not looks_power("sensor.kotiakku_house_power_kw"), "house is not charger")
-        assert_true(not looks_power("sensor.go_echarger_407436_car_state"), "car is not power")
+        assert_true(looks_power("sensor.go_echarger_111111_nrg_11"), "nrg 11")
+        assert_true(looks_power("sensor.go_echarger_111111_charging_power"), "charging_power")
+        assert_true(looks_power("sensor.go_echarger_111111_power"), "power suffix")
+        assert_true(not looks_power("sensor.house_power"), "house is not charger")
+        assert_true(not looks_power("sensor.go_echarger_111111_car_state"), "car is not power")
         assert_eq(
-            resolve_power("sensor.go_echarger_407436_car_state", "407436"),
-            "sensor.go_echarger_407436_nrg",
+            resolve_power("sensor.go_echarger_111111_car_state", "111111"),
+            "sensor.go_echarger_111111_nrg",
             "synthesized nrg fallback",
         )
 
     def test_resolve_car_entity():
         assert_eq(
-            resolve("sensor.go_echarger_407436_car_state", "407436"),
-            "sensor.go_echarger_407436_car_state",
+            resolve("sensor.go_echarger_111111_car_state", "111111"),
+            "sensor.go_echarger_111111_car_state",
             "already car_state",
         )
         assert_eq(
             resolve(
-                "sensor.go_echarger_407436_nrg",
-                "407436",
-                unique_id="go-e_407436_nrg",
+                "sensor.go_echarger_111111_nrg",
+                "111111",
+                unique_id="go-e_111111_nrg",
                 siblings=[
                     {
                         "entity_id": "sensor.garage_car",
-                        "unique_id": "go-e_407436_car",
+                        "unique_id": "go-e_111111_car",
                     }
                 ],
             ),
@@ -161,25 +161,25 @@ def main():
             "sibling car on same device",
         )
         assert_eq(
-            resolve("sensor.something_nrg", "407436"),
-            "sensor.go_echarger_407436_car_state",
+            resolve("sensor.something_nrg", "111111"),
+            "sensor.go_echarger_111111_car_state",
             "synthesized fallback",
         )
 
     def test_serial_suggestion_keeps_saved():
-        prev = [{"entity": "sensor.left_car", "serial": "407436"}]
+        prev = [{"entity": "sensor.left_car", "serial": "111111"}]
         got, how = suggestion("sensor.left_car", prev, "407499", "unique_id")
-        assert_eq(got, "407436", "saved wins when entity unchanged")
+        assert_eq(got, "111111", "saved wins when entity unchanged")
         assert_eq(how, "saved", "saved")
-        got, how = suggestion("sensor.right_car", prev, "407427", "unique_id")
-        assert_eq(got, "407427", "new entity uses guess")
+        got, how = suggestion("sensor.right_car", prev, "222222", "unique_id")
+        assert_eq(got, "222222", "new entity uses guess")
         assert_eq(how, "unique_id", "guess source")
         got, how = suggestion("sensor.right_car", prev, None)
         assert_eq(got, "", "no guess")
 
     def test_valid_serial():
-        assert_eq(valid("407436"), "407436", "six digit")
-        assert_eq(valid(" 407436 "), "407436", "strip")
+        assert_eq(valid("111111"), "111111", "six digit")
+        assert_eq(valid(" 111111 "), "111111", "strip")
         assert_eq(valid("go-e"), None, "not a serial")
         assert_eq(valid(""), None, "empty")
 
@@ -218,25 +218,25 @@ def main():
         rows = config.normalize_chargers(
             [
                 {
-                    "entity": "sensor.go_echarger_407436_car_state",
-                    "serial": "407436",
+                    "entity": "sensor.go_echarger_111111_car_state",
+                    "serial": "111111",
                 },
                 {
-                    "entity": "sensor.go_echarger_407427_car_state",
-                    "serial": "407427",
+                    "entity": "sensor.go_echarger_222222_car_state",
+                    "serial": "222222",
                 },
             ]
         )
         assert_eq(len(rows), 2, "two chargers")
         form = config.form_from_chargers(rows)
-        assert_eq(form["charger_1_serial"], "407436", "form serial")
+        assert_eq(form["charger_1_serial"], "111111", "form serial")
         back = config.chargers_from_form(form)
-        assert_eq(back[0]["serial"], "407436", "round trip")
+        assert_eq(back[0]["serial"], "111111", "round trip")
         err = config.validate_charger_rows(back)
         assert_eq(err, None, "valid")
         assert_eq(
             config.validate_charger_rows(
-                [{"entity": "sensor.x", "serial": "407436"}] * 2
+                [{"entity": "sensor.x", "serial": "111111"}] * 2
             ),
             "duplicate_serial",
             "dup",
@@ -246,28 +246,28 @@ def main():
             "serial_required",
             "serial required",
         )
-        strings = config.normalize_chargers(["407436"])
-        assert_eq(strings[0]["serial"], "407436", "string serial")
+        strings = config.normalize_chargers(["111111"])
+        assert_eq(strings[0]["serial"], "111111", "string serial")
         assert_eq(
             strings[0]["entity"],
-            "sensor.go_echarger_407436_car_state",
+            "sensor.go_echarger_111111_car_state",
             "synthesized entity",
         )
         assert_eq(config.normalize_chargers(None), [], "no default chargers")
         assert_eq(config.normalize_chargers([]), [], "empty list")
         guessed = config.apply_serial_guesses(
             [
-                {"entity": "sensor.right", "serial": "407436"},
+                {"entity": "sensor.right", "serial": "111111"},
                 {"entity": "sensor.left", "serial": ""},
             ],
             [
-                {"entity": "sensor.left", "serial": "407436"},
-                {"entity": "sensor.right", "serial": "407427"},
+                {"entity": "sensor.left", "serial": "111111"},
+                {"entity": "sensor.right", "serial": "222222"},
             ],
-            {"sensor.right": "407427", "sensor.left": "407436"},
+            {"sensor.right": "222222", "sensor.left": "111111"},
         )
-        assert_eq(guessed[0]["serial"], "407427", "stale serial replaced")
-        assert_eq(guessed[1]["serial"], "407436", "empty serial filled")
+        assert_eq(guessed[0]["serial"], "222222", "stale serial replaced")
+        assert_eq(guessed[1]["serial"], "111111", "empty serial filled")
 
     def test_entry_config_options_overlay():
         class Entry:

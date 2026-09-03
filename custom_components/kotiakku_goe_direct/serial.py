@@ -10,9 +10,9 @@ that disagree → no prefill):
 
 1. State attributes ``sse`` / ``serial`` / ``serial_number``
 2. Device registry ``serial_number``
-3. Device identifiers (``go-e_407436``, ``(goecharger_mqtt, 407436)``, …)
+3. Device identifiers (``go-e_<serial>``, ``(goecharger_mqtt, <serial>)``, …)
 4. MQTT state/command topic ``go-eCharger/<serial>/…``
-5. Entity ``unique_id`` (``go-e_407436_car_state``, ``407436-sensor-car-…``)
+5. Entity ``unique_id`` (``go-e_<serial>_car_state``, ``<serial>-sensor-car-…``)
 6. Entity id / name, last resort — skipped for Controller entities
 
 Guesses are 6-digit (go-e). The form still asks the user to confirm.
