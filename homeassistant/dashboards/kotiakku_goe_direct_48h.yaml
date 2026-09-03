@@ -1,25 +1,23 @@
-# 48 h leftover / cheapest-window dashboard (same series as the sim plots).
+# Single dashboard tab: 48 h spot + planned charge windows.
 #
-# Needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card)
-# for the first view. Nordpool tomorrow lives in attributes, not recorder
-# history; built-in history-graph cannot draw it. The second view is the
-# no-HACS fallback (past 48 h only).
+# Needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
+# No template sensors, packages, or other helpers. Window bands and
+# tomorrow's Nordpool curve come from entity attributes / data_generator.
 #
-# Also copy packages/kotiakku_goe_direct_graph.yaml so leftover / phase / amp / kW
-# sensors exist and are recorded.
+# Paste this file as a YAML dashboard, or paste the `views:` list into a
+# UI dashboard's raw editor.
 #
-# configuration.yaml:
+# Edit only the leftover chart inputs (solar / house / Controller mean)
+# and charger serials 111111 / 222222. Spot uses
+# `text.kotiakku_goe_direct_electricity_price_sensor` from the integration.
+#
+# configuration.yaml (optional YAML dashboard):
 #   lovelace:
 #     dashboards:
 #       kotiakku-goe-direct-48h:
 #         mode: yaml
 #         title: Kotiakku go-e Direct 48h
 #         filename: dashboards/kotiakku_goe_direct_48h.yaml
-#
-# Or paste `views:` into a UI dashboard's raw editor.
-#
-# Placeholders: replace 111111 / 222222 with your charger MQTT serials,
-# and sensor.nordpool_kwh_fi with your Nordpool entity.
 
 title: Kotiakku go-e Direct 48h
 views:
@@ -32,22 +30,32 @@ views:
         cards:
           - type: markdown
             content: >
-              **Charger 1 Cheapest** · **Charger 2 Force off** · leftover
-              `|solar| − |house| + |ev|` · cheapest window 2–5 h, ceiling 0.10.
-              Green on the price chart is `binary_sensor.kotiakku_goe_direct_cheapest_window_active`.
-              Supercheap uses `binary_sensor.kotiakku_goe_direct_offsun_window_active` (cheapest
-              hours with under 1 kWh expected solar) unless
-              `binary_sensor.kotiakku_goe_direct_solar_enough` is on.
-              Amp / commanded kW are 0 while `psm` is Auto (MQTT `amp` stays 32 after stop).
-              Dotted charge kW is what the car actually takes (`nrg`).
+              {% set price = states('text.kotiakku_goe_direct_electricity_price_sensor') | trim %}
+              {% set solar = states('sensor.solar_power') %}
+              {% set house = states('sensor.house_power') %}
+              {% set ev_s = states('sensor.go_econtroller_ev_power_5_min_mean') %}
+              {% set solar_kw = solar | float(0) | abs %}
+              {% set house_kw = house | float(0) | abs %}
+              {% set ev_kw = (ev_s | float(0) | abs / 1000) if ev_s | is_number else 0 %}
+              {% set leftover = (solar_kw - house_kw + ev_kw) if (solar | is_number and house | is_number) else none %}
+              **48 h from local midnight** · green = Cheapest windows · dark green = Off-sun
+              (Supercheap) · red = price ceiling.
+
+              Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
+              · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
+              (`|solar| − |house| + |ev|`)
+              · cheapest {{ states('sensor.kotiakku_goe_direct_cheapest_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_cheapest_window', 'end') }}
+              · off-sun {{ states('sensor.kotiakku_goe_direct_offsun_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_offsun_window', 'end') }}.
+
+              Delete charger 2 cards/series if you only have one charger. Leftover
+              chart sources: `sensor.solar_power`, `sensor.house_power`,
+              `sensor.go_econtroller_ev_power_5_min_mean` (kW / kW / W).
 
           - type: glance
             show_name: true
             show_state: true
             columns: 7
             entities:
-              - entity: sensor.nordpool_kwh_fi
-                name: Spot
               - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
                 name: Cheapest
               - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
@@ -56,17 +64,18 @@ views:
                 name: Enough solar
               - entity: sensor.kotiakku_goe_direct_solar_kwh
                 name: Forecast solar
-              - entity: sensor.kotiakku_goe_direct_leftover_kw
-                name: Leftover
+              - entity: select.kotiakku_goe_direct_policy_111111
+                name: Charger 1
               - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
-                name: Charger 1 full power
+                name: 1 full power
+              - entity: select.kotiakku_goe_direct_policy_222222
+                name: Charger 2
 
           - type: custom:apexcharts-card
             header:
               show: true
-              title: Spot €/kWh · green = cheapest · dark = off-sun
-              show_states: true
-              colorize_states: true
+              title: Spot · cheapest / off-sun windows (today + tomorrow)
+              show_states: false
             graph_span: 2d
             span:
               start: day
@@ -86,39 +95,84 @@ views:
                   title:
                     text: €/kWh
             series:
-              - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
-                name: Cheapest 2–5 h
+              - entity: sensor.kotiakku_goe_direct_cheapest_window
+                name: Cheapest
                 yaxis_id: price
                 type: area
                 curve: stepline
                 color: "#2ca02c"
-                opacity: 0.28
+                opacity: 0.32
                 stroke_width: 0
                 extend_to: false
+                unit: €/kWh
                 show:
                   in_header: false
                   legend_value: false
-                transform: "return x === 'on' ? 0.10 : 0;"
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
-                name: Off-sun 2–5 h
+                data_generator: &window_band |
+                  function parseTs(v) {
+                    if (v == null || v === '') return NaN;
+                    if (typeof v === 'number' && Number.isFinite(v))
+                      return v < 1e12 ? v * 1000 : v;
+                    return Date.parse(v);
+                  }
+                  function windowsFrom(attrs) {
+                    const out = [];
+                    const list = attrs && attrs.windows;
+                    if (Array.isArray(list)) {
+                      for (const w of list) {
+                        if (!w) continue;
+                        const s = parseTs(w.start);
+                        const e = parseTs(w.end);
+                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
+                      }
+                    }
+                    if (!out.length && attrs) {
+                      for (let i = 1; i <= 16; i++) {
+                        const s = parseTs(attrs['window_' + i + '_start']);
+                        const e = parseTs(attrs['window_' + i + '_end']);
+                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
+                      }
+                    }
+                    return out;
+                  }
+                  function priceSlots() {
+                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const id = raw || 'sensor.nordpool_kwh_fi';
+                    const a = ((hass.states[id] || {}).attributes) || {};
+                    return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
+                  }
+                  function slotVal(entry) {
+                    const v = entry.value != null ? entry.value : entry.price;
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n : 0;
+                  }
+                  const windows = windowsFrom(entity.attributes || {});
+                  const pts = [];
+                  for (const entry of priceSlots()) {
+                    const t = parseTs(entry.start);
+                    if (!Number.isFinite(t)) continue;
+                    let on = false;
+                    for (const w of windows) {
+                      if (t >= w[0] && t < w[1]) { on = true; break; }
+                    }
+                    pts.push([t, on ? slotVal(entry) : 0]);
+                  }
+                  return pts;
+              - entity: sensor.kotiakku_goe_direct_offsun_window
+                name: Off-sun
                 yaxis_id: price
                 type: area
                 curve: stepline
                 color: "#1b7a1b"
-                opacity: 0.35
+                opacity: 0.38
                 stroke_width: 0
                 extend_to: false
+                unit: €/kWh
                 show:
                   in_header: false
                   legend_value: false
-                transform: "return x === 'on' ? 0.10 : 0;"
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.nordpool_kwh_fi
+                data_generator: *window_band
+              - entity: text.kotiakku_goe_direct_electricity_price_sensor
                 name: Spot
                 yaxis_id: price
                 type: line
@@ -126,34 +180,53 @@ views:
                 color: "#1f4e79"
                 stroke_width: 2
                 extend_to: false
+                unit: €/kWh
                 show:
+                  in_header: false
                   extremas: true
                 data_generator: |
-                  const today = entity.attributes.raw_today || entity.attributes.today || [];
-                  const tomorrow = entity.attributes.raw_tomorrow || entity.attributes.tomorrow || [];
-                  return today.concat(tomorrow).map((entry) => {
-                    const start = new Date(entry.start).getTime();
-                    const value = entry.value ?? entry.price;
-                    return [start, value];
-                  });
+                  function parseTs(v) {
+                    if (v == null || v === '') return NaN;
+                    if (typeof v === 'number' && Number.isFinite(v))
+                      return v < 1e12 ? v * 1000 : v;
+                    return Date.parse(v);
+                  }
+                  const raw = String((entity.state || '')).trim();
+                  const id = raw || 'sensor.nordpool_kwh_fi';
+                  const a = ((hass.states[id] || {}).attributes) || {};
+                  const slots = [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
+                  const pts = [];
+                  for (const entry of slots) {
+                    const t = parseTs(entry.start);
+                    if (!Number.isFinite(t)) continue;
+                    const v = entry.value != null ? entry.value : entry.price;
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) continue;
+                    pts.push([t, n]);
+                  }
+                  return pts;
               - entity: number.kotiakku_goe_direct_electricity_price_ceiling
-                name: Price ceiling
+                name: Ceiling
                 yaxis_id: price
                 type: line
                 curve: straight
                 color: "#d62728"
                 stroke_width: 1
                 stroke_dash: 4
-                extend_to: end
+                extend_to: false
+                unit: €/kWh
                 show:
                   in_header: false
+                data_generator: |
+                  const n = Number(entity.state);
+                  const v = Number.isFinite(n) ? n : 0.1;
+                  return [[start.getTime(), v], [end.getTime(), v]];
 
           - type: custom:apexcharts-card
             header:
               show: true
-              title: Surplus leftover (solar − house; EV cancels)
-              show_states: true
-              colorize_states: true
+              title: Leftover kW (past) · planned 22 kW (today + tomorrow)
+              show_states: false
             graph_span: 2d
             span:
               start: day
@@ -164,300 +237,224 @@ views:
             experimental:
               color_threshold: true
             yaxis:
-              - id: leftover
-                decimals: 2
-                apex_config:
-                  title:
-                    text: kW
-            series:
-              - entity: sensor.kotiakku_goe_direct_leftover_kw
-                name: Leftover
-                yaxis_id: leftover
-                type: area
-                curve: straight
-                color: "#ff7f0e"
-                stroke_width: 2
-                opacity: 0.35
-                extend_to: false
-                group_by:
-                  duration: 15min
-                  func: last
-                color_threshold:
-                  - value: -100
-                    color: "#8c564b"
-                  - value: 0
-                    color: "#ff7f0e"
-              - entity: number.kotiakku_goe_direct_surplus_start_w
-                name: Start 2 kW
-                yaxis_id: leftover
-                type: line
-                color: "#c47d00"
-                stroke_width: 1
-                stroke_dash: 3
-                extend_to: end
-                transform: "return Number(x) / 1000;"
-                show:
-                  in_header: false
-              - entity: number.kotiakku_goe_direct_phase3_min_w
-                name: 3-phase 4.14 kW
-                yaxis_id: leftover
-                type: line
-                color: "#6a3d9a"
-                stroke_width: 1
-                stroke_dash: 3
-                extend_to: end
-                transform: "return Number(x) / 1000;"
-                show:
-                  in_header: false
-
-          - type: custom:apexcharts-card
-            header:
-              show: true
-              title: MQTT amp · phases 1 / 3 on the right
-              show_states: true
-              colorize_states: true
-            graph_span: 2d
-            span:
-              start: day
-            now:
-              show: true
-              label: now
-            update_interval: 1min
-            yaxis:
-              - id: amp
-                min: 0
-                max: 36
-                decimals: 0
-                apex_config:
-                  title:
-                    text: A
-              - id: phases
-                opposite: true
-                min: 0
-                max: 4
-                decimals: 0
-                apex_config:
-                  tickAmount: 4
-                  title:
-                    text: phases
-            series:
-              - entity: sensor.kotiakku_goe_direct_111111_session_amp
-                name: Charger 1 amp
-                yaxis_id: amp
-                type: line
-                curve: stepline
-                color: "#1f77b4"
-                stroke_width: 2
-                extend_to: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_222222_session_amp
-                name: Charger 2 amp
-                yaxis_id: amp
-                type: line
-                curve: stepline
-                color: "#17becf"
-                stroke_width: 2
-                stroke_dash: 4
-                extend_to: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_111111_phases
-                name: Charger 1 phases
-                yaxis_id: phases
-                type: line
-                curve: stepline
-                color: "#1f77b4"
-                opacity: 0.45
-                stroke_width: 1
-                extend_to: false
-                show:
-                  in_header: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_222222_phases
-                name: Charger 2 phases
-                yaxis_id: phases
-                type: line
-                curve: stepline
-                color: "#17becf"
-                opacity: 0.45
-                stroke_width: 1
-                stroke_dash: 4
-                extend_to: false
-                show:
-                  in_header: false
-                group_by:
-                  duration: 15min
-                  func: last
-
-          - type: custom:apexcharts-card
-            header:
-              show: true
-              title: Charge kW · solid = commanded (amp×230×phases) · dotted = nrg take
-              show_states: true
-              colorize_states: true
-            graph_span: 2d
-            span:
-              start: day
-            now:
-              show: true
-              label: now
-            update_interval: 1min
-            yaxis:
               - id: kw
                 decimals: 2
                 apex_config:
                   title:
                     text: kW
             series:
-              - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
-                name: Charger 1 cheapest full-power
+              - entity: select.kotiakku_goe_direct_policy_111111
+                name: Charger 1 22 kW
                 yaxis_id: kw
                 type: area
                 curve: stepline
                 color: "#2ca02c"
-                opacity: 0.18
+                opacity: 0.22
                 stroke_width: 0
                 extend_to: false
-                transform: "return x === 'on' ? 22.08 : 0;"
+                unit: kW
                 show:
                   in_header: false
                   legend_value: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_111111_commanded_kw
-                name: Charger 1 commanded
+                data_generator: &full_power_kw |
+                  function parseTs(v) {
+                    if (v == null || v === '') return NaN;
+                    if (typeof v === 'number' && Number.isFinite(v))
+                      return v < 1e12 ? v * 1000 : v;
+                    return Date.parse(v);
+                  }
+                  function windowsFrom(attrs) {
+                    const out = [];
+                    const list = attrs && attrs.windows;
+                    if (Array.isArray(list)) {
+                      for (const w of list) {
+                        if (!w) continue;
+                        const s = parseTs(w.start);
+                        const e = parseTs(w.end);
+                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
+                      }
+                    }
+                    if (!out.length && attrs) {
+                      for (let i = 1; i <= 16; i++) {
+                        const s = parseTs(attrs['window_' + i + '_start']);
+                        const e = parseTs(attrs['window_' + i + '_end']);
+                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
+                      }
+                    }
+                    return out;
+                  }
+                  function priceSlots() {
+                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const id = raw || 'sensor.nordpool_kwh_fi';
+                    const a = ((hass.states[id] || {}).attributes) || {};
+                    return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
+                  }
+                  function inWin(windows, t) {
+                    for (const w of windows) {
+                      if (t >= w[0] && t < w[1]) return true;
+                    }
+                    return false;
+                  }
+                  const serial = entity.entity_id.split('_').pop();
+                  const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
+                  const enough = String(((hass.states['binary_sensor.kotiakku_goe_direct_solar_enough'] || {}).state) || '') === 'on';
+                  const rank = {
+                    Cheapest: 'cheapest',
+                    Supercheap: enough ? '' : 'offsun',
+                    Longest: 'longest',
+                    Earliest: 'earliest',
+                  }[policy] || '';
+                  const force = policy === 'Force on' || policy === 'Force on until unplug';
+                  const windows = rank
+                    ? windowsFrom(((hass.states['sensor.kotiakku_goe_direct_' + rank + '_window'] || {}).attributes) || {})
+                    : [];
+                  const full = 32 * 230 * 3 / 1000;
+                  const pts = [];
+                  for (const entry of priceSlots()) {
+                    const t = parseTs(entry.start);
+                    if (!Number.isFinite(t)) continue;
+                    let on = 0;
+                    if (force) on = full;
+                    else if (rank && inWin(windows, t)) on = full;
+                    pts.push([t, on]);
+                  }
+                  return pts;
+              - entity: select.kotiakku_goe_direct_policy_222222
+                name: Charger 2 22 kW
                 yaxis_id: kw
-                type: line
-                curve: stepline
-                color: "#1f77b4"
-                stroke_width: 2
-                extend_to: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_222222_commanded_kw
-                name: Charger 2 commanded
-                yaxis_id: kw
-                type: line
+                type: area
                 curve: stepline
                 color: "#17becf"
+                opacity: 0.22
+                stroke_width: 0
+                extend_to: false
+                unit: kW
+                show:
+                  in_header: false
+                  legend_value: false
+                data_generator: *full_power_kw
+              - entity: sensor.kotiakku_goe_direct_solar_kwh
+                name: Leftover
+                yaxis_id: kw
+                type: area
+                curve: straight
+                color: "#ff7f0e"
                 stroke_width: 2
-                stroke_dash: 4
+                opacity: 0.35
                 extend_to: false
-                group_by:
-                  duration: 15min
-                  func: last
-              - entity: sensor.kotiakku_goe_direct_111111_charge_kw
-                name: Charger 1 nrg
+                unit: kW
+                show:
+                  in_header: false
+                color_threshold:
+                  - value: -100
+                    color: "#8c564b"
+                  - value: 0
+                    color: "#ff7f0e"
+                data_generator: |
+                  const SOLAR = 'sensor.solar_power';
+                  const HOUSE = 'sensor.house_power';
+                  const EV = 'sensor.go_econtroller_ev_power_5_min_mean';
+                  const SOLAR_HOUSE_IN_KW = true;
+                  const EV_IN_KW = false;
+                  function toKw(v, inKw) {
+                    const n = Math.abs(Number(v));
+                    if (!Number.isFinite(n)) return 0;
+                    return inKw ? n : n / 1000;
+                  }
+                  function leftoverNow() {
+                    const s = hass.states[SOLAR];
+                    const h = hass.states[HOUSE];
+                    if (!s || !h) return null;
+                    if (!Number.isFinite(Number(s.state)) || !Number.isFinite(Number(h.state))) return null;
+                    const evs = hass.states[EV];
+                    const ev = evs && Number.isFinite(Number(evs.state)) ? toKw(evs.state, EV_IN_KW) : 0;
+                    return toKw(s.state, SOLAR_HOUSE_IN_KW) - toKw(h.state, SOLAR_HOUSE_IN_KW) + ev;
+                  }
+                  async function load(period) {
+                    const req = {
+                      type: 'recorder/statistics_during_period',
+                      start_time: start.toISOString(),
+                      end_time: new Date(Math.min(Date.now(), end.getTime())).toISOString(),
+                      statistic_ids: [SOLAR, HOUSE, EV],
+                      period: period,
+                    };
+                    try {
+                      return await hass.callWS(Object.assign({}, req, {types: ['mean']}));
+                    } catch (e) {
+                      try {
+                        return await hass.callWS(req);
+                      } catch (e2) {
+                        return {};
+                      }
+                    }
+                  }
+                  let stats = await load('5minute');
+                  let rows = (stats && stats[SOLAR]) || [];
+                  if (!rows.length) {
+                    stats = await load('hour');
+                    rows = (stats && stats[SOLAR]) || [];
+                  }
+                  const house = {};
+                  const ev = {};
+                  for (const r of (stats && stats[HOUSE]) || []) house[r.start] = r.mean;
+                  for (const r of (stats && stats[EV]) || []) ev[r.start] = r.mean;
+                  const pts = rows.map((r) => {
+                    const s = toKw(r.mean, SOLAR_HOUSE_IN_KW);
+                    const h = toKw(house[r.start], SOLAR_HOUSE_IN_KW);
+                    const e = toKw(ev[r.start], EV_IN_KW);
+                    return [new Date(r.start).getTime(), s - h + e];
+                  });
+                  const nowL = leftoverNow();
+                  if (nowL != null) pts.push([Date.now(), nowL]);
+                  return pts;
+              - entity: number.kotiakku_goe_direct_surplus_start_w
+                name: Start
                 yaxis_id: kw
                 type: line
-                curve: stepline
-                color: "#1f77b4"
-                opacity: 0.7
+                color: "#c47d00"
                 stroke_width: 1
-                stroke_dash: 2
+                stroke_dash: 3
                 extend_to: false
+                unit: kW
                 show:
-                  in_header: true
-                group_by:
-                  duration: 15min
-                  func: avg
-              - entity: sensor.kotiakku_goe_direct_222222_charge_kw
-                name: Charger 2 nrg
+                  in_header: false
+                data_generator: |
+                  const n = Number(entity.state);
+                  const v = Number.isFinite(n) ? n / 1000 : 2;
+                  return [[start.getTime(), v], [end.getTime(), v]];
+              - entity: number.kotiakku_goe_direct_phase3_min_w
+                name: 3-phase
                 yaxis_id: kw
                 type: line
-                curve: stepline
-                color: "#17becf"
-                opacity: 0.7
+                color: "#6a3d9a"
                 stroke_width: 1
-                stroke_dash: 2
+                stroke_dash: 3
                 extend_to: false
+                unit: kW
                 show:
-                  in_header: true
-                group_by:
-                  duration: 15min
-                  func: avg
+                  in_header: false
+                data_generator: |
+                  const n = Number(entity.state);
+                  const v = Number.isFinite(n) ? n / 1000 : 4.14;
+                  return [[start.getTime(), v], [end.getTime(), v]];
 
-  - title: History
-    path: goe-history
-    icon: mdi:chart-timeline-variant
-    cards:
-      - type: markdown
-        content: >
-          Built-in cards only (no HACS). This is **past 48 h** recorder history.
-          It cannot draw Nordpool `raw_tomorrow` after 14:00 — use the 48h view
-          with apexcharts-card for that.
-
-      - type: history-graph
-        title: Spot + cheapest window
-        hours_to_show: 48
-        logarithmic: false
-        entities:
-          - entity: sensor.nordpool_kwh_fi
-            name: Spot
-          - entity: number.kotiakku_goe_direct_electricity_price_ceiling
-            name: Price ceiling
-          - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
-            name: Cheapest
-          - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
-            name: Off-sun
-          - entity: binary_sensor.kotiakku_goe_direct_solar_enough
-            name: Enough solar
-          - entity: sensor.kotiakku_goe_direct_solar_kwh
-            name: Forecast solar
-
-      - type: history-graph
-        title: Leftover kW
-        hours_to_show: 48
-        entities:
-          - entity: sensor.kotiakku_goe_direct_leftover_kw
-            name: Leftover
-
-      - type: history-graph
-        title: Amp + phases
-        hours_to_show: 48
-        entities:
-          - entity: sensor.kotiakku_goe_direct_111111_session_amp
-            name: Charger 1 A
-          - entity: sensor.kotiakku_goe_direct_222222_session_amp
-            name: Charger 2 A
-          - entity: sensor.kotiakku_goe_direct_111111_phases
-            name: Charger 1 phases
-          - entity: sensor.kotiakku_goe_direct_222222_phases
-            name: Charger 2 phases
-
-      - type: history-graph
-        title: Charge kW
-        hours_to_show: 48
-        entities:
-          - entity: sensor.kotiakku_goe_direct_111111_commanded_kw
-            name: Charger 1 commanded
-          - entity: sensor.kotiakku_goe_direct_222222_commanded_kw
-            name: Charger 2 commanded
-          - entity: sensor.kotiakku_goe_direct_111111_charge_kw
-            name: Charger 1 nrg
-          - entity: sensor.kotiakku_goe_direct_222222_charge_kw
-            name: Charger 2 nrg
-
-      - type: entities
-        title: Policies + full power
-        entities:
-          - entity: select.kotiakku_goe_direct_policy_111111
-          - entity: select.kotiakku_goe_direct_policy_222222
-          - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
-          - entity: binary_sensor.kotiakku_goe_direct_222222_full_power
-          - entity: sensor.kotiakku_goe_direct_cheapest_window
-          - entity: sensor.kotiakku_goe_direct_offsun_window
-          - entity: binary_sensor.kotiakku_goe_direct_solar_enough
-          - entity: sensor.kotiakku_goe_direct_solar_kwh
-          - entity: number.kotiakku_goe_direct_solar_enough_kwh
-          - entity: number.kotiakku_goe_direct_offsun_hour_kwh
-          - entity: number.kotiakku_goe_direct_window_min_h
-          - entity: number.kotiakku_goe_direct_window_max_h
-          - entity: number.kotiakku_goe_direct_electricity_price_ceiling
+          - type: entities
+            title: Policies + windows
+            show_header_toggle: false
+            entities:
+              - entity: select.kotiakku_goe_direct_policy_111111
+              - entity: number.kotiakku_goe_direct_priority_111111
+              - entity: select.kotiakku_goe_direct_policy_222222
+              - entity: number.kotiakku_goe_direct_priority_222222
+              - entity: sensor.kotiakku_goe_direct_cheapest_window
+              - entity: sensor.kotiakku_goe_direct_offsun_window
+              - entity: sensor.kotiakku_goe_direct_longest_window
+              - entity: sensor.kotiakku_goe_direct_earliest_window
+              - entity: binary_sensor.kotiakku_goe_direct_solar_enough
+              - entity: sensor.kotiakku_goe_direct_solar_kwh
+              - entity: number.kotiakku_goe_direct_window_min_h
+              - entity: number.kotiakku_goe_direct_window_max_h
+              - entity: number.kotiakku_goe_direct_electricity_price_ceiling
+              - entity: number.kotiakku_goe_direct_solar_enough_kwh
+              - entity: number.kotiakku_goe_direct_offsun_hour_kwh
+              - entity: text.kotiakku_goe_direct_electricity_price_sensor
