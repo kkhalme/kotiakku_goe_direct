@@ -44,6 +44,9 @@ CONF_CONTROLLER_ENTITY = "controller_entity"
 CONF_SOLAR_REMAINING_ENTITY = "solar_remaining_entity"
 CONF_SOLAR_TOMORROW_ENTITY = "solar_tomorrow_entity"
 CONF_CHARGERS = "chargers"
+CONF_PRIORITY = "priority"
+PRIORITY_MIN = 1
+PRIORITY_MAX = 99
 CONF_SOC_ON = "soc_on"
 CONF_SOC_HYST = "soc_hyst"
 CONF_START_MIN_W = "start_min_w"
@@ -333,3 +336,20 @@ def psm_int(option):
     if option in PSM_TO_INT:
         return PSM_TO_INT[option]
     return DEFAULT_ECO_PSM
+
+
+def priority_entity_id(serial) -> str:
+    return f"number.kotiakku_goe_direct_priority_{serial}"
+
+
+def default_charger_priority(slot) -> int:
+    """go-e scale: 1 is highest. Slot 0 (charger 1) defaults to 1."""
+    try:
+        value = int(slot) + 1
+    except (TypeError, ValueError):
+        value = PRIORITY_MIN
+    if value < PRIORITY_MIN:
+        return PRIORITY_MIN
+    if value > PRIORITY_MAX:
+        return PRIORITY_MAX
+    return value

@@ -396,8 +396,9 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, eco_lot):
     Pure surplus: leftover ``lot`` is the group total when every surplus
     charger gets the same leftover. Differing per-charger ``amp`` shares
     may raise that ``lot`` so both caps fit. go-e load balancing and the
-    app's charger priorities (``lop``) still apply. HA does not write
-    ``lop``.
+    app's charger priorities (``lop``) still apply to the 50 A group.
+    HA leftover split uses HA priority numbers, not app ``lop``. HA does
+    not write ``lop``.
 
     Mixed (another charger is full-power): do not write leftover ``lot`` —
     last writer would shrink the shared group. Keep ``lot`` at eco_lot
@@ -443,7 +444,7 @@ def group_lot_for_allocations(
 
 
 def parse_lop(state):
-    """App load-balancing priority. 1 is highest, 99 is lowest. None if unknown."""
+    """Priority 1–99 (1 is highest). Same scale as go-e ``lop``. None if unknown."""
     if not sensor_usable(state):
         return None
     value = int(round(float(state)))
@@ -623,7 +624,7 @@ def surplus_allocation_plan(
 ):
     """Per-charger leftover watts plus next-car hold flags.
 
-    Equal or unknown ``lop``: every listed surplus charger gets the same
+    Equal or unknown HA priority: every listed surplus charger gets the same
     leftover (go-e splits). Unequal: the higher-priority plugged car is
     offered leftover watts for MQTT ``amp`` when it is taking all it can
     (at the published cap, leftover would allow more). Unused leftover
@@ -633,8 +634,9 @@ def surplus_allocation_plan(
     first still meets 6 A. Remainder at or below 500 W is a dead zone:
     do not start the next car. If the next car was already on and
     leftover then shrinks so the first would use it all, keep stealing
-    3 kW for the hold minutes unless ``split_expired``. HA does not write
-    ``lop``.
+    3 kW for the hold minutes unless ``split_expired``. ``lops`` is HA
+    charger priority, not app ``lop``. HA does not write ``lop``.
+    A single charger always gets the leftover.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]

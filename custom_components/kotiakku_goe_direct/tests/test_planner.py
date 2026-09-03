@@ -549,7 +549,7 @@ def main():
         assert_eq(
             setp(10, 1, 10, n_full=1, eco_lot=32),
             (32, 1, 10),
-            "mixed: keep eco_lot, leftover amp; lop splits the group",
+            "mixed: keep eco_lot, leftover amp; app lop splits the group",
         )
 
     case("supercheap_forecast", test_supercheap_forecast)
@@ -682,7 +682,7 @@ def main():
                 charger_max_w=22080,
             ),
             {a: 8000, b: 8000},
-            "equal lop: both get leftover, go-e shares",
+            "equal HA priority: both get leftover, go-e shares",
         )
         assert_eq(
             alloc(
@@ -694,7 +694,7 @@ def main():
                 charger_max_w=22080,
             ),
             {a: 8000, b: 8000},
-            "unknown lop: do not guess, same leftover on both",
+            "unknown priority: do not guess, same leftover on both",
         )
         assert_eq(
             alloc(
@@ -749,6 +749,11 @@ def main():
             ),
             [a, b],
             "targets follow allocation order",
+        )
+        assert_eq(
+            alloc([a], leftover_w=8000, **kwargs),
+            {a: 8000},
+            "single charger gets leftover",
         )
         lot, psm, amp = surplus.budget(12000, 6, 32, 50, 230, 4140)
         assert_eq((lot, psm, amp), (17, 2, 17), "group lot from 12 kW leftover")

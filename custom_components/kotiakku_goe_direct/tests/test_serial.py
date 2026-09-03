@@ -228,12 +228,66 @@ def main():
             ]
         )
         assert_eq(len(rows), 2, "two chargers")
+        assert_eq(rows[0]["priority"], 1, "default first priority")
+        assert_eq(rows[1]["priority"], 2, "default second priority")
         form = config.form_from_chargers(rows)
         assert_eq(form["charger_1_serial"], "111111", "form serial")
+        assert_eq(form["charger_1_priority"], 1, "form priority")
         back = config.chargers_from_form(form)
         assert_eq(back[0]["serial"], "111111", "round trip")
+        assert_eq(back[0]["priority"], 1, "priority round trip")
         err = config.validate_charger_rows(back)
         assert_eq(err, None, "valid")
+        one = config.normalize_chargers(
+            [
+                {
+                    "entity": "sensor.go_echarger_111111_car_state",
+                    "serial": "111111",
+                }
+            ]
+        )
+        assert_eq(len(one), 1, "one charger")
+        assert_eq(config.validate_charger_rows(one), None, "one charger valid")
+        custom = config.normalize_chargers(
+            [
+                {
+                    "entity": "sensor.go_echarger_111111_car_state",
+                    "serial": "111111",
+                    "priority": 50,
+                },
+                {
+                    "entity": "sensor.go_echarger_222222_car_state",
+                    "serial": "222222",
+                    "priority": 10,
+                },
+            ]
+        )
+        assert_eq(custom[0]["priority"], 50, "custom first")
+        assert_eq(custom[1]["priority"], 10, "custom second")
+        assert_eq(config.clamp_priority(0, 1), 1, "clamp low")
+        assert_eq(config.clamp_priority(100, 1), 99, "clamp high")
+        assert_eq(const.default_charger_priority(0), 1, "slot 0")
+        assert_eq(const.default_charger_priority(3), 4, "slot 3")
+        assert_eq(
+            const.priority_entity_id("111111"),
+            "number.kotiakku_goe_direct_priority_111111",
+            "priority entity",
+        )
+        skipped = config.chargers_from_form(
+            {
+                "charger_1_entity": "sensor.go_echarger_111111_car_state",
+                "charger_1_serial": "111111",
+                "charger_1_priority": 1,
+                "charger_2_entity": "",
+                "charger_2_serial": "",
+                "charger_3_entity": "sensor.go_echarger_222222_car_state",
+                "charger_3_serial": "222222",
+                "charger_3_priority": 7,
+            }
+        )
+        assert_eq(len(skipped), 2, "empty slot 2 omitted")
+        assert_eq(skipped[1]["serial"], "222222", "slot 3 kept")
+        assert_eq(skipped[1]["priority"], 7, "slot 3 priority")
         assert_eq(
             config.validate_charger_rows(
                 [{"entity": "sensor.x", "serial": "111111"}] * 2
@@ -248,26 +302,41 @@ def main():
         )
         strings = config.normalize_chargers(["111111"])
         assert_eq(strings[0]["serial"], "111111", "string serial")
+        assert_eq(strings[0]["priority"], 1, "string serial default priority")
         assert_eq(
             strings[0]["entity"],
             "sensor.go_echarger_111111_car_state",
             "synthesized entity",
         )
+        stored = config.persistable(
+            {
+                "chargers": [
+                    {
+                        "entity": "sensor.go_echarger_111111_car_state",
+                        "serial": "111111",
+                        "priority": 8,
+                    }
+                ]
+            }
+        )
+        assert_eq(stored["chargers"][0]["priority"], 8, "persist priority")
         assert_eq(config.normalize_chargers(None), [], "no default chargers")
         assert_eq(config.normalize_chargers([]), [], "empty list")
         guessed = config.apply_serial_guesses(
             [
-                {"entity": "sensor.right", "serial": "111111"},
-                {"entity": "sensor.left", "serial": ""},
+                {"entity": "sensor.right", "serial": "111111", "priority": 20},
+                {"entity": "sensor.left", "serial": "", "priority": 30},
             ],
             [
-                {"entity": "sensor.left", "serial": "111111"},
-                {"entity": "sensor.right", "serial": "222222"},
+                {"entity": "sensor.left", "serial": "111111", "priority": 1},
+                {"entity": "sensor.right", "serial": "222222", "priority": 2},
             ],
             {"sensor.right": "222222", "sensor.left": "111111"},
         )
         assert_eq(guessed[0]["serial"], "222222", "stale serial replaced")
         assert_eq(guessed[1]["serial"], "111111", "empty serial filled")
+        assert_eq(guessed[0]["priority"], 20, "priority kept on guess")
+        assert_eq(guessed[1]["priority"], 30, "priority kept on fill")
 
     def test_entry_config_options_overlay():
         class Entry:

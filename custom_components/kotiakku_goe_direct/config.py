@@ -10,6 +10,7 @@ from .const import (
     CONF_HOUSE_ENTITY,
     CONF_KOTIAKKU_IN_KW,
     CONF_PRICE_ENTITY,
+    CONF_PRIORITY,
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENTITY,
     CONF_SOLAR_ENOUGH_KWH,
@@ -18,7 +19,10 @@ from .const import (
     DEFAULT_CONTROLLER_IN_KW,
     DEFAULT_ECO_PSM,
     DEFAULT_KOTIAKKU_IN_KW,
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     SURPLUS_NUMBER_SPECS,
+    default_charger_priority,
 )
 from .serial import valid_serial
 
@@ -80,11 +84,34 @@ def as_int(value, default: int) -> int:
         return int(default)
 
 
+def clamp_priority(value, default: int) -> int:
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        parsed = int(default)
+    if parsed < PRIORITY_MIN:
+        return PRIORITY_MIN
+    if parsed > PRIORITY_MAX:
+        return PRIORITY_MAX
+    return parsed
+
+
+def _row_priority(item, slot: int) -> int:
+    default = default_charger_priority(slot)
+    if not isinstance(item, dict):
+        return default
+    raw = item.get(CONF_PRIORITY)
+    if raw is None or raw == "":
+        return default
+    return clamp_priority(raw, default)
+
+
 def normalize_chargers(raw) -> list[dict]:
     if not raw:
         return []
     out = []
     for item in raw:
+        slot = len(out)
         if isinstance(item, str):
             serial = valid_serial(item)
             if not serial:
@@ -93,6 +120,7 @@ def normalize_chargers(raw) -> list[dict]:
                 {
                     "entity": f"sensor.go_echarger_{serial}_car_state",
                     "serial": serial,
+                    CONF_PRIORITY: default_charger_priority(slot),
                 }
             )
             continue
@@ -102,7 +130,13 @@ def normalize_chargers(raw) -> list[dict]:
         serial = str(item.get("serial") or "").strip()
         if not entity and not serial:
             continue
-        out.append({"entity": entity, "serial": serial})
+        out.append(
+            {
+                "entity": entity,
+                "serial": serial,
+                CONF_PRIORITY: _row_priority(item, slot),
+            }
+        )
     return out
 
 
@@ -115,6 +149,9 @@ def form_from_chargers(rows) -> dict:
     for index, row in enumerate(rows[:CHARGER_SLOTS], 1):
         values[f"charger_{index}_entity"] = row.get("entity") or ""
         values[f"charger_{index}_serial"] = row.get("serial") or ""
+        values[f"charger_{index}_priority"] = clamp_priority(
+            row.get(CONF_PRIORITY), default_charger_priority(index - 1)
+        )
     return values
 
 
@@ -125,7 +162,16 @@ def chargers_from_form(user_input) -> list[dict]:
         serial = str(user_input.get(f"charger_{index}_serial") or "").strip()
         if not entity and not serial:
             continue
-        rows.append({"entity": entity, "serial": serial})
+        rows.append(
+            {
+                "entity": entity,
+                "serial": serial,
+                CONF_PRIORITY: clamp_priority(
+                    user_input.get(f"charger_{index}_priority"),
+                    default_charger_priority(index - 1),
+                ),
+            }
+        )
     return rows
 
 
@@ -179,12 +225,23 @@ def apply_serial_guesses(rows, previous_rows, guesses_by_entity) -> list[dict]:
             serial = guessed
         elif entity and entity != old_entity and serial == old_serial and guessed:
             serial = guessed
-        out.append({"entity": entity, "serial": serial})
+        out.append(
+            {
+                "entity": entity,
+                "serial": serial,
+                CONF_PRIORITY: clamp_priority(
+                    row.get(CONF_PRIORITY), default_charger_priority(index)
+                ),
+            }
+        )
     return out
 
 
 def validate_charger_rows(rows) -> str | None:
-    """Return an error key, or None if the rows can be stored."""
+    """Return an error key, or None if the rows can be stored.
+
+    Charger 1 is required. Chargers 2–4 may be omitted.
+    """
     if not rows:
         return "charger_required"
     seen = []

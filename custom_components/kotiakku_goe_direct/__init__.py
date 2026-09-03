@@ -11,7 +11,10 @@ from .config import persistable, BOOL_KEYS, INT_KEYS, STRING_KEYS
 from .const import (
     CONF_CHARGERS,
     CONF_PRICE_ENTITY,
+    CONF_PRIORITY,
     DOMAIN,
+    PRIORITY_MAX,
+    PRIORITY_MIN,
 )
 from .controller import KotiakkuGoeDirectController
 from .serial import SERIAL_RE
@@ -28,6 +31,9 @@ _CHARGER_SCHEMA = vol.Schema(
     {
         vol.Required("entity"): cv.entity_id,
         vol.Required("serial"): vol.All(cv.string, vol.Match(SERIAL_RE)),
+        vol.Optional(CONF_PRIORITY): vol.All(
+            vol.Coerce(int), vol.Range(min=PRIORITY_MIN, max=PRIORITY_MAX)
+        ),
     }
 )
 
