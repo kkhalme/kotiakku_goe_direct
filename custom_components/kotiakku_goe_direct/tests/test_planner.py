@@ -306,6 +306,8 @@ def main():
         assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
         on, seen = step(True, True, False)
         assert_eq((on, seen), (True, True), "plug arms seen")
+        on, seen = step(True, True, True)
+        assert_eq((on, seen), (True, True), "still plugged (charging or complete) keeps override")
         on, seen = step(True, False, True)
         assert_eq((on, seen), (False, False), "unplug after seen clears override")
         on, seen = step(False, True, True)
@@ -548,7 +550,9 @@ def main():
             "1-phase at cap leftover allows 3-phase: want leftover",
         )
         assert_true(car_plugged("Charging"), "charging")
-        assert_true(not car_plugged("Idle"), "idle")
+        assert_true(car_plugged("Complete"), "full battery is still plugged")
+        assert_true(car_plugged("4"), "car state 4 is still plugged")
+        assert_true(not car_plugged("Idle"), "idle is unplugged")
         assert_true(not car_plugged("1"), "unplugged")
         usable = surplus.sensor_usable
         assert_true(usable("96.2"), "soc number")

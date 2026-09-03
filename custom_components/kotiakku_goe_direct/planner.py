@@ -503,8 +503,9 @@ def until_unplug_step(override, plugged, seen):
     """Advance the until-unplug override. Returns ``(override, seen)``.
 
     ``seen`` means the car was plugged while the override was on. The
-    override clears when that car goes Idle after that. Turning the
-    override off clears ``seen``. Policy is not changed.
+    override clears when that car **unplugs** after that, not when the
+    battery is full (Complete is still plugged). Turning the override
+    off clears ``seen``. Policy is not changed.
     """
     if not override:
         return False, False

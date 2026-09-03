@@ -15,7 +15,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class UntilUnplugSwitch(SwitchEntity, RestoreEntity):
-    """Temporary 22 kW override. Turns off when that charger’s car is Idle."""
+    """Temporary 22 kW override. Turns off when that charger’s car unplugs."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False

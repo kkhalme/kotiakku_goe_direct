@@ -127,7 +127,7 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
 
-After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
+After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
 
@@ -186,7 +186,7 @@ Per charger, `select.kotiakku_goe_direct_policy_<serial>`:
 - **Force on** — that charger full power now
 - **Force off** — surplus / ECO only
 
-`switch.kotiakku_goe_direct_until_unplug_<serial>` is a one-shot override, not a policy. Turn it on to force that charger to 22 kW regardless of the select. It turns itself off when **that** car is Idle (unplugged). The policy select is unchanged, so Cheapest / Force off / … continues afterwards. Turn the switch off to cancel. Surplus skips that serial while the switch is on. A previous install that had **Force on until unplug** selected is migrated onto this switch and the stored previous policy.
+`switch.kotiakku_goe_direct_until_unplug_<serial>` is a one-shot override, not a policy. Turn it on to force that charger to 22 kW regardless of the select. It stays on through charging and a full battery (go-e Complete). It turns itself off when **that** car **unplugs**. The policy select is unchanged, so Cheapest / Force off / … continues afterwards. Turn the switch off to cancel. Surplus skips that serial while the switch is on. A previous install that had **Force on until unplug** selected is migrated onto this switch and the stored previous policy.
 
 While a charger’s full-power policy **or until-unplug switch** is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
 
@@ -197,7 +197,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | Entity | Default | Role |
 | --- | --- | --- |
 | `select.kotiakku_goe_direct_policy_<serial>` | Force off | Cheapest / Supercheap / Longest / Earliest / Force on / Force off |
-| `switch.kotiakku_goe_direct_until_unplug_<serial>` | off | One-shot 22 kW override. Auto-off when that car is Idle. Does not change the policy select |
+| `switch.kotiakku_goe_direct_until_unplug_<serial>` | off | 22 kW until that car unplugs. Stays on at a full battery (Complete). Does not change the policy select |
 | `sensor.kotiakku_goe_direct_<rank>_window` | current-or-next start | Planned window (cheapest / longest / earliest / offsun). State is the start timestamp; `end`, avg, and later windows are attributes. `binary_sensor.kotiakku_goe_direct_<rank>_window_active` is on while now is inside a window |
 | `number.kotiakku_goe_direct_electricity_price_ceiling` | 0.1 | 15-min electricity price cap (same unit as the price sensor) |
 | `text.kotiakku_goe_direct_electricity_price_sensor` | from setup | Electricity price sensor id |
@@ -247,7 +247,7 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Supercheap, forecast unknown or unset | Same as Cheapest (nothing excluded, not enough solar) |
 | Cheapest, tomorrow 70 kWh | Still full-power. Forecast only shapes Off-sun / Supercheap |
 | Force off during a price window | That charger’s full-power binary stays off; surplus may still write that charger |
-| Until-unplug switch on | That charger 22 kW until **its** car is Idle, then the switch turns off. Policy select stays put |
+| Until-unplug switch on | That charger 22 kW until **its** car unplugs. Full battery (Complete) keeps it on. Policy select stays put |
 
 ## 7. Graphs
 
