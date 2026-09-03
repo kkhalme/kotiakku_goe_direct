@@ -440,6 +440,13 @@ def main():
         assert_eq(config.persistable({})["solar_enough_kwh"], 40, "persist enough solar")
         assert_eq(config.persistable({})["offsun_hour_kwh"], 1, "persist offsun hour")
         assert_eq("Supercheap" in const.POLICIES, True, "Supercheap is a policy")
+        assert_eq("Force on until unplug" in const.POLICIES, False, "until unplug is not a policy")
+        assert_eq(const.POLICY_UNTIL_UNPLUG, "Force on until unplug", "legacy until unplug name")
+        assert_eq(
+            const.until_unplug_entity_id("111111"),
+            "switch.kotiakku_goe_direct_until_unplug_111111",
+            "until unplug switch",
+        )
         assert_eq(const.DOMAIN, "kotiakku_goe_direct", "domain")
         assert_eq(const.HUB_ID, "kotiakku_goe_direct", "hub id")
         assert_eq(const.STORAGE_KEY, "kotiakku_goe_direct", "storage key")

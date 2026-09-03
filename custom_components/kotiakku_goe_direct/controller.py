@@ -65,7 +65,6 @@ from .const import (
     EID_OFFSUN_HOUR_KWH,
     EID_VOLTS,
     POLICY_FORCE_OFF,
-    POLICY_UNTIL_UNPLUG,
     POLICIES,
     RANKS,
     STORAGE_KEY,
@@ -75,9 +74,16 @@ from .const import (
     default_charger_priority,
     priority_entity_id,
     psm_int,
+    until_unplug_entity_id,
 )
 from .hass_hints import collect_serial_hints, device_entities
-from .planner import charger_full_power as policy_full_power, now_in_windows, plan, prev_from_result
+from .planner import (
+    charger_full_power as policy_full_power,
+    now_in_windows,
+    plan,
+    prev_from_result,
+    until_unplug_step,
+)
 from .serial import resolve_car_entity_id, resolve_power_entity_id
 from .surplus import (
     UNUSABLE_STATES,
@@ -170,6 +176,8 @@ class KotiakkuGoeDirectController:
         self.split_session = False
         self.restore = {s: POLICY_FORCE_OFF for s in self.chargers}
         self.seen = {s: False for s in self.chargers}
+        self.legacy_until_unplug = set()
+        self._charging = False
         self._last_policy = {s: POLICY_FORCE_OFF for s in self.chargers}
         self._charge_session = {s: False for s in self.chargers}
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -220,6 +228,12 @@ class KotiakkuGoeDirectController:
 
     def policy_entity(self, serial):
         return f"select.kotiakku_goe_direct_policy_{serial}"
+
+    def until_unplug_entity(self, serial):
+        return until_unplug_entity_id(serial)
+
+    def until_unplug(self, serial):
+        return str(self._state(self.until_unplug_entity(serial)) or "").lower() == "on"
 
     def car_entity(self, serial):
         return self._car_entities.get(serial) or f"sensor.go_echarger_{serial}_car_state"
@@ -319,6 +333,7 @@ class KotiakkuGoeDirectController:
             self.window_results,
             self._now_ts(),
             enough_solar=self.enough_solar,
+            until_unplug=self.until_unplug(serial),
         )
 
     def any_charger_full_power(self):
@@ -390,6 +405,7 @@ class KotiakkuGoeDirectController:
         track.extend(WINDOW_EIDS)
         track.extend(SURPLUS_EIDS)
         track.extend(self.policy_entity(s) for s in self.chargers)
+        track.extend(self.until_unplug_entity(s) for s in self.chargers)
         track.extend(self.car_entity(s) for s in self.chargers)
         track.extend(self.priority_entity(s) for s in self.chargers)
         track.extend(self.power_entity(s) for s in self.chargers)
@@ -407,6 +423,7 @@ class KotiakkuGoeDirectController:
         )
         self._retarget_price()
         await self._subscribe_nrg_mqtt()
+        await self._migrate_legacy_until_unplug()
         await self.async_plan()
         self._schedule_surplus()
         await self.async_charge()
@@ -478,6 +495,10 @@ class KotiakkuGoeDirectController:
             serial = entity.rsplit("_", 1)[-1]
             await self._on_policy(serial, event)
             return
+        if entity and entity.startswith("switch.kotiakku_goe_direct_until_unplug_"):
+            await self.async_charge()
+            self._schedule_surplus()
+            return
         if entity in self._car_ids:
             await self.async_charge()
             self._schedule_surplus()
@@ -494,18 +515,6 @@ class KotiakkuGoeDirectController:
         await self.async_charge()
 
     async def _on_policy(self, serial, event):
-        new = self.policy(serial)
-        old = None
-        old_state = event.data.get("old_state")
-        if old_state is not None:
-            old = old_state.state
-        if (
-            new == POLICY_UNTIL_UNPLUG
-            and old in POLICIES
-            and old != POLICY_UNTIL_UNPLUG
-        ):
-            self.restore[serial] = old
-            await self._save()
         await self.async_charge()
         self._schedule_surplus()
 
@@ -859,30 +868,36 @@ class KotiakkuGoeDirectController:
         await self._save()
 
     async def async_charge(self):
+        if self._charging:
+            return
+        self._charging = True
+        try:
+            await self._async_charge()
+        finally:
+            self._charging = False
+
+    async def _async_charge(self):
         changed = False
         for serial in self.chargers:
-            policy_now = self.policy(serial)
             car_state = self._state(self.car_entity(serial))
             plugged = car_plugged(car_state)
-            if policy_now == POLICY_UNTIL_UNPLUG and plugged:
-                if not self.seen.get(serial):
-                    self.seen[serial] = True
-                    changed = True
-            elif policy_now != POLICY_UNTIL_UNPLUG and self.seen.get(serial):
-                self.seen[serial] = False
+            override = self.until_unplug(serial)
+            new_on, new_seen = until_unplug_step(
+                override, plugged, self.seen.get(serial)
+            )
+            if bool(self.seen.get(serial)) != new_seen:
                 changed = True
-            if (
-                policy_now == POLICY_UNTIL_UNPLUG
-                and self.seen.get(serial)
-                and not plugged
-            ):
-                restore_to = self.restore.get(serial, POLICY_FORCE_OFF)
-                if restore_to not in POLICIES or restore_to == POLICY_UNTIL_UNPLUG:
-                    restore_to = POLICY_FORCE_OFF
-                await self._select_policy(serial, restore_to)
-                self.seen[serial] = False
+            self.seen[serial] = new_seen
+            if new_on != override:
+                await self._turn_until_unplug(serial, new_on)
                 changed = True
-            want_on = self.charger_full_power(serial)
+            want_on = policy_full_power(
+                self.policy(serial),
+                self.window_results,
+                self._now_ts(),
+                enough_solar=self.enough_solar,
+                until_unplug=new_on,
+            )
             want_off = self._charge_session.get(serial) and not want_on
             if want_on:
                 if not self._charge_session.get(serial):
@@ -898,6 +913,27 @@ class KotiakkuGoeDirectController:
         if changed:
             await self._save()
             self.notify()
+
+    async def _migrate_legacy_until_unplug(self):
+        for serial in list(self.legacy_until_unplug):
+            restore_to = self.restore.get(serial, POLICY_FORCE_OFF)
+            if restore_to not in POLICIES:
+                restore_to = POLICY_FORCE_OFF
+            if self.policy(serial) != restore_to:
+                await self._select_policy(serial, restore_to)
+            if not self.until_unplug(serial):
+                await self._turn_until_unplug(serial, True)
+
+    async def _turn_until_unplug(self, serial, on):
+        entity = self.until_unplug_entity(serial)
+        if self.hass.states.get(entity) is None:
+            return
+        await self.hass.services.async_call(
+            "switch",
+            "turn_on" if on else "turn_off",
+            {"entity_id": entity},
+            blocking=True,
+        )
 
     async def _select_policy(self, serial, option):
         entity = self.hass.states.get(self.policy_entity(serial))

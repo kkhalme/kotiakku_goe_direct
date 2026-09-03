@@ -490,7 +490,7 @@ def now_in_windows(windows, now_ts):
 
 
 # Keep names here so tests can load this module without the package.
-_FORCE_ON = ("Force on", "Force on until unplug")
+_FORCE_ON = ("Force on",)
 _POLICY_RANK = {
     "Cheapest": "cheapest",
     "Supercheap": "offsun",
@@ -499,8 +499,26 @@ _POLICY_RANK = {
 }
 
 
-def charger_full_power(policy, results, now_ts, *, enough_solar=False):
-    """Whether this policy wants 22 kW right now. Pure; no Home Assistant."""
+def until_unplug_step(override, plugged, seen):
+    """Advance the until-unplug override. Returns ``(override, seen)``.
+
+    ``seen`` means the car was plugged while the override was on. The
+    override clears when that car goes Idle after that. Turning the
+    override off clears ``seen``. Policy is not changed.
+    """
+    if not override:
+        return False, False
+    if plugged:
+        return True, True
+    if seen:
+        return False, False
+    return True, False
+
+
+def charger_full_power(policy, results, now_ts, *, enough_solar=False, until_unplug=False):
+    """Whether this charger wants 22 kW right now. Pure; no Home Assistant."""
+    if until_unplug:
+        return True
     if policy in _FORCE_ON:
         return True
     rank = _POLICY_RANK.get(policy)
