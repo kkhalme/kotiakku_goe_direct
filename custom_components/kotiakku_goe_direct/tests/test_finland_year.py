@@ -263,8 +263,13 @@ def simulate(
     name,
     policy=POLICY_CHEAPEST,
     solar_enough_kwh=SOLAR_ENOUGH_KWH,
+    n_chargers=2,
+    priorities=None,
 ):
-    """48 h house: charger A ranked policy, charger B Force off (surplus).
+    """48 h house: charger A ranked policy, optional charger B Force off.
+
+    Leftover split uses HA charger priority (default A=1, B=2; 1 is highest),
+    same as ``surplus_allocation_plan``. Charger B may be omitted.
 
     Supercheap uses Off-sun windows (cheapest 2–5 h after dropping hours
     with at least 1 kWh of expected solar), then skips 22 kW when
@@ -276,14 +281,19 @@ def simulate(
     clock = Clock(start, tz=HEL)
     results = {}
     session = False
+    split_hold = False
     last_psm = {SERIAL_CHEAP: None, SERIAL_SURPLUS: None}
     floor = Hold()
+    split = Hold()
     phase = {SERIAL_CHEAP: Hold(), SERIAL_SURPLUS: Hold()}
     ticks = []
     _times, ts_list, prefix = solar_prefix(start, hours, cloud)
+    if priorities is None:
+        priorities = {SERIAL_CHEAP: 1, SERIAL_SURPLUS: 2}
+    n_chargers = 1 if int(n_chargers) <= 1 else 2
 
-    def surplus_cmd(serial, leftover, use_floor, now):
-        source_w = 0 if use_floor else leftover
+    def surplus_cmd(serial, watts_i, use_floor, now):
+        source_w = 0 if use_floor else int(watts_i)
         last = last_psm[serial]
         wanted = surplus.budget(source_w, 6, 32, 50, VOLTS, 4140)[1]
         expired = phase[serial].tick(now, last in (1, 2) and last != wanted)
@@ -302,6 +312,11 @@ def simulate(
         cmd["wanted_psm"] = pub["wanted_psm"]
         cmd["arm_phase"] = pub["arm_phase"]
         return cmd
+
+    def idle_surplus(serial, now):
+        phase[serial].tick(now, False)
+        last_psm[serial] = None
+        return off_cmd()
 
     for now in iter_ticks(start, hours):
         clock.set(now)
@@ -336,26 +351,54 @@ def simulate(
             )
         write_on = dec["write_on"]
         use_floor = dec["use_floor_budget"]
+        a = off_cmd()
+        b = off_cmd()
         if cheap_full:
             a = commanded(FULL_PSM, FULL_AMP)
             a["wanted_psm"] = FULL_PSM
             a["arm_phase"] = False
             last_psm[SERIAL_CHEAP] = None
             phase[SERIAL_CHEAP].tick(now, False)
-        elif write_on:
-            a = surplus_cmd(SERIAL_CHEAP, leftover, use_floor, now)
-        else:
-            phase[SERIAL_CHEAP].tick(now, False)
-            last_psm[SERIAL_CHEAP] = None
-            a = off_cmd()
+        surplus_serials = []
         if write_on:
-            b = surplus_cmd(SERIAL_SURPLUS, leftover, use_floor, now)
             session = True
+            if not cheap_full:
+                surplus_serials.append(SERIAL_CHEAP)
+            if n_chargers >= 2:
+                surplus_serials.append(SERIAL_SURPLUS)
         else:
-            phase[SERIAL_SURPLUS].tick(now, False)
-            last_psm[SERIAL_SURPLUS] = None
+            if not cheap_full:
+                a = idle_surplus(SERIAL_CHEAP, now)
+            if n_chargers >= 2:
+                b = idle_surplus(SERIAL_SURPLUS, now)
             session = False
-            b = off_cmd()
+            split_hold = False
+            split.tick(now, False)
+        if surplus_serials:
+            session = True
+            alloc_w = leftover
+            if use_floor:
+                alloc_w = max(alloc_w, 6 * VOLTS)
+            split_expired = split.tick(now, split_hold)
+            plan = surplus.surplus_allocation_plan(
+                surplus_serials,
+                lops={serial: priorities.get(serial) for serial in surplus_serials},
+                plugged={serial: True for serial in surplus_serials},
+                leftover_w=alloc_w,
+                split_min_w=3000,
+                charger_max_w=32 * VOLTS * 3,
+                split_hold=split_hold,
+                split_expired=split_expired,
+            )
+            split_hold = len(plan["allocations"]) >= 2
+            cmds = {SERIAL_CHEAP: a, SERIAL_SURPLUS: b}
+            for serial in surplus_serials:
+                watts_i = plan["allocations"].get(serial)
+                if watts_i is None:
+                    cmds[serial] = idle_surplus(serial, now)
+                else:
+                    cmds[serial] = surplus_cmd(serial, watts_i, use_floor, now)
+            a, b = cmds[SERIAL_CHEAP], cmds[SERIAL_SURPLUS]
         cheap = results["cheapest"]
         ticks.append(
             {
@@ -393,6 +436,8 @@ def simulate(
         "days": days,
         "policy": policy,
         "solar_enough_kwh": solar_enough_kwh,
+        "n_chargers": n_chargers,
+        "priorities": dict(priorities),
     }
 
 
@@ -478,6 +523,10 @@ def sim_stats(sim):
     upcoming = [t["upcoming_kwh"] for t in ticks]
     return {
         "surplus_h": hours_where(ticks, lambda t: t["write_on"]),
+        "a_surplus_h": hours_where(
+            ticks, lambda t: t["write_on"] and not t["cheap_full"] and t["a"]["amp"]
+        ),
+        "b_surplus_h": hours_where(ticks, lambda t: t["b"]["amp"]),
         "full_h": hours_where(ticks, lambda t: t["cheap_full"]),
         "window_h": hours_where(ticks, lambda t: t["cheap_window"]),
         "skip_h": hours_where(ticks, lambda t: t["cheap_window"] and not t["cheap_full"]),
@@ -493,13 +542,15 @@ def summary(sim):
     stats = sim_stats(sim)
     reasons = [t["reason"] for t in at_hour(sim["ticks"], PUBLISH_H)]
     print(
-        "  %s [%s]: leftover_max=%s W surplus=%.1fh 3p=%.1fh window=%.1fh "
-        "full=%.1fh skip=%.1fh enough=%.1fh upcoming=%.1f–%.1f kWh 14:00=%s"
+        "  %s [%s]: leftover_max=%s W surplus=%.1fh A_surplus=%.1fh B_surplus=%.1fh "
+        "3p=%.1fh window=%.1fh full=%.1fh skip=%.1fh enough=%.1fh upcoming=%.1f–%.1f kWh 14:00=%s"
         % (
             sim["name"],
             sim.get("policy", POLICY_CHEAPEST),
             stats["leftover_max"],
             stats["surplus_h"],
+            stats["a_surplus_h"],
+            stats["b_surplus_h"],
             stats["p3_h"],
             stats["window_h"],
             stats["full_h"],
@@ -656,8 +707,15 @@ def plot_sim(sim, path):
         gridspec_kw={"height_ratios": [1.15, 1.05, 1.0, 1.0, 1.15]},
     )
     fig.suptitle(
-        "%s  —  48 h Helsinki  ·  charger A %s  ·  charger B Force off"
-        % (sim["name"], policy),
+        "%s  —  48 h Helsinki  ·  charger A %s pri %s  ·  charger B %s"
+        % (
+            sim["name"],
+            policy,
+            (sim.get("priorities") or {}).get(SERIAL_CHEAP, 1),
+            "omitted"
+            if sim.get("n_chargers", 2) < 2
+            else "Force off pri %s" % (sim.get("priorities") or {}).get(SERIAL_SURPLUS, 2),
+        ),
         fontsize=13,
         fontweight="bold",
     )
@@ -748,7 +806,9 @@ def plot_sim(sim, path):
     ax.plot(times, a_w, color="#1f77b4", lw=1.5, label="charger A kW (amp×230×phases)")
     ax.plot(times, b_w, color="#17becf", lw=1.5, ls="--", label="charger B kW")
     ax.set_ylabel("kW")
-    ax.set_title("Commanded charge wattage  ·  go-e may still split a shared group lot")
+    ax.set_title(
+        "Commanded charge wattage  ·  HA leftover priority (1 highest); B omitted when one charger"
+    )
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %H:%M", tz=HEL))
@@ -798,7 +858,7 @@ def plot_compare(sims, path):
     ax.set_xticklabels(names, rotation=20, ha="right")
     ax.legend(loc="upper right", fontsize=8, ncol=2)
     ax.grid(True, axis="y", alpha=0.3)
-    ax.set_title("charger A Supercheap  ·  charger B Force off still follows leftover")
+    ax.set_title("charger A Supercheap pri 1  ·  charger B Force off pri 2 waits unless A is 22 kW")
 
     ax = axes[1]
     ax.bar(x - 0.2, upcoming, 0.4, color="#9467bd", label="Max upcoming kWh (max remaining, tomorrow)")
@@ -827,7 +887,8 @@ def write_report(sims, out_dir):
         "hours with at least 1 kWh of expected solar (remaining-today / tomorrow shaped",
         "by elevation). Supercheap then skips 22 kW whenever",
         "`max(remaining-today, tomorrow) ≥ 40 kWh`, including Off-sun night hours.",
-        "Surplus leftover can still write both chargers.",
+        "Surplus leftover uses HA leftover priority (A=1, B=2 by default). B is Force off",
+        "and only gets leftover when A is full-power, or when priorities are equal.",
         "",
         "| Case | Upcoming kWh | Enough solar | Cheapest window | Supercheap 22 kW | Skip | Surplus | Leftover max |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -1117,6 +1178,48 @@ def main():
                     not any(start <= ts < end for start, end in blocked),
                     "no 22 kW in a ≥ 1 kWh hour @ %s" % t["now"],
                 )
+
+    def test_leftover_priority_and_optional_charger():
+        unequal = sim_from_spec("midsummer-clear", policy=POLICY_SUPERCHEAP)
+        summary(unequal)
+        both = [t for t in unequal["ticks"] if t["write_on"] and not t["cheap_full"]]
+        assert_true(both, "midsummer Supercheap has leftover surplus")
+        offered = [t for t in both if t["leftover"] >= 6 * 230]
+        assert_true(offered, "leftover reaches 6 A")
+        for t in offered:
+            assert_true(t["a"]["amp"], "priority 1 A is offered leftover @ %s" % t["now"])
+            assert_eq(
+                t["b"]["amp"],
+                None,
+                "priority 2 B waits while A takes leftover @ %s" % t["now"],
+            )
+        equal = sim_from_spec(
+            "midsummer-clear",
+            policy=POLICY_SUPERCHEAP,
+            priorities={SERIAL_CHEAP: 50, SERIAL_SURPLUS: 50},
+        )
+        both_eq = [t for t in equal["ticks"] if t["write_on"] and not t["cheap_full"]]
+        assert_true(both_eq, "equal priority still surplus")
+        for t in both_eq:
+            if t["leftover"] < 6 * 230:
+                continue
+            assert_true(t["a"]["amp"], "equal priority A shares leftover @ %s" % t["now"])
+            assert_true(t["b"]["amp"], "equal priority B shares leftover @ %s" % t["now"])
+        one = sim_from_spec("midsummer-clear", policy=POLICY_SUPERCHEAP, n_chargers=1)
+        surplus_one = False
+        for t in one["ticks"]:
+            assert_eq(t["b"]["w"], 0, "no charger B @ %s" % t["now"])
+            if t["write_on"] and not t["cheap_full"] and t["leftover"] >= 6 * 230:
+                surplus_one = True
+                assert_true(t["a"]["amp"], "single charger gets leftover @ %s" % t["now"])
+        assert_true(surplus_one, "single charger still runs surplus")
+        mixed = sim_from_spec("midsummer-clear")
+        overlap = [t for t in mixed["ticks"] if t["cheap_full"] and t["write_on"]]
+        assert_true(overlap, "B surplus while A is 22 kW")
+        for t in overlap:
+            assert_eq(t["a"]["amp"], 32, "A full power @ %s" % t["now"])
+            assert_true(t["b"]["amp"], "B leftover beside full-power A @ %s" % t["now"])
+
     case("helsinki_sun_sanity", test_helsinki_sun_sanity)
     case("midwinter_clear_48h", test_midwinter_clear_48h)
     case("midwinter_overcast_48h", test_midwinter_overcast_48h)
@@ -1131,6 +1234,7 @@ def main():
     case("april_mixed_supercheap_48h", test_april_mixed_supercheap_48h)
     case("midsummer_clear_supercheap_48h", test_midsummer_clear_supercheap_48h)
     case("midsummer_overcast_supercheap_48h", test_midsummer_overcast_supercheap_48h)
+    case("leftover_priority_and_optional_charger", test_leftover_priority_and_optional_charger)
 
     run()
 

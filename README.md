@@ -1,22 +1,22 @@
 # Kotiakku leftover + go-e smart charge
 
-Home Assistant custom integration for two go-e Gemini chargers behind an Elisa Kotiakku (Huawei hybrid + LUNA). It writes charger `lot` / `amp` / `psm` / `frc` (`fup` stays false) from Kotiakku leftover solar, and can force full power on a charger during cheap charge windows.
+Home Assistant custom integration for one to four go-e Gemini chargers behind an Elisa Kotiakku (Huawei hybrid + LUNA). It writes charger `lot` / `amp` / `psm` / `frc` (`fup` stays false) from Kotiakku leftover solar, and can force full power on a charger during cheap charge windows.
 
 Deploy from this GitHub repo: [§3](#3-deploy-in-home-assistant) (HACS custom repository, manual copy, or git). There are no YAML surplus/charge automations here.
 
 This is the only drop. Do not also run the old YAML surplus or charge automations — they would fight this.
 
-The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `frc=1`, `ama`, `loe`, `loty`. `lop` is **read-only** (app priorities).
+The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `frc=1`, `ama`, `loe`, `loty`, `lop`.
 
 ## 1. App and MQTT
 
 - Chargers on `go-eCharger/<serial>/…`, **writes allowed** (`mcr=false`).
-- Load balancing **on** (`loe=true`). Group total **50 A**. Charger max **32 A**. Priorities stay in the app (`lop`; 1 is highest).
+- Load balancing **on** (`loe=true`). Group total **50 A**. Charger max **32 A**. App charger priorities (`lop`) still apply inside go-e for the 50 A group. Leftover *who gets surplus watts* uses HA `number.kotiakku_goe_direct_priority_<serial>` (1 is highest, 99 is lowest). Do not write app `lop` from HA.
 - MQTT in Home Assistant must be able to publish to `go-eCharger/<serial>/<key>/set`.
 
 ## 2. Sensors you pick
 
-The integration does not assume entity ids. **Add integration** and **Configure** are entity pickers: chargers, the Controller Car-power mean, Kotiakku SoC / solar / house, the spot-price sensor, and optional solar **energy** forecast (kWh). Nothing is wired until you select it.
+The integration does not assume entity ids. **Add integration** and **Configure** are entity pickers: charger 1 (required) plus optional chargers 2–4, the Controller Car-power mean, Kotiakku SoC / solar / house, the spot-price sensor, and optional solar **energy** forecast (kWh). Nothing is wired until you select it.
 
 | Role | What to pick |
 | --- | --- |
@@ -24,7 +24,7 @@ The integration does not assume entity ids. **Add integration** and **Configure*
 | PV power | Solar production |
 | House power | House load **including** EV |
 | Controller Car-power 5-min mean | go-e Controller EV watts for leftover math. Unknown → **0 W**. Do **not** keep last sample. Never written to. |
-| Charger entities | Any entity on each charger device (car state is ideal), then that charger’s MQTT serial |
+| Charger entities | Charger 1 is required; 2–4 are optional. Any entity on each charger device (car state is ideal), then that charger’s MQTT serial and leftover priority |
 | Spot-price sensor | Needs `raw_today` / `raw_tomorrow` (HACS Nordpool) |
 | Solar remaining today | Optional. Forecast.Solar / Solcast remaining-today kWh. Off-sun / Supercheap |
 | Solar tomorrow | Optional. Forecast.Solar / Solcast tomorrow kWh. Off-sun / Supercheap |
@@ -43,11 +43,11 @@ If the Controller mean is `unknown` (typical when nothing is charging), EV is **
 
 Unknown SoC, solar, or house → treat as a blocked window. Decisions wait `settle_s` (default 5 s) after those sensors stop changing, so one Gridle burst is one run.
 
-The official Controller API has no combined-power key. Combined current is the charger key **`lot`**. **Who actually charges is go-e load balancing and the charger priorities set in the go-e app.** HA does not write `lop`, `loe`, or `loty`. It reads `lop` only so leftover can be offered to the higher-priority car first.
+The official Controller API has no combined-power key. Combined current is the charger key **`lot`**. **Who actually charges** is go-e load balancing (app `lop` still applies to the 50 A group). **Which surplus charger is offered leftover watts** is the HA leftover priority on each charger (`number.kotiakku_goe_direct_priority_<serial>`; 1 is highest, 99 is lowest). HA does not write `lop`, `loe`, or `loty`. It does not read MQTT `lop`.
 
-When every listed charger is surplus **and app priorities are equal** (or `lop` cannot be read), the same leftover `lot` / `psm` / `amp` / `frc` is written to all of them. That leftover `lot` is the group total. go-e load balancing splits it.
+A single charger always gets the leftover. When every listed charger is surplus **and HA leftover priorities are equal**, the same leftover `lot` / `psm` / `amp` / `frc` is written to all of them. That leftover `lot` is the group total. go-e load balancing splits it.
 
-If app priorities **differ**, the higher-priority plugged surplus charger is offered what it is taking. Unused leftover above 500 W (`number.kotiakku_goe_direct_remainder_floor_w`) goes to the next car. If that remainder is **below 3 kW** (`number.kotiakku_goe_direct_next_surplus_min_w`), HA cuts the high-priority share so the next car still gets 3 kW — only if the first still meets 6 A after the cut. Example: leftover 12 kW, high taking 10 kW → **9 kW + 3 kW**. Remainder at or below 500 W is a dead zone: do not *start* the next car. If the next car was already on and leftover then shrinks so the first would use it all, keep that 3 kW steal for the same 15 min hold (`number.kotiakku_goe_direct_hold_minutes`), then drop it. Group `lot` starts from the **total** leftover and is raised if needed so both per-charger `amp` caps fit (still at most group lot 50). Each charger’s `psm` / `amp` comes from **its** allocation. HA **reads** `lop` and per-charger `nrg` (MQTT or `number.go_echarger_<serial>_lop` / `sensor.go_echarger_<serial>_nrg`) and never writes `lop`.
+If HA leftover priorities **differ**, the higher-priority plugged surplus charger is offered what it is taking. Unused leftover above 500 W (`number.kotiakku_goe_direct_remainder_floor_w`) goes to the next car. If that remainder is **below 3 kW** (`number.kotiakku_goe_direct_next_surplus_min_w`), HA cuts the high-priority share so the next car still gets 3 kW — only if the first still meets 6 A after the cut. Example: leftover 12 kW, high taking 10 kW → **9 kW + 3 kW**. Remainder at or below 500 W is a dead zone: do not *start* the next car. If the next car was already on and leftover then shrinks so the first would use it all, keep that 3 kW steal for the same 15 min hold (`number.kotiakku_goe_direct_hold_minutes`), then drop it. Group `lot` starts from the **total** leftover and is raised if needed so both per-charger `amp` caps fit (still at most group lot 50). Each charger’s `psm` / `amp` comes from **its** allocation. HA reads per-charger `nrg` (MQTT or `sensor.go_echarger_<serial>_nrg`) and never writes `lop`. Slot defaults are charger 1 → 1, charger 2 → 2, and so on (charger 1 highest). Set equal numbers to share leftover the way load balancing does.
 
 When one charger is full-power (`lot` 50 / `amp` 32), surplus does **not** write a smaller leftover `lot` to the other charger — last writer would shrink the group to leftover amps and both cars would be stuck at that cap, so app priorities could not give 32 A to the cheap-hour session. Surplus keeps group `lot` at 50 and sets leftover `amp` / `psm` / `frc` on the surplus charger only. That leftover `amp` is the surplus energy cap, not an HA ranking. Combined demand may exceed 50 A (`32` + leftover `amp`); **app priorities then split the 50 A group.** HA does not reserve 32 A for the cheap-hour charger by capping surplus `amp`.
 
@@ -80,7 +80,7 @@ Do **not** copy the whole repo into `custom_components/`. Only the inner `kotiak
 ### Prerequisites
 
 - MQTT in Home Assistant can **publish** to `go-eCharger/<serial>/<key>/set`. This integration depends on the MQTT integration.
-- Chargers: MQTT writes allowed (`mcr=false`), load balancing on (`loe=true`), group total 50 A, charger max 32 A. Priorities stay in the go-e app (`lop`).
+- Chargers: MQTT writes allowed (`mcr=false`), load balancing on (`loe=true`), group total 50 A, charger max 32 A. Set leftover priority on the HA device (`number.kotiakku_goe_direct_priority_<serial>`). App `lop` still applies to the 50 A group.
 - Sensors you will pick already exist: Nordpool (with `raw_today` / `raw_tomorrow`), go-e Controller Car-power 5-min mean, Kotiakku SoC / solar / house, charger entities. Optional: solar remaining-today and tomorrow kWh.
 - The go-e Controller is read-only. Never publish to `go-eController/…`.
 
@@ -95,7 +95,7 @@ The integration is not in the HACS default store. Add this repo as a custom repo
 5. Type: **Integration** → **Add**.
 6. Search **Kotiakku go-e Direct** → **Download**.
 7. **Restart Home Assistant**.
-8. **Settings → Devices & services → Add integration → Kotiakku go-e Direct**. Pick the price sensor, charger entities, each charger’s **MQTT serial** (pre-filled when a guess is confident), then Controller / Kotiakku sensors.
+8. **Settings → Devices & services → Add integration → Kotiakku go-e Direct**. Pick the price sensor, charger 1 (required) and optional chargers 2–4, each charger’s **MQTT serial** (pre-filled when a guess is confident) and leftover priority, then Controller / Kotiakku sensors.
 
 Later updates: HACS shows a pending update; download it and restart.
 
@@ -127,9 +127,9 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
 
-After it exists, **Configure** edits charger entities/serials and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
+After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
-YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake):
+YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
 
 ```yaml
 kotiakku_goe_direct:
@@ -145,8 +145,10 @@ kotiakku_goe_direct:
   chargers:
     - entity: sensor.go_echarger_111111_car_state
       serial: "111111"
+      priority: 1
     - entity: sensor.go_echarger_222222_car_state
       serial: "222222"
+      priority: 2
 ```
 
 The two **kW** checkboxes are not day-to-day knobs. They say whether the picked power sensors report kilowatts or watts so leftover math can convert to watts. Kotiakku solar/house default to kW; the Controller Car-power mean defaults to watts.
@@ -185,7 +187,7 @@ Per charger, `select.kotiakku_goe_direct_policy_<serial>`:
 - **Force on until unplug** — that charger until **its** car is Idle, then restore the previous policy
 - **Force off** — surplus / ECO only
 
-While a charger’s full-power policy is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities.
+While a charger’s full-power policy is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`). A valid window is a contiguous block whose duration is in [min, max] (default 2–5 h, step 0.25) and whose **every** 15-minute slot is at or below the price ceiling (default 0.1, native unit of the price sensor). Four independent greedy disjoint plans (cap 16): cheapest, longest, earliest, and off-sun. Off-sun is the cheapest ranking after hours with ≥ 1 kWh expected solar are dropped; gaps already split windows. A frozen window does not slide 15 minutes. Tomorrow’s curve typically appears sometime after 14:00 local. Off-sun also replans when remaining-today, tomorrow kWh, or the Off-sun hour knob change.
 
@@ -194,12 +196,14 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | Entity | Default | Role |
 | --- | --- | --- |
 | `number.kotiakku_goe_direct_window_min_h` / `kotiakku_goe_direct_window_max_h` | 2–5 h | Window duration bounds |
+| `sensor.kotiakku_goe_direct_<rank>_window` | current-or-next start | Planned window (cheapest / longest / earliest / offsun). State is the start timestamp; `end`, avg, and later windows are attributes. `binary_sensor.kotiakku_goe_direct_<rank>_window_active` is on while now is inside a window |
 | `number.kotiakku_goe_direct_electricity_price_ceiling` | 0.1 | 15-min electricity price cap (same unit as the price sensor) |
 | `text.kotiakku_goe_direct_electricity_price_sensor` | from setup | Electricity price sensor id |
 | `number.kotiakku_goe_direct_soc_on_pct` / `kotiakku_goe_direct_soc_hyst_pct` | 92 / 2 | Surplus SoC start (92%) and low-hold below 90% |
 | `number.kotiakku_goe_direct_surplus_start_w` | 2000 W | Leftover to start surplus |
-| `number.kotiakku_goe_direct_next_surplus_min_w` | 3000 W | Unequal `lop`: next surplus floor. If unused leftover after the higher-priority car is below this (and above the remainder floor), steal this much from the first |
-| `number.kotiakku_goe_direct_remainder_floor_w` | 500 W | Unequal `lop`: remainder at or below this does not *start* the next car. Already-on next car keeps 3 kW for the hold minutes |
+| `number.kotiakku_goe_direct_priority_<serial>` | slot 1–4 → 1–4 | Leftover offer order. 1 is highest, 99 is lowest. YAML/config seeds first add; then this entity. Equal values share leftover |
+| `number.kotiakku_goe_direct_next_surplus_min_w` | 3000 W | Unequal HA leftover priority: next surplus floor. If unused leftover after the higher-priority car is below this (and above the remainder floor), steal this much from the first |
+| `number.kotiakku_goe_direct_remainder_floor_w` | 500 W | Unequal HA leftover priority: remainder at or below this does not *start* the next car. Already-on next car keeps 3 kW for the hold minutes |
 | `number.kotiakku_goe_direct_low_hold_w` | 1000 W | Leftover below this is the 6 A low hold |
 | `number.kotiakku_goe_direct_settle_s` | 5 s | Wait after Gridle updates |
 | `number.kotiakku_goe_direct_hold_minutes` | 15 min | Hold duration (leftover, SoC, second-car leftover gone, or 1↔3 `psm`) |
@@ -210,7 +214,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | Supercheap: no 22 kW when remaining-today or tomorrow ≥ this, even in an Off-sun window. 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition. `sensor.kotiakku_goe_direct_solar_kwh` is max(remaining-today, tomorrow) |
 | `number.kotiakku_goe_direct_offsun_hour_kwh` | 1 kWh | Off-sun: drop a local hour when its expected forecast energy ≥ this. 0 disables. Dawn/dusk/night under 1 kWh stay Off-sun |
 
-YAML `soc_on`, `eco_lot`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
+YAML `soc_on`, `eco_lot`, charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
 
 ## 6. Smoke checks
 
@@ -218,14 +222,15 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 
 | Expect | What you should see |
 | --- | --- |
-| SoC ≥ 92% and leftover ≥ 2000 W, both policies Force off, **equal** `lop` | Same leftover `lot`/`psm`/`amp`/`frc` on both chargers. App `lop` shares |
-| SoC ≥ 92% and leftover 8 kW, **unequal** `lop`, high at 6 A 3-phase | High is offered leftover (11 A), not locked at 6 A. Second car waits until high leaves unused leftover |
+| SoC ≥ 92% and leftover ≥ 2000 W, both policies Force off, **equal** HA leftover priority | Same leftover `lot`/`psm`/`amp`/`frc` on both chargers. go-e shares |
+| Only charger 1 configured | Leftover MQTT on that charger only. No second-car steal |
+| SoC ≥ 92% and leftover 8 kW, **unequal** HA leftover priority, high at 6 A 3-phase | High is offered leftover (11 A), not locked at 6 A. Second car waits until high leaves unused leftover |
 | SoC ≥ 92% and leftover 12 kW, high taking 10 kW | **9 kW + 3 kW**. Remainder 2 kW is above 500 W, so steal up to the 3 kW floor |
 | Higher-priority car taking 7.5 kW of 8 kW leftover | Only the higher-priority charger: 500 W remainder is the dead zone (do not start the second car) |
 | Second car already surplus-charging, leftover then drops so high would use it all | Keep **3 kW** on the second car for 15 min, then drop it |
 | Higher-priority car Complete / WaitCar, leftover 8 kW | Lower-priority charger gets leftover if it still meets 6 A. WaitCar still gets an offer so it can start; no steal |
 | Higher-priority car taking 10 kW of 18 kW leftover | Lower-priority charger gets the remaining 8 kW (already ≥ 3 kW, no steal) |
-| Leftover 4 kW, unequal `lop`, both wanting surplus | Only the higher-priority charger: it wants all 4 kW |
+| Leftover 4 kW, unequal HA leftover priority, both wanting surplus | Only the higher-priority charger: it wants all 4 kW |
 | Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 0, `psm` Auto, `amp` 32, `lot` 50 |
 | Surplus on 1-phase, leftover rises to 8 kW | Stay `psm` 1, `amp` 32 for 15 min, then `psm` 2 / 11 A. Amp still tracks leftover while held |
 | Surplus on 3-phase, leftover drops to 3 kW | Stay `psm` 2, `amp` 6 for 15 min, then `psm` 1 / 13 A |

@@ -228,12 +228,66 @@ def main():
             ]
         )
         assert_eq(len(rows), 2, "two chargers")
+        assert_eq(rows[0]["priority"], 1, "default first priority")
+        assert_eq(rows[1]["priority"], 2, "default second priority")
         form = config.form_from_chargers(rows)
         assert_eq(form["charger_1_serial"], "111111", "form serial")
+        assert_eq(form["charger_1_priority"], 1, "form priority")
         back = config.chargers_from_form(form)
         assert_eq(back[0]["serial"], "111111", "round trip")
+        assert_eq(back[0]["priority"], 1, "priority round trip")
         err = config.validate_charger_rows(back)
         assert_eq(err, None, "valid")
+        one = config.normalize_chargers(
+            [
+                {
+                    "entity": "sensor.go_echarger_111111_car_state",
+                    "serial": "111111",
+                }
+            ]
+        )
+        assert_eq(len(one), 1, "one charger")
+        assert_eq(config.validate_charger_rows(one), None, "one charger valid")
+        custom = config.normalize_chargers(
+            [
+                {
+                    "entity": "sensor.go_echarger_111111_car_state",
+                    "serial": "111111",
+                    "priority": 50,
+                },
+                {
+                    "entity": "sensor.go_echarger_222222_car_state",
+                    "serial": "222222",
+                    "priority": 10,
+                },
+            ]
+        )
+        assert_eq(custom[0]["priority"], 50, "custom first")
+        assert_eq(custom[1]["priority"], 10, "custom second")
+        assert_eq(config.clamp_priority(0, 1), 1, "clamp low")
+        assert_eq(config.clamp_priority(100, 1), 99, "clamp high")
+        assert_eq(const.default_charger_priority(0), 1, "slot 0")
+        assert_eq(const.default_charger_priority(3), 4, "slot 3")
+        assert_eq(
+            const.priority_entity_id("111111"),
+            "number.kotiakku_goe_direct_priority_111111",
+            "priority entity",
+        )
+        skipped = config.chargers_from_form(
+            {
+                "charger_1_entity": "sensor.go_echarger_111111_car_state",
+                "charger_1_serial": "111111",
+                "charger_1_priority": 1,
+                "charger_2_entity": "",
+                "charger_2_serial": "",
+                "charger_3_entity": "sensor.go_echarger_222222_car_state",
+                "charger_3_serial": "222222",
+                "charger_3_priority": 7,
+            }
+        )
+        assert_eq(len(skipped), 2, "empty slot 2 omitted")
+        assert_eq(skipped[1]["serial"], "222222", "slot 3 kept")
+        assert_eq(skipped[1]["priority"], 7, "slot 3 priority")
         assert_eq(
             config.validate_charger_rows(
                 [{"entity": "sensor.x", "serial": "111111"}] * 2
@@ -248,26 +302,41 @@ def main():
         )
         strings = config.normalize_chargers(["111111"])
         assert_eq(strings[0]["serial"], "111111", "string serial")
+        assert_eq(strings[0]["priority"], 1, "string serial default priority")
         assert_eq(
             strings[0]["entity"],
             "sensor.go_echarger_111111_car_state",
             "synthesized entity",
         )
+        stored = config.persistable(
+            {
+                "chargers": [
+                    {
+                        "entity": "sensor.go_echarger_111111_car_state",
+                        "serial": "111111",
+                        "priority": 8,
+                    }
+                ]
+            }
+        )
+        assert_eq(stored["chargers"][0]["priority"], 8, "persist priority")
         assert_eq(config.normalize_chargers(None), [], "no default chargers")
         assert_eq(config.normalize_chargers([]), [], "empty list")
         guessed = config.apply_serial_guesses(
             [
-                {"entity": "sensor.right", "serial": "111111"},
-                {"entity": "sensor.left", "serial": ""},
+                {"entity": "sensor.right", "serial": "111111", "priority": 20},
+                {"entity": "sensor.left", "serial": "", "priority": 30},
             ],
             [
-                {"entity": "sensor.left", "serial": "111111"},
-                {"entity": "sensor.right", "serial": "222222"},
+                {"entity": "sensor.left", "serial": "111111", "priority": 1},
+                {"entity": "sensor.right", "serial": "222222", "priority": 2},
             ],
             {"sensor.right": "222222", "sensor.left": "111111"},
         )
         assert_eq(guessed[0]["serial"], "222222", "stale serial replaced")
         assert_eq(guessed[1]["serial"], "111111", "empty serial filled")
+        assert_eq(guessed[0]["priority"], 20, "priority kept on guess")
+        assert_eq(guessed[1]["priority"], 30, "priority kept on fill")
 
     def test_entry_config_options_overlay():
         class Entry:
@@ -377,6 +446,176 @@ def main():
         assert_eq(const.EID_MIN, "number.kotiakku_goe_direct_window_min_h", "window min hours")
         assert_eq(const.EID_MAX, "number.kotiakku_goe_direct_window_max_h", "window max hours")
         assert_eq(
+            const.window_sensor_entity_id("cheapest"),
+            "sensor.kotiakku_goe_direct_cheapest_window",
+            "cheapest window entity",
+        )
+        assert_eq(
+            const.window_sensor_unique_id("offsun"),
+            "kotiakku_goe_direct_offsun_window",
+            "offsun window unique_id",
+        )
+        assert_eq(
+            const.window_sensor_legacy_unique_id("cheapest"),
+            "kotiakku_goe_direct_cheapest_window_start",
+            "legacy window unique_id",
+        )
+        for rank in const.RANKS:
+            eid = const.window_sensor_entity_id(rank)
+            assert_true(eid.endswith("_window"), "window entity %s" % eid)
+            assert_true(not eid.endswith("_window_start"), "no _start suffix %s" % eid)
+
+    def test_window_sensor_registry_migration():
+        class Registry:
+            def __init__(self, rows):
+                self.by_uid = {}
+                self.by_eid = {}
+                for row in rows:
+                    self.by_uid[(row["domain"], row["platform"], row["unique_id"])] = row["entity_id"]
+                    self.by_eid[row["entity_id"]] = dict(row)
+                self.updates = []
+
+            def async_get_entity_id(self, domain, platform, unique_id):
+                return self.by_uid.get((domain, platform, unique_id))
+
+            def async_get(self, entity_id):
+                return self.by_eid.get(entity_id)
+
+            def async_update_entity(self, entity_id, **kwargs):
+                self.updates.append((entity_id, dict(kwargs)))
+                row = self.by_eid[entity_id]
+                old_uid = row["unique_id"]
+                new_uid = kwargs.get("new_unique_id", old_uid)
+                new_eid = kwargs.get("new_entity_id", entity_id)
+                del self.by_uid[(row["domain"], row["platform"], old_uid)]
+                del self.by_eid[entity_id]
+                row = dict(row)
+                row["unique_id"] = new_uid
+                row["entity_id"] = new_eid
+                self.by_uid[(row["domain"], row["platform"], new_uid)] = new_eid
+                self.by_eid[new_eid] = row
+
+        default = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_offsun_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_offsun_window_start",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(default)
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window"
+            ),
+            "sensor.kotiakku_goe_direct_cheapest_window",
+            "default cheapest entity_id moved",
+        )
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window_start"
+            ),
+            None,
+            "legacy cheapest unique_id gone",
+        )
+        assert_eq(
+            default.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_offsun_window"
+            ),
+            "sensor.kotiakku_goe_direct_offsun_window",
+            "default offsun entity_id moved",
+        )
+        renamed = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_longest_window_start",
+                    "entity_id": "sensor.my_longest_plan",
+                }
+            ]
+        )
+        const.migrate_window_sensor_ids(renamed)
+        assert_eq(
+            renamed.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_longest_window"
+            ),
+            "sensor.my_longest_plan",
+            "custom entity_id kept",
+        )
+        taken = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_earliest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_earliest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "other",
+                    "entity_id": "sensor.kotiakku_goe_direct_earliest_window",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(taken)
+        assert_eq(
+            taken.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_earliest_window"
+            ),
+            "sensor.kotiakku_goe_direct_earliest_window_start",
+            "do not steal a taken entity_id",
+        )
+        fresh = Registry([])
+        const.migrate_window_sensor_ids(fresh)
+        assert_eq(fresh.updates, [], "new install has nothing to migrate")
+        already = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window",
+                }
+            ]
+        )
+        const.migrate_window_sensor_ids(already)
+        assert_eq(already.updates, [], "already migrated is a no-op")
+        collision = Registry(
+            [
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window_start",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window_start",
+                },
+                {
+                    "domain": "sensor",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_cheapest_window",
+                    "entity_id": "sensor.kotiakku_goe_direct_cheapest_window",
+                },
+            ]
+        )
+        const.migrate_window_sensor_ids(collision)
+        assert_eq(collision.updates, [], "do not overwrite an existing unique_id")
+        assert_eq(
+            collision.async_get_entity_id(
+                "sensor", const.DOMAIN, "kotiakku_goe_direct_cheapest_window_start"
+            ),
+            "sensor.kotiakku_goe_direct_cheapest_window_start",
+            "legacy row left alone when new unique_id exists",
+        )
+        assert_eq(
             const.EID_CEILING,
             "number.kotiakku_goe_direct_electricity_price_ceiling",
             "electricity price ceiling",
@@ -428,6 +667,7 @@ def main():
     case("persistable_does_not_invent_entities", test_persistable_does_not_invent_entities)
     case("persistable_legacy_solar_keys", test_persistable_legacy_solar_keys)
     case("psm_and_surplus_eids", test_psm_and_surplus_eids)
+    case("window_sensor_registry_migration", test_window_sensor_registry_migration)
 
     run()
 

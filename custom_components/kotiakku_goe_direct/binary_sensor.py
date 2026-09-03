@@ -29,7 +29,7 @@ class RankBinary(_Base):
         self._rank = rank
         self.entity_id = f"binary_sensor.kotiakku_goe_direct_{rank}_window_active"
         self._attr_unique_id = f"kotiakku_goe_direct_{rank}_window_active"
-        self._attr_name = f"{rank_label(rank)} window"
+        self._attr_name = f"{rank_label(rank)} window active"
 
     @property
     def is_on(self):

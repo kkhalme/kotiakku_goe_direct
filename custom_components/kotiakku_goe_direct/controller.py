@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import timedelta
 
@@ -16,7 +15,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .config import entry_config
+from .config import clamp_priority, entry_config
 from .const import (
     CONF_CONTROLLER_ENTITY,
     CONF_CONTROLLER_IN_KW,
@@ -73,11 +72,13 @@ from .const import (
     STORAGE_VERSION,
     SURPLUS_EIDS,
     WINDOW_EIDS,
+    default_charger_priority,
+    priority_entity_id,
     psm_int,
 )
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import charger_full_power as policy_full_power, now_in_windows, plan, prev_from_result
-from .serial import resolve_car_entity_id, resolve_lop_entity_id, resolve_power_entity_id
+from .serial import resolve_car_entity_id, resolve_power_entity_id
 from .surplus import (
     UNUSABLE_STATES,
     DEFAULT_LAT,
@@ -135,9 +136,9 @@ class KotiakkuGoeDirectController:
         self.charger_rows = list(data["chargers"])
         self.chargers = [row["serial"] for row in self.charger_rows if row.get("serial")]
         self._car_entities = {}
-        self._lop_entities = {}
         self._power_entities = {}
-        for row in self.charger_rows:
+        self._priority_defaults = {}
+        for index, row in enumerate(self.charger_rows):
             serial = row.get("serial")
             if not serial:
                 continue
@@ -149,9 +150,10 @@ class KotiakkuGoeDirectController:
                 siblings = device_entities(self.hass, entity)
             kw = {"unique_id": unique_id, "siblings": siblings}
             self._car_entities[serial] = resolve_car_entity_id(entity, serial, **kw)
-            self._lop_entities[serial] = resolve_lop_entity_id(entity, serial, **kw)
             self._power_entities[serial] = resolve_power_entity_id(entity, serial, **kw)
-        self._lop_mqtt = {}
+            self._priority_defaults[serial] = clamp_priority(
+                row.get("priority"), default_charger_priority(index)
+            )
         self._nrg_w = {}
         self.soc_entity = data[CONF_SOC_ENTITY]
         self.solar_entity = data[CONF_SOLAR_ENTITY]
@@ -182,7 +184,6 @@ class KotiakkuGoeDirectController:
         self._price_unsub = None
         self._tracked_price = None
         self._logged_kotiakku_unusable = False
-        self._logged_lop_unknown = False
         self._surplus_amp = {}
         self._surplus_psm = {}
         self._kotiakku_ids = {
@@ -201,7 +202,7 @@ class KotiakkuGoeDirectController:
             if eid
         }
         self._car_ids = {self.car_entity(s) for s in self.chargers}
-        self._lop_ids = {self.lop_entity(s) for s in self.chargers}
+        self._priority_ids = {self.priority_entity(s) for s in self.chargers}
         self._power_ids = {self.power_entity(s) for s in self.chargers}
 
     def listen(self, callback):
@@ -223,14 +224,14 @@ class KotiakkuGoeDirectController:
     def car_entity(self, serial):
         return self._car_entities.get(serial) or f"sensor.go_echarger_{serial}_car_state"
 
-    def lop_entity(self, serial):
-        return self._lop_entities.get(serial) or f"number.go_echarger_{serial}_lop"
+    def priority_entity(self, serial):
+        return priority_entity_id(serial)
 
-    def charger_lop(self, serial):
-        mqtt_val = self._lop_mqtt.get(serial)
-        if mqtt_val is not None:
-            return mqtt_val
-        return parse_lop(self._state(self.lop_entity(serial)))
+    def charger_priority(self, serial):
+        parsed = parse_lop(self._state(self.priority_entity(serial)))
+        if parsed is not None:
+            return parsed
+        return self._priority_defaults.get(serial)
 
     def power_entity(self, serial):
         return self._power_entities.get(serial) or f"sensor.go_echarger_{serial}_nrg"
@@ -390,7 +391,7 @@ class KotiakkuGoeDirectController:
         track.extend(SURPLUS_EIDS)
         track.extend(self.policy_entity(s) for s in self.chargers)
         track.extend(self.car_entity(s) for s in self.chargers)
-        track.extend(self.lop_entity(s) for s in self.chargers)
+        track.extend(self.priority_entity(s) for s in self.chargers)
         track.extend(self.power_entity(s) for s in self.chargers)
         track = list(dict.fromkeys(entity for entity in track if entity))
         self._unsubs.append(
@@ -405,7 +406,7 @@ class KotiakkuGoeDirectController:
             )
         )
         self._retarget_price()
-        await self._subscribe_lop_mqtt()
+        await self._subscribe_nrg_mqtt()
         await self.async_plan()
         self._schedule_surplus()
         await self.async_charge()
@@ -481,7 +482,7 @@ class KotiakkuGoeDirectController:
             await self.async_charge()
             self._schedule_surplus()
             return
-        if entity in self._lop_ids or entity in self._power_ids:
+        if entity in self._priority_ids or entity in self._power_ids:
             self._schedule_surplus()
 
     async def _on_price(self, _event):
@@ -663,32 +664,19 @@ class KotiakkuGoeDirectController:
         )
         self._logged_kotiakku_unusable = True
 
-    def _log_lop_unknown(self, serials):
-        if self._logged_lop_unknown:
-            return
-        _LOGGER.warning(
-            "kotiakku_goe_direct: charger lop unknown for %s; surplus may split. Enable number.go_echarger_<serial>_lop or MQTT go-eCharger/<serial>/lop (read-only)",
-            ", ".join(serials),
-        )
-        self._logged_lop_unknown = True
-
-    async def _subscribe_lop_mqtt(self):
+    async def _subscribe_nrg_mqtt(self):
         try:
             from homeassistant.components.mqtt import async_subscribe
         except Exception:
             return
         for serial in self.chargers:
-            for key, callback in (
-                ("lop", self._on_lop_mqtt),
-                ("nrg", self._on_nrg_mqtt),
-            ):
-                topic = f"go-eCharger/{serial}/{key}"
-                try:
-                    unsub = await async_subscribe(self.hass, topic, callback)
-                except Exception as err:
-                    _LOGGER.debug("kotiakku_goe_direct: mqtt subscribe %s failed: %s", topic, err)
-                    continue
-                self._unsubs.append(unsub)
+            topic = f"go-eCharger/{serial}/nrg"
+            try:
+                unsub = await async_subscribe(self.hass, topic, self._on_nrg_mqtt)
+            except Exception as err:
+                _LOGGER.debug("kotiakku_goe_direct: mqtt subscribe %s failed: %s", topic, err)
+                continue
+            self._unsubs.append(unsub)
 
     def _mqtt_serial_payload(self, msg, key):
         topic = str(getattr(msg, "topic", "") or "")
@@ -710,25 +698,6 @@ class KotiakkuGoeDirectController:
         value = nrg_total_w(payload)
         old = self._nrg_w.get(serial)
         self._nrg_w[serial] = value
-        if old != value:
-            self._schedule_surplus()
-
-    def _on_lop_mqtt(self, msg):
-        serial, payload = self._mqtt_serial_payload(msg, "lop")
-        if not serial:
-            return
-        value = parse_lop(payload)
-        if value is None and isinstance(payload, str):
-            text = payload.strip()
-            if text.startswith("{") or text.startswith("["):
-                try:
-                    data = json.loads(text)
-                except Exception:
-                    data = None
-                if isinstance(data, dict):
-                    value = parse_lop(data.get("lop"))
-        old = self._lop_mqtt.get(serial)
-        self._lop_mqtt[serial] = value
         if old != value:
             self._schedule_surplus()
 
@@ -796,13 +765,7 @@ class KotiakkuGoeDirectController:
             self.session = True
             await self._save()
             surplus = [serial for serial in self.chargers if not self.charger_full_power(serial)]
-            lops = {serial: self.charger_lop(serial) for serial in surplus}
-            unknown = [serial for serial in surplus if lops[serial] is None]
-            if unknown and len(surplus) > 1:
-                self._log_lop_unknown(unknown)
-            elif not unknown and self._logged_lop_unknown:
-                _LOGGER.info("kotiakku_goe_direct: charger lop readable again")
-                self._logged_lop_unknown = False
+            lops = {serial: self.charger_priority(serial) for serial in surplus}
             plugged = {}
             states = {}
             take_w = {}

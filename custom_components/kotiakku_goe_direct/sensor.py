@@ -2,29 +2,44 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import UnitOfEnergy
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, RANKS, rank_label
+from .const import (
+    DOMAIN,
+    RANKS,
+    migrate_window_sensor_ids,
+    rank_label,
+    window_sensor_entity_id,
+    window_sensor_unique_id,
+)
 from .device import HubEntity
 
 
+def _migrate_window_sensor_ids(hass):
+    migrate_window_sensor_ids(er.async_get(hass))
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
+    _migrate_window_sensor_ids(hass)
     controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [WindowStartSensor(controller, rank) for rank in RANKS]
+    entities = [WindowSensor(controller, rank) for rank in RANKS]
     entities.append(ForecastSolarSensor(controller))
     async_add_entities(entities)
 
 
-class WindowStartSensor(HubEntity, SensorEntity):
+class WindowSensor(HubEntity, SensorEntity):
+    """Current or next window. State is the start; end and the plan are attributes."""
+
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:ev-station"
 
     def __init__(self, controller, rank):
         super().__init__(controller)
         self._rank = rank
-        self.entity_id = f"sensor.kotiakku_goe_direct_{rank}_window_start"
-        self._attr_unique_id = f"kotiakku_goe_direct_{rank}_window_start"
-        self._attr_name = f"{rank_label(rank)} window start"
+        self.entity_id = window_sensor_entity_id(rank)
+        self._attr_unique_id = window_sensor_unique_id(rank)
+        self._attr_name = f"{rank_label(rank)} window"
 
     @property
     def native_value(self):

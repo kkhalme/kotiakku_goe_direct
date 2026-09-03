@@ -11,7 +11,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .config import entry_config
+from .config import clamp_priority, entry_config
 from .const import (
     DEFAULT_CEILING,
     DEFAULT_MAX_HOURS,
@@ -22,7 +22,11 @@ from .const import (
     EID_MIN,
     EID_SOLAR_ENOUGH_KWH,
     EID_OFFSUN_HOUR_KWH,
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     SURPLUS_NUMBER_SPECS,
+    default_charger_priority,
+    priority_entity_id,
 )
 from .device import hub_device_info
 
@@ -46,6 +50,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
     ]
     cfg = entry_config(entry)
     entities.extend(SurplusNumber(controller, spec, cfg) for spec in SURPLUS_NUMBER_SPECS)
+    for index, row in enumerate(cfg.get("chargers") or ()):
+        serial = row.get("serial")
+        if not serial:
+            continue
+        entities.append(
+            ChargerPriorityNumber(
+                controller,
+                serial,
+                clamp_priority(row.get("priority"), default_charger_priority(index)),
+            )
+        )
     async_add_entities(entities)
 
 
@@ -125,4 +140,22 @@ class SurplusNumber(_HubNumber):
     async def _on_changed(self):
         if self.entity_id in (EID_SOLAR_ENOUGH_KWH, EID_OFFSUN_HOUR_KWH):
             await self._controller.async_plan()
+        await self._controller.async_knobs_changed()
+
+
+class ChargerPriorityNumber(_HubNumber):
+    _attr_native_min_value = PRIORITY_MIN
+    _attr_native_max_value = PRIORITY_MAX
+    _attr_native_step = 1
+    _attr_icon = "mdi:order-numeric-ascending"
+
+    def __init__(self, controller, serial, default):
+        super().__init__(controller)
+        self._serial = serial
+        self._attr_native_value = float(default)
+        self.entity_id = priority_entity_id(serial)
+        self._attr_unique_id = f"kotiakku_goe_direct_priority_{serial}"
+        self._attr_name = f"{serial} priority"
+
+    async def _on_changed(self):
         await self._controller.async_knobs_changed()
