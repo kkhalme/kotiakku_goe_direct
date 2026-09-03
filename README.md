@@ -155,7 +155,7 @@ The two **kW** checkboxes are not day-to-day knobs. They say whether the picked 
 
 If **Kotiakku go-e Direct** is missing from Add integration, the files are not at `<config>/custom_components/kotiakku_goe_direct/manifest.json` (do not nest an extra `kotiakku_goe_direct` inside that folder). Restart once more. Check **Settings → System → Logs** for `kotiakku_goe_direct`. MQTT must already be configured.
 
-Optional 48 h leftover / price graphs: [§7](#7-graphs). HACS does not copy those YAML files.
+Optional 48 h leftover / price graph: [§7](#7-graphs). HACS does not copy that YAML file.
 
 ## 4. Charger serials
 
@@ -255,7 +255,9 @@ python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
 python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
 ```
 
-Live Home Assistant, same series (HACS does **not** install these): copy [`homeassistant/packages/kotiakku_goe_direct_graph.yaml`](homeassistant/packages/kotiakku_goe_direct_graph.yaml) into `<config>/packages/` and replace the placeholder entity ids / fake serials `111111` and `222222`. Add [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard. The first view uses [apexcharts-card](https://github.com/RomRider/apexcharts-card) so Nordpool `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) can share a 48 h-from-midnight axis with leftover and the chargers. Built-in `history-graph` is the second view; it can only show recorded past, not tomorrow's prices. These files are display-only — they do not write MQTT.
+Live Home Assistant: one dashboard tab, no helper sensors. Install [apexcharts-card](https://github.com/RomRider/apexcharts-card) from HACS, then copy [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard, or paste the `views:` list into a UI dashboard's raw editor.
+
+The spot chart is `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) with Cheapest and Off-sun windows from `sensor.kotiakku_goe_direct_<rank>_window` attributes (`window_N_start` / `window_N_end`), not recorder history of the binary sensors. Spot itself is read through `text.kotiakku_goe_direct_electricity_price_sensor`. Planned 22 kW uses each charger's policy + those same windows. Leftover past is `|solar| − |house| + |ev|` from recorder 5-minute statistics of the three power sensors you already have — edit those entity ids (and kW vs W) in the leftover `data_generator`. Replace fake serials `111111` / `222222`. One charger: delete the charger 2 series. Display-only; it does not write MQTT.
 
 ## Tests
 
