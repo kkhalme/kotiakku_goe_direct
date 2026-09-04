@@ -444,6 +444,111 @@ def main():
             "binary off at end",
         )
 
+    def test_horizon_grew_but_not_cheaper_stays_frozen():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.03] * 48)
+        clock = Clock(day)
+        attrs = {"raw_today": today, "tomorrow_valid": False}
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        start0 = result["raw_windows"][0]["start"]
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "held before tomorrow arrives")
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.12] * 16),
+            "tomorrow_valid": True,
+        }
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "dearer tomorrow does not switch")
+        assert_eq(result["raw_windows"][0]["start"], start0, "started set kept")
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "still frozen after a dearer horizon grow")
+            assert_eq(result["raw_windows"][0]["start"], start0, "start does not slide")
+
+    def test_started_window_switches_then_freezes():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.09] * 48)
+        clock = Clock(day)
+        result = plan_once(clock, {"raw_today": today}, None, flex_pct=0, flex_euro=0)
+        now_ts = day.timestamp()
+        assert_true(
+            result["raw_windows"][0]["start"] <= now_ts < result["raw_windows"][0]["end"],
+            "window has already started",
+        )
+        clock.advance(minutes=15)
+        result = plan_once(clock, {"raw_today": today}, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "in-progress window freezes")
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.02] * 16),
+            "tomorrow_valid": True,
+        }
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "switched", "in-progress window is still replaceable")
+        assert_true(result["raw_windows"][0]["start"] >= tomorrow_start - 1, "moved to tomorrow")
+        switched = result["raw_windows"][0]["start"]
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "switched set freezes")
+            assert_eq(result["raw_windows"][0]["start"], switched, "does not slide after switch")
+
+    def test_later_island_planned_after_first_ends():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        prices = [0.02] * 8 + [0.20] * 16 + [0.04] * 8
+        attrs = {"raw_today": slots_from(base, prices)}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["raw_windows"][0]["start"], base, "first island")
+        last = result["raw_windows"][0]["end"]
+        clock.set(datetime.datetime.fromtimestamp(last + 60, tz=timezone.utc))
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "same horizon, later island after idle")
+        assert_eq(result["raw_windows"][0]["start"], base + 24 * SLOT, "second island")
+        start1 = result["raw_windows"][0]["start"]
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "second island then freezes")
+        assert_eq(result["raw_windows"][0]["start"], start1, "second start held")
+
+    def test_min_hours_change_replans_during_roll():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        attrs = {"raw_today": slots_from(base, [0.04] * 24)}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, min_hours=2.0, max_hours=5.0, flex_pct=0, flex_euro=0)
+        assert_eq(round((result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600, 2), 2.0, "first 2 h")
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, min_hours=3.0, max_hours=5.0, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "min hours change is not frozen")
+        assert_true(
+            (result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600 >= 3.0 - 0.01,
+            "replanned to 3 h",
+        )
+
+    def test_hourly_curve_freezes_on_hour_steps():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        hourly = [0.10] * 10 + [0.02] * 4 + [0.10] * 10
+        attrs = {"raw_today": hourly}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["raw_windows"][0]["start"], base + 10 * 3600, "hourly dip")
+        start0 = result["raw_windows"][0]["start"]
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "hourly plan still freezes every 15 min")
+            assert_eq(result["raw_windows"][0]["start"], start0, "hourly start does not slide")
+
     case("roll_uniform_freeze_and_active", test_roll_uniform_freeze_and_active)
     case("window_does_not_slide_on_falling_prices", test_window_does_not_slide_on_falling_prices)
     case("tomorrow_switch_then_freeze", test_tomorrow_switch_then_freeze)
@@ -457,6 +562,11 @@ def main():
     case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
     case("min_equals_max_stays_fixed_over_time", test_min_equals_max_stays_fixed_over_time)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
+    case("horizon_grew_but_not_cheaper_stays_frozen", test_horizon_grew_but_not_cheaper_stays_frozen)
+    case("started_window_switches_then_freezes", test_started_window_switches_then_freezes)
+    case("later_island_planned_after_first_ends", test_later_island_planned_after_first_ends)
+    case("min_hours_change_replans_during_roll", test_min_hours_change_replans_during_roll)
+    case("hourly_curve_freezes_on_hour_steps", test_hourly_curve_freezes_on_hour_steps)
 
     run()
 

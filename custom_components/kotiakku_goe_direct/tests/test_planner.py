@@ -396,6 +396,109 @@ def main():
         other_on, other_seen = step(False, False, False)
         assert_eq((other_on, other_seen), (False, False), "other charger untouched")
 
+    def test_collect_slots_hourly_and_half_hour():
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        hourly = [0.10] * 10 + [0.02] * 4 + [0.10] * 10
+        out = plan(clock, {"raw_today": hourly}, flex_pct=0, flex_euro=0)
+        assert_eq(out["slot_count"], 24, "24 hourly values")
+        assert_eq(round(dur_h(out["raw_windows"][0]), 2), 2.0, "hourly seed is 2 h")
+        assert_eq(out["raw_windows"][0]["start"], base + 10 * 3600, "hours 10–14")
+        grown = plan(clock, {"raw_today": hourly}, flex_pct=20, flex_euro=0.02)
+        step = grown["raw_windows"][0]["end"] - grown["raw_windows"][0]["start"]
+        assert_eq(step % 3600, 0, "hourly grow stays on 1 h boundaries")
+        half = [0.08] * 16 + [0.03] * 8 + [0.08] * 24
+        half_out = plan(clock, {"raw_today": half}, flex_pct=0, flex_euro=0)
+        assert_eq(half_out["slot_count"], 48, "48 half-hour values")
+        assert_eq(half_out["raw_windows"][0]["start"], base + 16 * 1800, "cheapest 2 h on 30-min curve")
+        empty = plan(clock, {})
+        assert_eq(empty["reason"], "no_slots", "empty attrs")
+        none_ceil = plan(clock, {"raw_today": hourly}, ceiling=None, flex_pct=0, flex_euro=0)
+        assert_eq(none_ceil["ceiling"], 0.2, "None ceiling uses default 0.2")
+
+    def test_prev_from_result_iso_and_flex():
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        first = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=20, flex_euro=0.02)
+        prev = planner.prev_from_result(clock, first)
+        assert_eq(prev["flex_pct"], 20.0, "flex percent stored on prev")
+        assert_eq(prev["flex_euro"], 0.02, "flex euro stored on prev")
+        iso_only = {
+            "windows": first["windows"],
+            "min_hours": 2.0,
+            "max_hours": 5.0,
+            "ceiling": 0.2,
+            "horizon": first["horizon"],
+        }
+        from_iso = planner.prev_from_result(clock, iso_only)
+        assert_eq(len(from_iso["windows"]), 1, "iso windows restore when raw_windows is missing")
+        assert_eq(from_iso["flex_pct"], 0.0, "missing flex clamps to unused")
+        assert_eq(planner.prev_from_result(clock, {}), None, "empty result")
+        assert_eq(planner.prev_from_result(clock, None), None, "missing result")
+        nxt = planner.current_or_next(first["raw_windows"], base - 60)
+        assert_eq(nxt["start"], first["raw_windows"][0]["start"], "before start: next window")
+        cur = planner.current_or_next(first["raw_windows"], first["raw_windows"][0]["start"] + 60)
+        assert_eq(cur["start"], first["raw_windows"][0]["start"], "inside: current window")
+        assert_eq(planner.now_in_windows([], base), False, "empty windows")
+        assert_eq(planner.clip_slots_to_forecast(clock, [], None, None, clock.now()), [], "empty clip")
+        flagged = plan(
+            clock,
+            {"raw_today": slots_from(base, [0.04] * 16), "tomorrow_valid": True},
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(flagged["tomorrow_ok"], True, "tomorrow_valid flag")
+        no_flag = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=0, flex_euro=0)
+        assert_eq(no_flag["tomorrow_ok"], False, "today-only prices are not tomorrow_ok")
+
+    def test_horizon_tomorrow_only_and_zero_remaining():
+        today = slots_from(base, [0.001] * 16)
+        tomorrow = slots_from(base + 86400, [0.08] * 16)
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        tom = plan(
+            clock,
+            {"raw_today": today, "raw_tomorrow": tomorrow},
+            remaining_today=None,
+            tomorrow_kwh=12.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(tom["raw_windows"][0]["start"] >= base + 86400 - 1, "tomorrow-only solar")
+        zero = plan(
+            clock,
+            {"raw_today": today, "raw_tomorrow": tomorrow},
+            remaining_today=0.0,
+            tomorrow_kwh=None,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(zero["raw_windows"][0]["end"] <= base + 86400 + 1, "0.0 remaining-today is present")
+        both = plan(
+            clock,
+            {
+                "raw_today": slots_from(base, [0.08] * 16),
+                "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
+            },
+            remaining_today=5.0,
+            tomorrow_kwh=5.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(
+            both["raw_windows"][0]["start"] >= base + 86400 - 1,
+            "both forecasts present: cheaper tomorrow wins",
+        )
+        tie = plan(
+            clock,
+            {"raw_today": slots_from(base, [0.08] * 16), "raw_tomorrow": tomorrow},
+            remaining_today=5.0,
+            tomorrow_kwh=5.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(
+            tie["raw_windows"][0]["end"] <= base + 86400 + 1,
+            "equal prices: earlier day wins",
+        )
+
     case("seed_is_cheapest_min_hours", test_seed_is_cheapest_min_hours)
     case("grow_cheaper_side_and_flex_or", test_grow_cheaper_side_and_flex_or)
     case("flex_zero_and_min_equals_max_do_not_grow", test_flex_zero_and_min_equals_max_do_not_grow)
@@ -417,6 +520,9 @@ def main():
     case("string_params_from_templates", test_string_params_from_templates)
     case("restore_policy_maps_legacy_names", test_restore_policy_maps_legacy_names)
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
+    case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
+    case("prev_from_result_iso_and_flex", test_prev_from_result_iso_and_flex)
+    case("horizon_tomorrow_only_and_zero_remaining", test_horizon_tomorrow_only_and_zero_remaining)
 
     surplus = load_mod("surplus")
     leftover_w = surplus.leftover_w
@@ -455,6 +561,10 @@ def main():
             "legacy Cheapest now skips on enough solar",
         )
         assert_eq(full("Force off", result, 3500), False, "force off")
+        assert_eq(full("Force on", result, 0, enough_solar=True), True, "Force on ignores enough solar")
+        assert_eq(full("Longest", result, 3500, enough_solar=True), False, "legacy Longest skips")
+        assert_eq(full("SolarPriority", {}, 3500), False, "empty result")
+        assert_eq(full("SolarPriority", None, 0), False, "missing result")
 
     def test_blocked_hours_pick_night_not_midday():
         night = [0.05] * 32
