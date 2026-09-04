@@ -304,7 +304,8 @@ views:
                     Longest: 'longest',
                     Earliest: 'earliest',
                   }[policy] || '';
-                  const force = policy === 'Force on' || policy === 'Force on until unplug';
+                  const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
+                  const force = policy === 'Force on' || until;
                   const windows = rank
                     ? windowsFrom(((hass.states['sensor.kotiakku_goe_direct_' + rank + '_window'] || {}).attributes) || {})
                     : [];
@@ -443,8 +444,10 @@ views:
             show_header_toggle: false
             entities:
               - entity: select.kotiakku_goe_direct_policy_111111
+              - entity: switch.kotiakku_goe_direct_until_unplug_111111
               - entity: number.kotiakku_goe_direct_priority_111111
               - entity: select.kotiakku_goe_direct_policy_222222
+              - entity: switch.kotiakku_goe_direct_until_unplug_222222
               - entity: number.kotiakku_goe_direct_priority_222222
               - entity: sensor.kotiakku_goe_direct_cheapest_window
               - entity: sensor.kotiakku_goe_direct_offsun_window

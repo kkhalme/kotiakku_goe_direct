@@ -127,7 +127,7 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
 
-After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, and policies are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
+After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
 
@@ -184,10 +184,11 @@ Per charger, `select.kotiakku_goe_direct_policy_<serial>`:
 - **Cheapest** / **Longest** / **Earliest** — that charger in that rank’s windows
 - **Supercheap** — **Off-sun** windows, except no grid force-on when remaining-today **or** tomorrow solar energy is at least `number.kotiakku_goe_direct_solar_enough_kwh` (default **40 kWh**, `binary_sensor.kotiakku_goe_direct_solar_enough` on). Off-sun is cheapest 2–5 h after dropping hours whose expected energy is at least `number.kotiakku_goe_direct_offsun_hour_kwh` (default **1 kWh**). Remaining-today and tomorrow daily kWh are spread across local hours by solar elevation. Hours under 1 kWh (night, dawn, dusk, winter) stay Off-sun. Transfer + tax make even a cheap spot more expensive than leftover solar when the day is above 40 kWh, so Supercheap skips 22 kW then **including Off-sun night hours**. Surplus can still write that charger. Unknown forecast excludes nothing and is not enough solar. Cheapest / Longest / Earliest ignore the forecast.
 - **Force on** — that charger full power now
-- **Force on until unplug** — that charger until **its** car is Idle, then restore the previous policy
 - **Force off** — surplus / ECO only
 
-While a charger’s full-power policy is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
+`switch.kotiakku_goe_direct_until_unplug_<serial>` is a one-shot override, not a policy. Turn it on to force that charger to 22 kW regardless of the select. It stays on through charging and a full battery (go-e Complete). It turns itself off when **that** car **unplugs**. The policy select is unchanged, so Cheapest / Force off / … continues afterwards. Turn the switch off to cancel. Surplus skips that serial while the switch is on. A previous install that had **Force on until unplug** selected is migrated onto this switch and the stored previous policy.
+
+While a charger’s full-power policy **or until-unplug switch** is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`). A valid window is a contiguous block whose duration is in [min, max] (default 2–5 h, step 0.25) and whose **every** 15-minute slot is at or below the price ceiling (default 0.1, native unit of the price sensor). Four independent greedy disjoint plans (cap 16): cheapest, longest, earliest, and off-sun. Off-sun is the cheapest ranking after hours with ≥ 1 kWh expected solar are dropped; gaps already split windows. A frozen window does not slide 15 minutes. Tomorrow’s curve typically appears sometime after 14:00 local. Off-sun also replans when remaining-today, tomorrow kWh, or the Off-sun hour knob change.
 
@@ -195,7 +196,8 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 
 | Entity | Default | Role |
 | --- | --- | --- |
-| `number.kotiakku_goe_direct_window_min_h` / `kotiakku_goe_direct_window_max_h` | 2–5 h | Window duration bounds |
+| `select.kotiakku_goe_direct_policy_<serial>` | Force off | Cheapest / Supercheap / Longest / Earliest / Force on / Force off |
+| `switch.kotiakku_goe_direct_until_unplug_<serial>` | off | 22 kW until that car unplugs. Stays on at a full battery (Complete). Does not change the policy select |
 | `sensor.kotiakku_goe_direct_<rank>_window` | current-or-next start | Planned window (cheapest / longest / earliest / offsun). State is the start timestamp; `end`, avg, and later windows are attributes. `binary_sensor.kotiakku_goe_direct_<rank>_window_active` is on while now is inside a window |
 | `number.kotiakku_goe_direct_electricity_price_ceiling` | 0.1 | 15-min electricity price cap (same unit as the price sensor) |
 | `text.kotiakku_goe_direct_electricity_price_sensor` | from setup | Electricity price sensor id |
@@ -245,6 +247,7 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Supercheap, forecast unknown or unset | Same as Cheapest (nothing excluded, not enough solar) |
 | Cheapest, tomorrow 70 kWh | Still full-power. Forecast only shapes Off-sun / Supercheap |
 | Force off during a price window | That charger’s full-power binary stays off; surplus may still write that charger |
+| Until-unplug switch on | That charger 22 kW until **its** car unplugs. Full battery (Complete) keeps it on. Policy select stays put |
 
 ## 7. Graphs
 

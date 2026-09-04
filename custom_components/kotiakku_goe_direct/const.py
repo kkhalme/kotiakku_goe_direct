@@ -13,7 +13,7 @@ POLICY_LONGEST = "Longest"
 POLICY_EARLIEST = "Earliest"
 POLICY_FORCE_ON = "Force on"
 POLICY_FORCE_OFF = "Force off"
-POLICY_UNTIL_UNPLUG = "Force on until unplug"
+POLICY_UNTIL_UNPLUG = "Force on until unplug"  # legacy select option; now a switch
 POLICIES = (
     POLICY_CHEAPEST,
     POLICY_SUPERCHEAP,
@@ -21,10 +21,9 @@ POLICIES = (
     POLICY_EARLIEST,
     POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
-    POLICY_UNTIL_UNPLUG,
 )
 RANKED_POLICIES = (POLICY_CHEAPEST, POLICY_SUPERCHEAP, POLICY_LONGEST, POLICY_EARLIEST)
-FORCE_POLICIES = (POLICY_FORCE_ON, POLICY_UNTIL_UNPLUG)
+FORCE_POLICIES = (POLICY_FORCE_ON,)
 POLICY_RANK = {
     POLICY_CHEAPEST: "cheapest",
     POLICY_SUPERCHEAP: "offsun",
@@ -340,6 +339,10 @@ def psm_int(option):
 
 def priority_entity_id(serial) -> str:
     return f"number.kotiakku_goe_direct_priority_{serial}"
+
+
+def until_unplug_entity_id(serial) -> str:
+    return f"switch.kotiakku_goe_direct_until_unplug_{serial}"
 
 
 def window_sensor_unique_id(rank) -> str:

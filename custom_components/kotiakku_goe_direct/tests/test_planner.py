@@ -274,13 +274,46 @@ def main():
     def test_force_policy_ranks_as_cheapest():
         assert_eq(norm_rank("Force on"), "cheapest", "force on")
         assert_eq(norm_rank("Force off"), "cheapest", "force off")
-        assert_eq(norm_rank("Force on until unplug"), "cheapest", "until unplug")
+        assert_eq(norm_rank("Force on until unplug"), "cheapest", "legacy until unplug")
         assert_eq(norm_rank("Supercheap"), "cheapest", "Supercheap is a policy, not a rank")
         assert_eq(norm_rank("offsun"), "offsun", "offsun")
         assert_eq(norm_rank("off-sun"), "offsun", "off-sun")
         assert_eq(norm_rank("off sun"), "offsun", "off sun")
         assert_eq(norm_rank("Longest"), "longest", "longest")
         assert_eq(norm_rank("Earliest"), "earliest", "earliest")
+
+    def test_until_unplug_overrides_policy():
+        step = planner.until_unplug_step
+        full = planner.charger_full_power
+        results = {"cheapest": {"raw_windows": [{"start": 1000, "end": 2000}]}}
+        assert_eq(full("Force off", results, 1500), False, "force off")
+        assert_eq(
+            full("Force off", results, 1500, until_unplug=True),
+            True,
+            "until unplug overrides Force off",
+        )
+        assert_eq(
+            full("Cheapest", results, 1500, until_unplug=True),
+            True,
+            "until unplug overrides Cheapest",
+        )
+        assert_eq(
+            full("Supercheap", results, 1500, enough_solar=True, until_unplug=True),
+            True,
+            "until unplug overrides enough solar",
+        )
+        on, seen = step(True, False, False)
+        assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
+        on, seen = step(True, True, False)
+        assert_eq((on, seen), (True, True), "plug arms seen")
+        on, seen = step(True, True, True)
+        assert_eq((on, seen), (True, True), "still plugged (charging or complete) keeps override")
+        on, seen = step(True, False, True)
+        assert_eq((on, seen), (False, False), "unplug after seen clears override")
+        on, seen = step(False, True, True)
+        assert_eq((on, seen), (False, False), "manual off clears seen")
+        other_on, other_seen = step(False, False, False)
+        assert_eq((other_on, other_seen), (False, False), "other charger untouched")
 
     def test_end_to_end_longest_rank():
         prices = [0.01] * 8 + [0.08] * 20
@@ -330,6 +363,7 @@ def main():
     case("earliest_vs_cheapest", test_earliest_vs_cheapest)
     case("rank_change_replans", test_rank_change_replans)
     case("force_policy_ranks_as_cheapest", test_force_policy_ranks_as_cheapest)
+    case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
     case("end_to_end_longest_rank", test_end_to_end_longest_rank)
     case("same_horizon_falling_longest_stays_frozen", test_same_horizon_falling_longest_stays_frozen)
 
@@ -516,7 +550,9 @@ def main():
             "1-phase at cap leftover allows 3-phase: want leftover",
         )
         assert_true(car_plugged("Charging"), "charging")
-        assert_true(not car_plugged("Idle"), "idle")
+        assert_true(car_plugged("Complete"), "full battery is still plugged")
+        assert_true(car_plugged("4"), "car state 4 is still plugged")
+        assert_true(not car_plugged("Idle"), "idle is unplugged")
         assert_true(not car_plugged("1"), "unplugged")
         usable = surplus.sensor_usable
         assert_true(usable("96.2"), "soc number")

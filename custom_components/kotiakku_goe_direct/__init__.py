@@ -25,6 +25,7 @@ PLATFORMS = [
     Platform.NUMBER,
     Platform.SELECT,
     Platform.TEXT,
+    Platform.SWITCH,
 ]
 
 _CHARGER_SCHEMA = vol.Schema(

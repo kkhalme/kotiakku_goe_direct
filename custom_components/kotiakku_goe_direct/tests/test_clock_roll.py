@@ -30,6 +30,7 @@ surplus = load_mod("surplus", "_clock")
 const = load_mod("const", "_clock")
 now_in_windows = planner.now_in_windows
 charger_full_power = planner.charger_full_power
+until_unplug_step = planner.until_unplug_step
 SLOT = planner.SLOT_SECONDS
 POLICY_CHEAPEST = const.POLICY_CHEAPEST
 POLICY_SUPERCHEAP = const.POLICY_SUPERCHEAP
@@ -37,7 +38,6 @@ POLICY_LONGEST = const.POLICY_LONGEST
 POLICY_EARLIEST = const.POLICY_EARLIEST
 POLICY_FORCE_ON = const.POLICY_FORCE_ON
 POLICY_FORCE_OFF = const.POLICY_FORCE_OFF
-POLICY_UNTIL_UNPLUG = const.POLICY_UNTIL_UNPLUG
 
 HELSINKI = ZoneInfo("Europe/Helsinki")
 
@@ -60,18 +60,9 @@ def plan_ranks(clock, attrs, results, min_hours=2.0, max_hours=5.0, ceiling=0.1,
     )
 
 
-def until_unplug_tick(policy, plugged, seen, restore):
-    """Same restore rules as KotiakkuGoeDirectController.async_charge for one charger."""
-    if policy == POLICY_UNTIL_UNPLUG and plugged:
-        seen = True
-    elif policy != POLICY_UNTIL_UNPLUG and seen:
-        seen = False
-    restored = None
-    if policy == POLICY_UNTIL_UNPLUG and seen and not plugged:
-        restored = restore if restore not in (None, POLICY_UNTIL_UNPLUG) else POLICY_FORCE_OFF
-        policy = restored
-        seen = False
-    return policy, seen, restored
+def until_unplug_tick(override, plugged, seen):
+    """Same override rules as KotiakkuGoeDirectController.async_charge for one charger."""
+    return until_unplug_step(override, plugged, seen)
 
 
 def tick_times(start_ts, end_ts, windows, step=SLOT):
@@ -428,22 +419,23 @@ def main():
         down_done = phase(3000, *args, last_psm=2, hold_expired=True)
         assert_eq((down_done["psm"], down_done["amp"]), (1, 13), "after 15 min: 1-phase 13 A")
 
-    def test_until_unplug_restores_only_that_charger():
-        policy, seen, restored = until_unplug_tick(
-            POLICY_UNTIL_UNPLUG, True, False, POLICY_CHEAPEST
-        )
-        assert_eq(policy, POLICY_UNTIL_UNPLUG, "stay until unplug")
+    def test_until_unplug_clears_only_that_charger():
+        on, seen = until_unplug_tick(True, True, False)
+        assert_eq(on, True, "stay on while plugged")
         assert_eq(seen, True, "arm when plugged")
-        assert_eq(restored, None, "no restore while plugged")
-        policy, seen, restored = until_unplug_tick(
-            POLICY_UNTIL_UNPLUG, False, True, POLICY_CHEAPEST
-        )
-        assert_eq(restored, POLICY_CHEAPEST, "restore previous")
-        assert_eq(policy, POLICY_CHEAPEST, "restored")
+        on, seen = until_unplug_tick(True, False, True)
+        assert_eq(on, False, "clear after unplug")
         assert_eq(seen, False, "disarm")
-        other = until_unplug_tick(POLICY_FORCE_OFF, False, False, POLICY_LONGEST)
-        assert_eq(other[0], POLICY_FORCE_OFF, "other charger untouched")
-        assert_eq(other[2], None, "other charger does not restore")
+        other_on, other_seen = until_unplug_tick(False, False, False)
+        assert_eq(other_on, False, "other charger untouched")
+        assert_eq(other_seen, False, "other charger seen stays off")
+        assert_eq(
+            charger_full_power(POLICY_CHEAPEST, {"cheapest": {"raw_windows": []}}, 0),
+            False,
+            "policy is unchanged when the override clears",
+        )
+        on, seen = until_unplug_tick(True, False, False)
+        assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
 
     def test_boundary_exclusive_end():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
@@ -471,7 +463,7 @@ def main():
     case("surplus_floor_over_15_min", test_surplus_floor_over_15_min)
     case("surplus_split_hold_over_15_min", test_surplus_split_hold_over_15_min)
     case("surplus_phase_hold_over_15_min", test_surplus_phase_hold_over_15_min)
-    case("until_unplug_restores_only_that_charger", test_until_unplug_restores_only_that_charger)
+    case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
 
     run()

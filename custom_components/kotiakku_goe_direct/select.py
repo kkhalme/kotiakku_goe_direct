@@ -11,6 +11,7 @@ from .const import (
     EID_ECO_PSM,
     POLICIES,
     POLICY_FORCE_OFF,
+    POLICY_UNTIL_UNPLUG,
     PSM_OPTIONS,
     psm_option,
 )
@@ -67,6 +68,12 @@ class PolicySelect(_HubSelect):
             icon="mdi:ev-station",
         )
         self._serial = serial
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state == POLICY_UNTIL_UNPLUG:
+            self._controller.legacy_until_unplug.add(self._serial)
 
     async def _on_changed(self):
         await self._controller.async_charge()
