@@ -37,9 +37,11 @@ Leftover:
 available_w = |solar_w| − |house_w| + |ev_w|
 ```
 
-Solar is generation, house is consumption (including the cars). EV watts come from the **Controller** Car-power mean, not a charger entity. Use the magnitude of solar, house, and EV (an inverted CT can make Car negative). **Do not abs `available_w`.** A negative leftover is a deficit.
+Solar is generation, house is consumption (including the cars). EV watts come from charger `nrg` when known, otherwise the **Controller** Car-power 5-min mean. Use the magnitude of solar, house, and EV (an inverted CT can make Car negative). **Do not abs `available_w`.** A negative leftover is a deficit.
 
-If the Controller mean is `unknown` (typical when nothing is charging), EV is **0 W**. House then has no car in it, so leftover is solar − house.
+Leftover is `solar − house + EV` only when house already contains the car. If house is clearly below the EV take (house CT misses the charger, or the Controller mean still includes a car that unplugged), EV is **not** added back — that would invent ~3 kW of surplus and keep charging from the grid.
+
+If the Controller mean is `unknown` (typical when nothing is charging) and no charger `nrg` is known, EV is **0 W**. House then has no car in it, so leftover is solar − house.
 
 Unknown SoC, solar, or house → treat as a blocked window. Decisions wait `settle_s` (default 5 s) after those sensors stop changing, so one Gridle burst is one run.
 
@@ -47,7 +49,7 @@ The official Controller API has no combined-power key. Combined current is the c
 
 A single charger always gets the leftover. When every listed charger is surplus **and HA leftover priorities are equal**, the same leftover `lot` / `psm` / `amp` / `frc` is written to all of them. That leftover `lot` is the group total. go-e load balancing splits it.
 
-If HA leftover priorities **differ**, the higher-priority plugged surplus charger is offered what it is taking. Unused leftover above 500 W (`number.kotiakku_goe_direct_remainder_floor_w`) goes to the next car. If that remainder is **below 3 kW** (`number.kotiakku_goe_direct_next_surplus_min_w`), HA cuts the high-priority share so the next car still gets 3 kW — only if the first still meets 6 A after the cut. Example: leftover 12 kW, high taking 10 kW → **9 kW + 3 kW**. Remainder at or below 500 W is a dead zone: do not *start* the next car. If the next car was already on and leftover then shrinks so the first would use it all, keep that 3 kW steal for the same 15 min hold (`number.kotiakku_goe_direct_hold_minutes`), then drop it. Group `lot` starts from the **total** leftover and is raised if needed so both per-charger `amp` caps fit (still at most group lot 50). Each charger’s `psm` / `amp` comes from **its** allocation. HA reads per-charger `nrg` (MQTT or `sensor.go_echarger_<serial>_nrg`) and never writes `lop`. Slot defaults are charger 1 → 1, charger 2 → 2, and so on (charger 1 highest). Set equal numbers to share leftover the way load balancing does.
+If HA leftover priorities **differ**, the higher-priority plugged surplus charger is offered what it is taking. Unplugged or finished chargers are skipped: the next plugged car gets leftover as the first, not a 3 kW steal. Unused leftover above 500 W (`number.kotiakku_goe_direct_remainder_floor_w`) goes to the next car. If that remainder is **below 3 kW** (`number.kotiakku_goe_direct_next_surplus_min_w`), HA cuts the high-priority share so the next car still gets 3 kW — only if leftover itself is at least 3 kW, the first is actually taking power, and the first still meets 6 A after the cut. Example: leftover 12 kW, high taking 10 kW → **9 kW + 3 kW**. Remainder at or below 500 W is a dead zone: do not *start* the next car. If the next car was already on and leftover then shrinks so the first would use it all, keep that 3 kW steal for the same 15 min hold (`number.kotiakku_goe_direct_hold_minutes`), then drop it. Group `lot` starts from the **total** leftover and is raised if needed so both per-charger `amp` caps fit (still at most group lot 50). Each charger’s `psm` / `amp` comes from **its** allocation. HA reads per-charger `nrg` (MQTT or `sensor.go_echarger_<serial>_nrg`) and never writes `lop`. Slot defaults are charger 1 → 1, charger 2 → 2, and so on (charger 1 highest). Set equal numbers to share leftover the way load balancing does.
 
 When one charger is full-power (`lot` 50 / `amp` 32), surplus does **not** write a smaller leftover `lot` to the other charger — last writer would shrink the group to leftover amps and both cars would be stuck at that cap, so app priorities could not give 32 A to the cheap-hour session. Surplus keeps group `lot` at 50 and sets leftover `amp` / `psm` / `frc` on the surplus charger only. That leftover `amp` is the surplus energy cap, not an HA ranking. Combined demand may exceed 50 A (`32` + leftover `amp`); **app priorities then split the 50 A group.** HA does not reserve 32 A for the cheap-hour charger by capping surplus `amp`.
 
@@ -63,11 +65,11 @@ Budget from leftover watts (floored amps, Finnish 230 V):
 Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ start leftover (default **2000 W**). After that, do **not** cut to zero every time leftover dips. While the session is on:
 
 - Leftover ≥ low hold leftover (default **1000 W**) and SoC ≥ SoC on minus hysteresis (default **90%**) → budget tracks leftover
-- Leftover below 1000 W, **or** SoC below 90%, **or** Kotiakku SoC / solar / house unknown or unusable → keep **6 A** for up to the low hold minutes (default 15). If the last surplus `psm` was 3-phase, stay 3-phase 6 A for that window so Tesla is not interrupted twice (phase switch, then stop)
+- Leftover below 1000 W, **or** SoC below 90%, **or** Kotiakku SoC / solar / house unknown or unusable → keep **6 A** for up to the low hold minutes (default 15). If the last surplus `psm` was 3-phase, stay 3-phase 6 A for that window so Tesla is not interrupted twice (phase switch, then stop). Chatter around 1000 W does not reset that timer: leftover must reach the start leftover (2000 W) to cancel the hold
 - Leftover wants the other phase → keep the current `psm` for those same 15 min, then switch. Leftover returning to the current phase cancels the timer
-- Second surplus charger already on, leftover then shrinks so the high-priority car would use it all → keep the 3 kW second-car floor for those same 15 min, then drop it
+- Second surplus charger already on, leftover then shrinks so the high-priority car would use it all → keep the 3 kW second-car floor for those same 15 min, then drop it. That steal needs two plugged cars that are actually taking leftover; an unplugged or finished first charger does not keep 3 kW on the next one. Steal is not applied when leftover itself is below 3 kW
 - That low hold for the whole duration → `frc=0` and restore ECO (`psm` Auto, `amp` 32, `lot` 50)
-- Recovered leftover, SoC, or sensors cancel the hold timer. A warning is logged when Kotiakku values are unusable. Surplus cannot **start** while those sensors are unusable. Restart loses remaining hold minutes (same as the other holds).
+- Recovered leftover (at least the start leftover, 2000 W), SoC, or sensors cancel the hold timer. A warning is logged when Kotiakku values are unusable. Surplus cannot **start** while those sensors are unusable. Restart loses remaining hold minutes (same as the other holds).
 
 MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=0` first.
 

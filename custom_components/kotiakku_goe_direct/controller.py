@@ -92,6 +92,7 @@ from .surplus import (
     budget,
     car_plugged,
     charger_take_w,
+    effective_ev_w,
     energy_kwh,
     enough_solar as solar_enough,
     group_lot_for_allocations,
@@ -265,6 +266,17 @@ class KotiakkuGoeDirectController:
         if unit == "kw" or unit == "kwatt":
             return parsed * 1000
         return parsed
+
+    def _charger_nrg_sum(self):
+        total = 0
+        seen = False
+        for serial in self.chargers:
+            power_w = self.charger_power_w(serial)
+            if power_w is None:
+                continue
+            seen = True
+            total += max(int(power_w), 0)
+        return total if seen else None
 
     def price_entity_id(self):
         return self._text_entity(EID_PRICE, str(self._config_price).strip())
@@ -713,21 +725,33 @@ class KotiakkuGoeDirectController:
     def _snapshot(self):
         problems = self._kotiakku_problems()
         controller_state = self._state(self.controller_entity)
-        controller_w = (
-            watts(controller_state, self.controller_in_kw)
-            if sensor_usable(controller_state)
-            else 0
+        controller_usable = sensor_usable(controller_state)
+        controller_w = watts(controller_state, self.controller_in_kw) if controller_usable else 0
+        solar_w = watts(self._state(self.solar_entity), self.kotiakku_in_kw)
+        house_w = watts(self._state(self.house_entity), self.kotiakku_in_kw)
+        ev_w = effective_ev_w(
+            controller_w,
+            self._charger_nrg_sum(),
+            controller_usable=controller_usable,
         )
         return {
             "window_ok": not problems,
             "soc": self._float_entity(self.soc_entity, -1.0),
-            "available_w": leftover_w(
-                watts(self._state(self.solar_entity), self.kotiakku_in_kw),
-                watts(self._state(self.house_entity), self.kotiakku_in_kw),
-                controller_w,
-            ),
+            "solar_w": solar_w,
+            "house_w": house_w,
+            "available_w": leftover_w(solar_w, house_w, ev_w),
             "problems": problems,
         }
+
+    async def _stop_surplus(self):
+        for serial in self.chargers:
+            if self.charger_full_power(serial):
+                continue
+            await self._publish_off(serial)
+        self.session = False
+        self.split_session = False
+        self._arm_split(False)
+        await self._save()
 
     async def async_surplus(self, floor_expired=False, split_expired=False):
         snap = self._snapshot()
@@ -741,6 +765,8 @@ class KotiakkuGoeDirectController:
             start_min_w=self.start_min_w,
             hold_min_w=self.hold_min_w,
             floor_expired=floor_expired,
+            hold_active=self._floor_unsub is not None,
+            hold_exit_w=self.start_min_w,
         )
         unusable = not snap["window_ok"]
         if unusable and (self.session or dec["write_on"] or dec["write_off"]):
@@ -752,6 +778,8 @@ class KotiakkuGoeDirectController:
             self._logged_kotiakku_unusable = False
         self._arm_floor(dec["arm_floor"])
         if not dec["write_on"] and not dec["write_off"]:
+            if self._surplus_amp or self.session:
+                await self._stop_surplus()
             return
         if dec["write_on"]:
             target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
@@ -837,7 +865,9 @@ class KotiakkuGoeDirectController:
                 if watts_i is None:
                     await self._publish_off(serial)
                     continue
-                source_w = target_w if dec["use_floor_budget"] else int(watts_i)
+                source_w = target_w if dec["use_floor_budget"] else min(
+                    int(watts_i), max(int(snap["available_w"]), 0)
+                )
                 # psm may be held 15 min; amp is leftover on that held phase.
                 pub = surplus_phase_budget(
                     source_w,
@@ -858,14 +888,7 @@ class KotiakkuGoeDirectController:
             for serial, pub in targets.items():
                 await self._publish_on(serial, pub["psm"], lot, pub["amp"])
             return
-        for serial in self.chargers:
-            if self.charger_full_power(serial):
-                continue
-            await self._publish_off(serial)
-        self.session = False
-        self.split_session = False
-        self._arm_split(False)
-        await self._save()
+        await self._stop_surplus()
 
     async def async_charge(self):
         if self._charging:
