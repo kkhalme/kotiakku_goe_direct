@@ -330,13 +330,11 @@ def main():
         assert_eq(surplus.upcoming_solar_kwh(8, 50), 50, "max remaining vs tomorrow")
         assert_eq(surplus.energy_kwh("50000", "Wh"), 50.0, "Wh → kWh")
         assert_eq(surplus.energy_kwh("4000", "W"), None, "power is not energy")
-        results = {
-            "cheapest": {"raw_windows": [{"start": 1000, "end": 2000}]},
-            "offsun": {"raw_windows": [{"start": 3000, "end": 4000}]},
-        }
+        result = {"raw_windows": [{"start": 3000, "end": 4000}]}
         full = planner.charger_full_power
-        assert_eq(full("Supercheap", results, 3500, enough_solar=True), False, "skip 22 kW")
-        assert_eq(full("Cheapest", results, 1500, enough_solar=True), True, "Cheapest still on")
+        assert_eq(full("SolarPriority", result, 3500, enough_solar=True), False, "skip 22 kW")
+        assert_eq(full("Supercheap", result, 3500), True, "legacy Supercheap maps")
+        assert_eq(full("Cheapest", result, 3500, enough_solar=True), False, "legacy Cheapest now skips")
 
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)

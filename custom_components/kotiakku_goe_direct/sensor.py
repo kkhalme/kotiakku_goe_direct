@@ -7,25 +7,21 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
-    RANKS,
-    migrate_window_sensor_ids,
-    rank_label,
-    window_sensor_entity_id,
-    window_sensor_unique_id,
+    EID_WINDOW,
+    WINDOW_SENSOR_UNIQUE_ID,
+    migrate_window_entities,
 )
 from .device import HubEntity
 
 
-def _migrate_window_sensor_ids(hass):
-    migrate_window_sensor_ids(er.async_get(hass))
+def _migrate_window_entities(hass):
+    migrate_window_entities(er.async_get(hass))
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    _migrate_window_sensor_ids(hass)
+    _migrate_window_entities(hass)
     controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [WindowSensor(controller, rank) for rank in RANKS]
-    entities.append(ForecastSolarSensor(controller))
-    async_add_entities(entities)
+    async_add_entities([WindowSensor(controller), ForecastSolarSensor(controller)])
 
 
 class WindowSensor(HubEntity, SensorEntity):
@@ -34,23 +30,22 @@ class WindowSensor(HubEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:ev-station"
 
-    def __init__(self, controller, rank):
+    def __init__(self, controller):
         super().__init__(controller)
-        self._rank = rank
-        self.entity_id = window_sensor_entity_id(rank)
-        self._attr_unique_id = window_sensor_unique_id(rank)
-        self._attr_name = f"{rank_label(rank)} window"
+        self.entity_id = EID_WINDOW
+        self._attr_unique_id = WINDOW_SENSOR_UNIQUE_ID
+        self._attr_name = "Window"
 
     @property
     def native_value(self):
-        start = (self._controller.window_results.get(self._rank) or {}).get("start")
+        start = (self._controller.window_result or {}).get("start")
         if not start:
             return None
         return dt_util.parse_datetime(str(start))
 
     @property
     def extra_state_attributes(self):
-        result = dict(self._controller.window_results.get(self._rank) or {})
+        result = dict(self._controller.window_result or {})
         result.pop("raw_windows", None)
         result.pop("horizon_ts", None)
         result.pop("blocked_ts", None)

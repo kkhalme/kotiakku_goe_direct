@@ -264,7 +264,7 @@ def surplus_hour_ranges(
     Remaining-today is spread over the rest of the local day; tomorrow kWh
     over the next local day. Spot windows stay independent of Kotiakku
     leftover. Unknown energy or a non-positive hour threshold excludes
-    nothing (Off-sun then matches Cheapest).
+    nothing (SolarPriority then searches every remaining price slot).
     """
     try:
         threshold = float(hour_kwh)

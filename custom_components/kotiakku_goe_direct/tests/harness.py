@@ -122,12 +122,9 @@ def window_ends(result):
     return tuple(w["end"] for w in (result or {}).get("raw_windows") or [])
 
 
-def plan_ranks(planner, clock, attrs, results, **plan_kw):
-    out = dict(results)
-    for rank in planner.RANKS:
-        prev = planner.prev_from_result(clock, out.get(rank))
-        out[rank] = planner.plan(clock, attrs, rank=rank, prev=prev, **plan_kw)
-    return out
+def plan_once(planner, clock, attrs, result, **plan_kw):
+    prev = planner.prev_from_result(clock, result)
+    return planner.plan(clock, attrs, prev=prev, **plan_kw)
 
 
 def case_runner():
