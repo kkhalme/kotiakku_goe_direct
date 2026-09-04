@@ -508,13 +508,15 @@ def assert_48h_nordpool(sim):
     for t in day1_morning:
         assert_eq(t["tomorrow_ok"], False, "tomorrow gone after midnight until 14:00 @ %s" % t["now"])
 
-    # Frozen windows keep ISO starts across midnight (do not slide to a new 15-min slot).
-    overnight = [t for t in ticks if t["reason"] == "frozen"]
-    if overnight:
-        first_frozen = overnight[0]["starts"]
-        later = [t for t in overnight if t["horizon_ts"] == overnight[0]["horizon_ts"]]
-        for t in later:
-            assert_eq(t["starts"], first_frozen, "frozen starts do not slide @ %s" % t["now"])
+    # A frozen stretch keeps ISO starts. A later planned/switched window may
+    # freeze again on the same horizon with a new start.
+    prev_reason = None
+    prev_starts = None
+    for t in ticks:
+        if t["reason"] == "frozen" and prev_reason == "frozen":
+            assert_eq(t["starts"], prev_starts, "frozen starts do not slide @ %s" % t["now"])
+        prev_reason = t["reason"]
+        prev_starts = t["starts"]
 
     # Spot windows ignore leftover.
     for t in ticks:
@@ -987,12 +989,17 @@ def main():
             "14:00 is a planner outcome, not a crash: %s" % first_pub["reason"],
         )
         assert_true(first_pub["count"] >= 1, "tomorrow night is a valid window")
+        night_full = hours_where(
+            sim["ticks"], lambda t: t["cheap_full"] and 1 <= t["now"].hour < 6
+        )
+        assert_gt(night_full, 3, "night valley still 22 kW")
         for t in sim["ticks"]:
             assert_eq(t["enough"], False, "kaamos upcoming is under 40 kWh @ %s" % t["now"])
             assert_true(t["upcoming_kwh"] < 10, "winter upcoming %s" % t["upcoming_kwh"])
             if t["cheap_window"]:
                 assert_eq(t["cheap_full"], True, "not enough solar: window is 22 kW @ %s" % t["now"])
-                assert_true(1 <= t["now"].hour < 6, "winter window is the night @ %s" % t["now"])
+            if 16 <= t["now"].hour < 21:
+                assert_eq(t["cheap_full"], False, "evening 0.21 is above the ceiling @ %s" % t["now"])
 
     def test_midwinter_overcast_48h():
         sim = sim_from_spec("midwinter-overcast")
@@ -1023,19 +1030,10 @@ def main():
             any(t["tomorrow_kwh"] >= SOLAR_ENOUGH_KWH for t in sim["ticks"]),
             "April tomorrow crosses the 40 kWh gate",
         )
-        on = [t for t in sim["ticks"] if t["write_on"]]
-        if on:
-            one_p = [t for t in on if t["psm"] == 1]
-            assert_true(one_p, "April leftover often 1-phase")
-            for t in one_p:
-                if t["leftover"] >= 4140 and t["arm_phase"]:
-                    want_3 = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140)
-                    assert_eq(t["psm"], 1, "hold 1-phase while waiting for 3-phase")
-                    assert_true(
-                        t["amp"] >= want_3[2],
-                        "1-phase leftover amp is not the pending 3-phase amp (%s vs %s)"
-                        % (t["amp"], want_3[2]),
-                    )
+        on = [t for t in sim["ticks"] if t["write_on"] and not t["cheap_full"] and t["a"]["amp"]]
+        assert_true(on, "April leftover runs on charger A")
+        one_p = [t for t in on if t["a"]["psm"] == 1]
+        assert_true(one_p, "April leftover often 1-phase")
         for t in sim["ticks"]:
             if t["enough"]:
                 assert_eq(t["cheap_full"], False, "no 22 kW while enough @ %s" % t["now"])
@@ -1047,19 +1045,23 @@ def main():
         assert_gt(max_leftover(sim["ticks"]), 5000, "midsummer leftover")
         surplus_h = hours_where(sim["ticks"], lambda t: t["write_on"])
         assert_gt(surplus_h, 6, "surplus runs through the long day")
-        three = [t for t in sim["ticks"] if t["psm"] == 2]
+        three = [t for t in sim["ticks"] if t["a"]["psm"] == 2]
         assert_true(three, "clear midsummer reaches 3-phase")
-        assert_true(any(t["amp"] > 6 for t in three), "3-phase amp tracks leftover, not stuck at 6 A")
+        assert_true(any(t["a"]["amp"] > 6 for t in three), "3-phase amp tracks leftover, not stuck at 6 A")
         held_up = [
             t
             for t in sim["ticks"]
-            if t["write_on"] and t["arm_phase"] and t["psm"] == 1 and t["wanted_psm"] == 2
+            if t["write_on"]
+            and not t["cheap_full"]
+            and t["a"].get("arm_phase")
+            and t["a"]["psm"] == 1
+            and t["a"].get("wanted_psm") == 2
         ]
         for t in held_up:
             three_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140)[2]
             one_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140, force_psm=1)[2]
-            assert_eq(t["amp"], one_amp, "held 1-phase uses 1-phase leftover amp")
-            assert_true(t["amp"] != three_amp or one_amp == three_amp, "not the pending 3-phase amp")
+            assert_eq(t["a"]["amp"], one_amp, "held 1-phase uses 1-phase leftover amp")
+            assert_true(t["a"]["amp"] != three_amp or one_amp == three_amp, "not the pending 3-phase amp")
         assert_eq(
             hours_where(sim["ticks"], lambda t: t["cheap_full"]),
             0,

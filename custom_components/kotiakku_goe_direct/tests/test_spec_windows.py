@@ -79,6 +79,10 @@ def main():
             ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
         )
         assert_eq(round(dur_h(no_flex[0]), 2), 2.0, "both flex 0: stay at min")
+        flat = pick_windows(
+            ts_slots(base, [0.04] * 16), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
+        )
+        assert_eq(round(dur_h(flat[0]), 2), 2.0, "flex 0 does not grow equal-price neighbors")
         fixed = pick_windows(
             ts_slots(base, prices), 2 * 3600, 2 * 3600, 0.2, base - 3600, 50, 1
         )
@@ -89,16 +93,17 @@ def main():
         assert_eq(round(dur_h(quarter[0]), 2), 0.25, "0.25 h / 0.25 h is one slot")
 
     def test_deep_valley_stays_short():
-        prices = [0.08] * 8 + [0.01] * 8 + [0.08] * 8
+        # 0.20 flanks: first added slot would raise avg above seed+0.02 (0.03).
+        prices = [0.20] * 8 + [0.01] * 8 + [0.20] * 8
         windows = pick_windows(
             ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0.02
         )
-        assert_eq(round(dur_h(windows[0]), 2), 2.0, "0.08 flanks exceed seed+0.02")
+        assert_eq(round(dur_h(windows[0]), 2), 2.0, "0.20 flanks blow seed+0.02")
         assert_eq(windows[0]["start"], base + 8 * SLOT, "stays on the valley")
 
     def test_one_window_even_with_two_nights():
         night = [0.04] * 12
-        day = [0.20] * 48
+        day = [0.25] * 48
         cheaper = [0.01] * 12
         prices = night + day + cheaper
         windows = pick_windows(
@@ -236,7 +241,7 @@ def main():
 
     def test_plan_result_is_a_window_list():
         out = plan(
-            Clock(now),
+            Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc)),
             {"raw_today": slots_from(base, [0.04] * 16)},
             flex_pct=0,
             flex_euro=0,

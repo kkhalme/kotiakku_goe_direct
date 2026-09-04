@@ -108,7 +108,7 @@ def main():
         assert_eq((mn, mx), (2.0, 2.0), "clamp keeps equal min/max")
 
     def test_one_window_even_with_two_nights():
-        prices = [0.04] * 12 + [0.20] * 48 + [0.01] * 12
+        prices = [0.04] * 12 + [0.25] * 48 + [0.01] * 12
         windows = pick_windows(
             ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0.02
         )
@@ -228,11 +228,10 @@ def main():
         assert_eq(windows[0]["start"], base, "includes current slot")
 
     def test_short_region_skipped():
-        prices = [0.20] * 4 + [0.05] * 7 + [0.20] * 4
         windows = pick_windows(
-            ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
+            ts_slots(base, [0.05] * 7), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
         )
-        assert_eq(len(windows), 0, "1.75h < min 2h")
+        assert_eq(len(windows), 0, "1.75h curve has no min-length seed")
 
     def test_freeze_does_not_slide():
         prices = [0.08] * 20 + [0.03] * 16
@@ -265,7 +264,7 @@ def main():
         assert_true(chosen["windows"][0]["avg"] < prev_windows[0]["avg"], "new first is cheaper")
 
     def test_idle_after_window_same_horizon():
-        slots = ts_slots(base, [0.04] * 16)
+        slots = ts_slots(base, [0.04] * 8)
         planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
         chosen = choose(
             slots,

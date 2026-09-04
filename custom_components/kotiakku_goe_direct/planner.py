@@ -345,6 +345,12 @@ def find_seed(slots, min_s, now_ts):
 
 def grow_window(slots, left_i, right_j, seed_avg, max_s, now_ts, ceiling, flex_pct, flex_euro):
     """Extend the seed by one native slot per step toward the cheaper neighbor."""
+    pct_on = flex_pct is not None and flex_pct > 0
+    euro_on = flex_euro is not None and flex_euro > 0
+    if not pct_on and not euro_on:
+        start = slots[left_i][0]
+        end = slots[right_j][1]
+        return {"avg": _avg_span(slots, start, end), "start": start, "end": end}
     allowed = seed_avg + flex_headroom(seed_avg, flex_pct, flex_euro)
     slot_ts = _current_slot_ts(now_ts)
     n = len(slots)
