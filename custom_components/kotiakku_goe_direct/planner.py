@@ -3,7 +3,9 @@
 Same rules as the python_script version: contiguous slots, duration in
 [min, max], every 15-minute price ≤ ceiling, then greedy cheapest / longest /
 earliest / offsun. Off-sun is cheapest after dropping hours with enough
-forecast energy. Freeze is per rank.
+forecast energy. After the greedy pick, under-ceiling holes between windows
+are filled up to max hours so a 15-minute minimum does not swiss-cheese a
+cheap night. Freeze is per rank.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ TARGET_EPS_S = 30
 HOUR_EPS = 0.001
 PRICE_EPS = 0.0000001
 MAX_WINDOWS = 16
+# 48h of 15-minute slots. The HA window_N attributes stay at MAX_WINDOWS.
+PLAN_WINDOWS = 192
 RANKS = ("cheapest", "longest", "earliest", "offsun")
 
 
@@ -263,6 +267,101 @@ def _without_overlap(slots, start, end):
     return [slot for slot in slots if not _overlaps(slot, start, end)]
 
 
+def _copy_windows(windows):
+    return [{"avg": w["avg"], "start": w["start"], "end": w["end"]} for w in windows]
+
+
+def _window_spans(windows):
+    return [(w["start"], w["end"]) for w in sorted(windows, key=lambda w: w["start"])]
+
+
+def _avg_span(slots, start, end):
+    total_p = 0.0
+    total_d = 0.0
+    for slot in slots:
+        if slot[0] >= start - 1 and slot[1] <= end + 1:
+            dur = slot[1] - slot[0]
+            if dur > 0:
+                total_d = total_d + dur
+                total_p = total_p + (slot[2] * dur)
+    if total_d <= 0:
+        return 0.0
+    return total_p / total_d
+
+
+def _tiles_span(slots, start, end):
+    if not slots:
+        return False
+    ordered = sorted(slots, key=lambda slot: slot[0])
+    if ordered[0][0] > start + GAP_S:
+        return False
+    if ordered[-1][1] < end - GAP_S:
+        return False
+    for i in range(1, len(ordered)):
+        if ordered[i][0] - ordered[i - 1][1] > GAP_S:
+            return False
+    return True
+
+
+def _rank_sort(windows, rank):
+    rank = norm_rank(rank)
+
+    def key(w):
+        dur = _win_dur(w)
+        if rank == "longest":
+            return (-dur, w["avg"], w["start"])
+        if rank == "earliest":
+            return (w["start"], -dur, w["avg"])
+        return (w["avg"], -dur, w["start"])
+
+    return sorted(windows, key=key)
+
+
+def fill_under_ceiling_gaps(windows, slots, ceiling, max_s, merge_adjacent=False):
+    """Merge windows whose gap is fully tiled by slots at or under the ceiling.
+
+    Unpicked under-ceiling quarters between islands are filled (the 15-minute
+    minimum otherwise swiss-cheeses a cheap night). Adjacent windows stay
+    split unless ``merge_adjacent`` (Off-sun), so cheapest min-length bands
+    and max-length leftovers stay separate. A missing slot (over ceiling, or
+    dropped surplus hour) keeps the gap. Merged duration stays ≤ max hours.
+    """
+    if windows is None or len(windows) < 2:
+        return windows
+    ordered = _copy_windows(windows)
+    ordered.sort(key=lambda w: w["start"])
+    out = [ordered[0]]
+    for nxt in ordered[1:]:
+        prev = out[-1]
+        gap_start = prev["end"]
+        gap_end = nxt["start"]
+        merged_dur = nxt["end"] - prev["start"]
+        if merged_dur > max_s + TARGET_EPS_S:
+            out.append(nxt)
+            continue
+        if gap_end <= gap_start + GAP_S:
+            if merge_adjacent:
+                prev["end"] = nxt["end"]
+                prev["avg"] = _avg_span(slots, prev["start"], prev["end"])
+            else:
+                out.append(nxt)
+            continue
+        gap = [
+            slot
+            for slot in slots
+            if slot[0] >= gap_start - 1 and slot[1] <= gap_end + 1
+        ]
+        if not _tiles_span(gap, gap_start, gap_end):
+            out.append(nxt)
+            continue
+        if any(slot[2] > ceiling + PRICE_EPS for slot in gap):
+            out.append(nxt)
+            continue
+        prev["end"] = nxt["end"]
+        prev["avg"] = _avg_span(slots, prev["start"], prev["end"])
+    return out
+
+
 def pick_best(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
     n = len(slots)
     if n == 0:
@@ -324,13 +423,20 @@ def pick_all(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
     rank = norm_rank(rank)
     remaining = slots
     windows = []
-    for _ in range(MAX_WINDOWS):
+    for _ in range(PLAN_WINDOWS):
         best = pick_best(remaining, min_s, max_s, ceiling, now_ts, rank)
         if best is None:
             break
         windows.append({"avg": best[0], "start": best[1], "end": best[2]})
         remaining = _without_overlap(remaining, best[1], best[2])
-    return windows
+    filled = fill_under_ceiling_gaps(
+        windows,
+        slots,
+        ceiling,
+        max_s,
+        merge_adjacent=(rank == "offsun"),
+    )
+    return _rank_sort(filled, rank)
 
 
 def _set_better(new, old, rank="cheapest"):
@@ -432,6 +538,20 @@ def choose(
     if _params_match(prev, min_hours, max_hours, ceiling, rank, blocked):
         prev_windows = prev.get("windows")
         prev_ok = prev_windows is not None and len(prev_windows) > 0
+    if prev_ok:
+        filled_prev = _rank_sort(
+            fill_under_ceiling_gaps(
+                prev_windows,
+                slots,
+                ceiling,
+                max_s,
+                merge_adjacent=(rank == "offsun"),
+            ),
+            rank,
+        )
+        if _window_spans(filled_prev) != _window_spans(prev_windows):
+            # Repair a frozen swiss-cheese set without sliding the start.
+            return _choice(filled_prev, prev.get("horizon") or horizon, "planned")
     last = last_end(prev_windows) if prev_ok else None
     if prev_ok and last is not None and last > now_ts:
         # Same-horizon replans would drop elapsed slots and look "better"
@@ -445,7 +565,11 @@ def choose(
     if prev_ok and last is not None and last <= now_ts:
         prev_horizon = prev["horizon"]
         if prev_horizon is None or horizon <= prev_horizon + GAP_S:
-            return _choice(prev_windows, prev["horizon"], "idle_after_window")
+            if not new_windows:
+                return _choice(prev_windows, prev["horizon"], "idle_after_window")
+            # Same-horizon leftovers (15-minute min hit the window cap, or
+            # greedy left under-ceiling slots). Do not idle the rest of the night.
+            return _choice(new_windows, horizon, "planned")
         if not new_windows:
             return _choice(prev_windows, prev["horizon"], "no_window")
         return _choice(new_windows, horizon, "planned_new_horizon")
@@ -608,6 +732,8 @@ def plan(
         result["window_%s_avg" % i] = None
     for i, w in enumerate(iso_ws):
         n = i + 1
+        if n > MAX_WINDOWS:
+            break
         result["window_%s_start" % n] = w["start"]
         result["window_%s_end" % n] = w["end"]
         result["window_%s_avg" % n] = w["avg"]

@@ -437,6 +437,38 @@ def main():
         on, seen = until_unplug_tick(True, False, False)
         assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
 
+    def test_offsun_quarter_min_does_not_swiss_cheese():
+        day = datetime.datetime(2026, 9, 3, 21, 45, tzinfo=timezone.utc)
+        base = day.timestamp()
+        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
+        attrs = {"raw_today": slots_from(base, prices)}
+        clock = Clock(day)
+        results = plan_ranks(clock, attrs, {}, min_hours=0.25, max_hours=5.0, ceiling=0.1)
+        off = results["offsun"]
+        assert_eq(len(off["raw_windows"]), 2, "1:15h then 1h")
+        assert_eq(round((off["raw_windows"][0]["end"] - off["raw_windows"][0]["start"]) / 3600, 2), 1.25, "first 1:15h")
+        last = max(ends_of(off))
+        for ts in tick_times(base, last, off["raw_windows"]):
+            clock.set(datetime.datetime.fromtimestamp(ts, tz=timezone.utc))
+            results = plan_ranks(clock, attrs, results, min_hours=0.25, max_hours=5.0, ceiling=0.1)
+            slot_i = int((ts - base) // 900)
+            if slot_i < 0:
+                continue
+            if slot_i >= len(prices):
+                break
+            want = prices[slot_i] <= 0.1 and ts < last
+            active = now_in_windows(results["offsun"]["raw_windows"], ts)
+            assert_eq(
+                active,
+                want,
+                "offsun active @ %s slot=%s want=%s" % (iso(ts), slot_i, want),
+            )
+            assert_eq(
+                charger_full_power(POLICY_SUPERCHEAP, results, ts),
+                active,
+                "Supercheap follows offsun @ %s" % iso(ts),
+            )
+
     def test_boundary_exclusive_end():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
@@ -464,6 +496,7 @@ def main():
     case("surplus_split_hold_over_15_min", test_surplus_split_hold_over_15_min)
     case("surplus_phase_hold_over_15_min", test_surplus_phase_hold_over_15_min)
     case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
+    case("offsun_quarter_min_does_not_swiss_cheese", test_offsun_quarter_min_does_not_swiss_cheese)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
 
     run()

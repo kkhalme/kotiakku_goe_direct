@@ -13,6 +13,7 @@ clamp_hours = planner.clamp_hours
 norm_rank = planner.norm_rank
 pick_all = planner.pick_all
 plan = planner.plan
+now_in_windows = planner.now_in_windows
 
 
 def run_plan(now, source_attrs, data=None, prev=None):
@@ -144,6 +145,101 @@ def main():
         chosen = choose(today + tomorrow, 2.0, 5.0, 0.1, now_ts, prev)
         assert_eq(chosen["reason"], "switched", "cheaper tomorrow set")
         assert_true(chosen["windows"][0]["avg"] < prev_windows[0]["avg"], "new first is cheaper")
+
+    def test_quarter_min_fills_under_ceiling_holes():
+        # Cheapest 15-min islands skip slightly dearer quarters and, with a
+        # 16-window cap, leave holes like 15 min on / 30 min off / 30 min on.
+        # Off-sun fills those holes and merges adjacent islands; the 0.15
+        # spike stays a gap.
+        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
+        slots = ts_slots(base, prices)
+        min_s = 0.25 * 3600
+        max_s = 5 * 3600
+        for rank in ("cheapest", "offsun"):
+            windows = pick_all(slots, min_s, max_s, 0.1, base - 3600, rank)
+            for i, price in enumerate(prices):
+                ts = base + i * SLOT
+                if price <= 0.1:
+                    assert_true(
+                        now_in_windows(windows, ts),
+                        "%s covers under-ceiling slot %s" % (rank, i),
+                    )
+                else:
+                    assert_true(
+                        not now_in_windows(windows, ts),
+                        "%s skips over-ceiling slot %s" % (rank, i),
+                    )
+        off = pick_all(slots, min_s, max_s, 0.1, base - 3600, "offsun")
+        assert_eq(len(off), 2, "offsun two windows")
+        assert_eq(off[0]["start"], base, "offsun starts at first cheap slot")
+        assert_eq(off[0]["end"], base + 5 * SLOT, "offsun first window is 1:15h")
+        assert_eq(off[1]["start"], base + 6 * SLOT, "offsun second after the spike")
+        assert_eq(off[1]["end"], base + 10 * SLOT, "offsun second window is 1h")
+        assert_eq(round(dur_h(off[0]), 2), 1.25, "offsun 1:15h")
+        assert_eq(round(dur_h(off[1]), 2), 1.0, "offsun 1h")
+
+    def test_adjacent_bands_stay_split():
+        prices = [0.09] * 8 + [0.01] * 8 + [0.09] * 8
+        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
+        assert_eq(len(windows), 3, "touching bands are not merged")
+        assert_eq(windows[0]["start"], base + 8 * SLOT, "dip still first")
+
+    def test_fill_respects_max_hours():
+        prices = [0.04] * 12 + [0.06] * 4 + [0.04] * 12
+        slots = ts_slots(base, prices)
+        windows = pick_all(slots, 0.25 * 3600, 5 * 3600, 0.1, base - 3600, "offsun")
+        for i in range(len(prices)):
+            assert_true(
+                now_in_windows(windows, base + i * SLOT),
+                "offsun covers 7h under-ceiling slot %s" % i,
+            )
+        for w in windows:
+            assert_true(dur_h(w) <= 5.0 + 0.01, "each window still ≤ max")
+        assert_true(len(windows) >= 2, "7h splits at max 5h")
+
+    def test_frozen_swiss_cheese_is_filled():
+        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
+        slots = ts_slots(base, prices)
+        cheesy = [
+            {"avg": 0.02, "start": base, "end": base + SLOT},
+            {"avg": 0.03, "start": base + 3 * SLOT, "end": base + 5 * SLOT},
+            {"avg": 0.04, "start": base + 6 * SLOT, "end": base + 10 * SLOT},
+        ]
+        prev = {
+            "windows": cheesy,
+            "min_hours": 0.25,
+            "max_hours": 5.0,
+            "ceiling": 0.1,
+            "horizon": slots[-1][1],
+            "rank": "offsun",
+        }
+        chosen = choose(
+            slots, 0.25, 5.0, 0.1, base + SLOT, prev, "offsun"
+        )
+        assert_eq(chosen["reason"], "planned", "repair is a replan, not a slide")
+        assert_eq(len(chosen["windows"]), 2, "0.05 hole filled, spike kept")
+        assert_eq(chosen["windows"][0]["start"], base, "start of the first island held")
+        assert_eq(chosen["windows"][0]["end"], base + 5 * SLOT, "first run now 1:15h")
+
+    def test_offsun_does_not_fill_blocked_hour():
+        prices = [0.04] * 8 + [0.04] * 4 + [0.04] * 8
+        slots = ts_slots(base, prices)
+        blocked = [(base + 8 * SLOT, base + 12 * SLOT)]
+        chosen = choose(slots, 0.25, 5.0, 0.1, base - 3600, None, "offsun", blocked)
+        assert_eq(len(chosen["windows"]), 2, "dropped surplus hour stays a gap")
+        assert_eq(chosen["windows"][0]["end"], base + 8 * SLOT, "first window stops at block")
+        assert_eq(chosen["windows"][1]["start"], base + 12 * SLOT, "second window after block")
+
+    def test_quarter_min_covers_long_night():
+        prices = [0.03 + (i % 9) * 0.002 for i in range(32)]
+        slots = ts_slots(base, prices)
+        for rank in ("cheapest", "offsun"):
+            windows = pick_all(slots, 0.25 * 3600, 5 * 3600, 0.1, base - 3600, rank)
+            for i in range(32):
+                assert_true(
+                    now_in_windows(windows, base + i * SLOT),
+                    "%s covers 8h night slot %s" % (rank, i),
+                )
 
     def test_idle_after_window_same_horizon():
         slots = ts_slots(base, [0.04] * 16)
@@ -351,6 +447,12 @@ def main():
     case("join_current_slot", test_join_current_slot)
     case("freeze_does_not_slide", test_freeze_does_not_slide)
     case("switch_when_tomorrow_cheaper", test_switch_when_tomorrow_cheaper)
+    case("quarter_min_fills_under_ceiling_holes", test_quarter_min_fills_under_ceiling_holes)
+    case("adjacent_bands_stay_split", test_adjacent_bands_stay_split)
+    case("fill_respects_max_hours", test_fill_respects_max_hours)
+    case("frozen_swiss_cheese_is_filled", test_frozen_swiss_cheese_is_filled)
+    case("offsun_does_not_fill_blocked_hour", test_offsun_does_not_fill_blocked_hour)
+    case("quarter_min_covers_long_night", test_quarter_min_covers_long_night)
     case("idle_after_window_same_horizon", test_idle_after_window_same_horizon)
     case("replan_when_ceiling_changes", test_replan_when_ceiling_changes)
     case("end_to_end_script", test_end_to_end_script)
