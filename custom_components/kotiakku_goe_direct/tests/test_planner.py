@@ -241,6 +241,36 @@ def main():
                     "%s covers 8h night slot %s" % (rank, i),
                 )
 
+    def test_nordpool_fi_2026_09_03_night():
+        # FI day-ahead 15-min, EUR/MWh / 1000, 2026-09-03 21:45Z–05:45Z.
+        # Greedy 16-island Off-sun left holes at 22:00 (38.91) and 23:00
+        # (39.82) even though both are under the 0.1 €/kWh ceiling. The
+        # first slot over the cap is 05:30Z at 101.81 €/MWh.
+        prices = [
+            0.01999, 0.03891, 0.03487, 0.03168, 0.02920, 0.03982, 0.03554, 0.03020,
+            0.02783, 0.03842, 0.03785, 0.03270, 0.02800, 0.03042, 0.03563, 0.03299,
+            0.03468, 0.03304, 0.03277, 0.02960, 0.03803, 0.01622, 0.02492, 0.04428,
+            0.07148, 0.02800, 0.04044, 0.07237, 0.08670, 0.07874, 0.09451, 0.10181,
+            0.11292,
+        ]
+        slots = ts_slots(base, prices)
+        windows = pick_all(slots, 0.25 * 3600, 5 * 3600, 0.1, base - 3600, "offsun")
+        over_i = 31
+        for i, price in enumerate(prices):
+            ts = base + i * SLOT
+            if i < over_i:
+                assert_true(
+                    now_in_windows(windows, ts),
+                    "Off-sun covers FI slot %s at %.4f €/kWh" % (i, price),
+                )
+            else:
+                assert_true(
+                    not now_in_windows(windows, ts),
+                    "Off-sun stops at over-ceiling slot %s (%.4f)" % (i, price),
+                )
+        last = max(w["end"] for w in windows)
+        assert_eq(last, base + over_i * SLOT, "last window ends at first over-ceiling slot")
+
     def test_idle_after_window_same_horizon():
         slots = ts_slots(base, [0.04] * 16)
         planned = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600)
@@ -453,6 +483,7 @@ def main():
     case("frozen_swiss_cheese_is_filled", test_frozen_swiss_cheese_is_filled)
     case("offsun_does_not_fill_blocked_hour", test_offsun_does_not_fill_blocked_hour)
     case("quarter_min_covers_long_night", test_quarter_min_covers_long_night)
+    case("nordpool_fi_2026_09_03_night", test_nordpool_fi_2026_09_03_night)
     case("idle_after_window_same_horizon", test_idle_after_window_same_horizon)
     case("replan_when_ceiling_changes", test_replan_when_ceiling_changes)
     case("end_to_end_script", test_end_to_end_script)
