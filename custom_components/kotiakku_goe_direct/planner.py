@@ -3,7 +3,10 @@
 Same rules as the python_script version: contiguous slots, duration in
 [min, max], every 15-minute price ≤ ceiling, then greedy cheapest / longest /
 earliest / offsun. Off-sun is cheapest after dropping hours with enough
-forecast energy. Freeze is per rank.
+forecast energy. Min hours is the shortest session (cold-weather): greedy
+will not pick a shorter bottom, and a pause shorter than min between two
+bottoms is joined if those slots are still under the ceiling. The ceiling
+is a hard cap, not the selection rule. Freeze is per rank.
 """
 
 from __future__ import annotations
@@ -263,6 +266,100 @@ def _without_overlap(slots, start, end):
     return [slot for slot in slots if not _overlaps(slot, start, end)]
 
 
+def _copy_windows(windows):
+    return [{"avg": w["avg"], "start": w["start"], "end": w["end"]} for w in windows]
+
+
+def _window_spans(windows):
+    return [(w["start"], w["end"]) for w in sorted(windows, key=lambda w: w["start"])]
+
+
+def _avg_span(slots, start, end):
+    total_p = 0.0
+    total_d = 0.0
+    for slot in slots:
+        if slot[0] >= start - 1 and slot[1] <= end + 1:
+            dur = slot[1] - slot[0]
+            if dur > 0:
+                total_d = total_d + dur
+                total_p = total_p + (slot[2] * dur)
+    if total_d <= 0:
+        return 0.0
+    return total_p / total_d
+
+
+def _tiles_span(slots, start, end):
+    if not slots:
+        return False
+    ordered = sorted(slots, key=lambda slot: slot[0])
+    if ordered[0][0] > start + GAP_S:
+        return False
+    if ordered[-1][1] < end - GAP_S:
+        return False
+    for i in range(1, len(ordered)):
+        if ordered[i][0] - ordered[i - 1][1] > GAP_S:
+            return False
+    return True
+
+
+def _rank_sort(windows, rank):
+    rank = norm_rank(rank)
+
+    def key(w):
+        dur = _win_dur(w)
+        if rank == "longest":
+            return (-dur, w["avg"], w["start"])
+        if rank == "earliest":
+            return (w["start"], -dur, w["avg"])
+        return (w["avg"], -dur, w["start"])
+
+    return sorted(windows, key=key)
+
+
+def coalesce_short_gaps(windows, slots, ceiling, min_s, max_s):
+    """Join bottoms if the idle between them is shorter than min hours.
+
+    A 15-minute pause is as wasteful in the cold as a 15-minute session.
+    Gaps at least min hours, over-ceiling slots, and blocked holes stay.
+    Adjacent windows (already touching) stay split so cheapest min-length
+    bands remain separate. Merged duration stays ≤ max hours.
+    """
+    if windows is None or len(windows) < 2:
+        return windows
+    ordered = _copy_windows(windows)
+    ordered.sort(key=lambda w: w["start"])
+    out = [ordered[0]]
+    for nxt in ordered[1:]:
+        prev = out[-1]
+        gap_start = prev["end"]
+        gap_end = nxt["start"]
+        gap_dur = gap_end - gap_start
+        merged_dur = nxt["end"] - prev["start"]
+        if gap_end <= gap_start + GAP_S:
+            out.append(nxt)
+            continue
+        if gap_dur >= min_s - TARGET_EPS_S:
+            out.append(nxt)
+            continue
+        if merged_dur > max_s + TARGET_EPS_S:
+            out.append(nxt)
+            continue
+        gap = [
+            slot
+            for slot in slots
+            if slot[0] >= gap_start - 1 and slot[1] <= gap_end + 1
+        ]
+        if not _tiles_span(gap, gap_start, gap_end):
+            out.append(nxt)
+            continue
+        if any(slot[2] > ceiling + PRICE_EPS for slot in gap):
+            out.append(nxt)
+            continue
+        prev["end"] = nxt["end"]
+        prev["avg"] = _avg_span(slots, prev["start"], prev["end"])
+    return out
+
+
 def pick_best(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
     n = len(slots)
     if n == 0:
@@ -330,7 +427,8 @@ def pick_all(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
             break
         windows.append({"avg": best[0], "start": best[1], "end": best[2]})
         remaining = _without_overlap(remaining, best[1], best[2])
-    return windows
+    joined = coalesce_short_gaps(windows, slots, ceiling, min_s, max_s)
+    return _rank_sort(joined, rank)
 
 
 def _set_better(new, old, rank="cheapest"):
@@ -432,6 +530,13 @@ def choose(
     if _params_match(prev, min_hours, max_hours, ceiling, rank, blocked):
         prev_windows = prev.get("windows")
         prev_ok = prev_windows is not None and len(prev_windows) > 0
+    if prev_ok:
+        joined_prev = _rank_sort(
+            coalesce_short_gaps(prev_windows, slots, ceiling, min_s, max_s),
+            rank,
+        )
+        if _window_spans(joined_prev) != _window_spans(prev_windows):
+            return _choice(joined_prev, prev.get("horizon") or horizon, "planned")
     last = last_end(prev_windows) if prev_ok else None
     if prev_ok and last is not None and last > now_ts:
         # Same-horizon replans would drop elapsed slots and look "better"
@@ -445,7 +550,10 @@ def choose(
     if prev_ok and last is not None and last <= now_ts:
         prev_horizon = prev["horizon"]
         if prev_horizon is None or horizon <= prev_horizon + GAP_S:
-            return _choice(prev_windows, prev["horizon"], "idle_after_window")
+            if not new_windows:
+                return _choice(prev_windows, prev["horizon"], "idle_after_window")
+            # Same-horizon leftovers still contain another min-length bottom.
+            return _choice(new_windows, horizon, "planned")
         if not new_windows:
             return _choice(prev_windows, prev["horizon"], "no_window")
         return _choice(new_windows, horizon, "planned_new_horizon")
@@ -608,6 +716,8 @@ def plan(
         result["window_%s_avg" % i] = None
     for i, w in enumerate(iso_ws):
         n = i + 1
+        if n > MAX_WINDOWS:
+            break
         result["window_%s_start" % n] = w["start"]
         result["window_%s_end" % n] = w["end"]
         result["window_%s_avg" % n] = w["avg"]

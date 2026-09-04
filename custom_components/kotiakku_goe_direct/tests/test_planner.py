@@ -13,6 +13,7 @@ clamp_hours = planner.clamp_hours
 norm_rank = planner.norm_rank
 pick_all = planner.pick_all
 plan = planner.plan
+now_in_windows = planner.now_in_windows
 
 
 def run_plan(now, source_attrs, data=None, prev=None):
@@ -144,6 +145,121 @@ def main():
         chosen = choose(today + tomorrow, 2.0, 5.0, 0.1, now_ts, prev)
         assert_eq(chosen["reason"], "switched", "cheaper tomorrow set")
         assert_true(chosen["windows"][0]["avg"] < prev_windows[0]["avg"], "new first is cheaper")
+
+    def test_min_drops_short_bottoms():
+        # Isolated 15-minute dip is under the cap but shorter than min.
+        prices = [0.2] * 4 + [0.01] + [0.2] * 4
+        windows = pick_all(
+            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
+        )
+        assert_eq(len(windows), 0, "15 min bottom is not a session when min is 1 h")
+        assert_true(
+            not now_in_windows(windows, base + 4 * SLOT),
+            "a simple ceiling would have taken 0.01",
+        )
+
+    def test_one_hour_min_joins_short_pauses():
+        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
+        slots = ts_slots(base, prices)
+        for rank in ("cheapest", "offsun"):
+            windows = pick_all(slots, 1 * 3600, 5 * 3600, 0.1, base - 3600, rank)
+            for w in windows:
+                assert_true(dur_h(w) + 0.01 >= 1.0, "%s session ≥ 1 h" % rank)
+            assert_true(now_in_windows(windows, base), "%s includes the 0.02 bottom" % rank)
+            assert_true(
+                now_in_windows(windows, base + SLOT),
+                "%s does not pause 15–30 min in the first bottom" % rank,
+            )
+            assert_true(
+                not now_in_windows(windows, base + 5 * SLOT),
+                "%s keeps the over-ceiling spike" % rank,
+            )
+            assert_true(
+                now_in_windows(windows, base + 6 * SLOT),
+                "%s second bottom after the spike" % rank,
+            )
+
+    def test_adjacent_bands_stay_split():
+        prices = [0.09] * 8 + [0.01] * 8 + [0.09] * 8
+        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
+        assert_eq(len(windows), 3, "touching bands are not merged")
+        assert_eq(windows[0]["start"], base + 8 * SLOT, "dip still first")
+
+    def test_over_ceiling_pause_not_joined():
+        prices = [0.02] * 4 + [0.2] * 4 + [0.03] * 4
+        windows = pick_all(
+            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
+        )
+        ordered = sorted(windows, key=lambda w: w["start"])
+        assert_eq(len(ordered), 2, "spike keeps two bottoms")
+        assert_true(
+            not now_in_windows(windows, base + 4 * SLOT),
+            "over-ceiling hour stays off",
+        )
+
+    def test_join_respects_max_hours():
+        prices = [0.04] * 12 + [0.06] + [0.04] * 12
+        windows = pick_all(
+            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
+        )
+        for w in windows:
+            assert_true(dur_h(w) <= 5.0 + 0.01, "each window still ≤ max")
+        assert_true(len(windows) >= 2, "6.25 h span does not become one window")
+
+    def test_frozen_short_pause_is_joined():
+        prices = [0.02] * 4 + [0.05] + [0.03] * 4 + [0.15] + [0.04] * 4
+        slots = ts_slots(base, prices)
+        cheesy = [
+            {"avg": 0.02, "start": base, "end": base + 4 * SLOT},
+            {"avg": 0.03, "start": base + 5 * SLOT, "end": base + 9 * SLOT},
+        ]
+        prev = {
+            "windows": cheesy,
+            "min_hours": 1.0,
+            "max_hours": 5.0,
+            "ceiling": 0.1,
+            "horizon": slots[-1][1],
+            "rank": "offsun",
+        }
+        chosen = choose(slots, 1.0, 5.0, 0.1, base + SLOT, prev, "offsun")
+        assert_eq(chosen["reason"], "planned", "join is a replan, not a slide")
+        assert_eq(len(chosen["windows"]), 1, "15 min pause joined")
+        assert_eq(chosen["windows"][0]["start"], base, "start of the first bottom held")
+        assert_eq(chosen["windows"][0]["end"], base + 9 * SLOT, "run now 2:15 h")
+
+    def test_offsun_does_not_fill_blocked_hour():
+        prices = [0.04] * 8 + [0.04] * 4 + [0.04] * 8
+        slots = ts_slots(base, prices)
+        blocked = [(base + 8 * SLOT, base + 12 * SLOT)]
+        chosen = choose(slots, 2.0, 5.0, 0.1, base - 3600, None, "offsun", blocked)
+        assert_eq(len(chosen["windows"]), 2, "dropped surplus hour stays a gap")
+        assert_eq(chosen["windows"][0]["end"], base + 8 * SLOT, "first window stops at block")
+        assert_eq(chosen["windows"][1]["start"], base + 12 * SLOT, "second window after block")
+
+    def test_nordpool_fi_2026_09_03_night():
+        # FI day-ahead 15-min, EUR/MWh / 1000, 2026-09-03 21:45Z–05:45Z.
+        # Min 1 h: take bottoms, join pauses shorter than 1 h, do not charge
+        # every quarter under 0.1 (that would be a simple ceiling).
+        prices = [
+            0.01999, 0.03891, 0.03487, 0.03168, 0.02920, 0.03982, 0.03554, 0.03020,
+            0.02783, 0.03842, 0.03785, 0.03270, 0.02800, 0.03042, 0.03563, 0.03299,
+            0.03468, 0.03304, 0.03277, 0.02960, 0.03803, 0.01622, 0.02492, 0.04428,
+            0.07148, 0.02800, 0.04044, 0.07237, 0.08670, 0.07874, 0.09451, 0.10181,
+            0.11292,
+        ]
+        slots = ts_slots(base, prices)
+        windows = pick_all(slots, 1 * 3600, 5 * 3600, 0.1, base - 3600, "offsun")
+        assert_true(windows, "at least one bottom")
+        for w in windows:
+            assert_true(dur_h(w) + 0.01 >= 1.0, "no session shorter than 1 h")
+            assert_true(dur_h(w) <= 5.0 + 0.01, "no session longer than max")
+        assert_true(now_in_windows(windows, base), "includes the 19.99 €/MWh bottom")
+        assert_true(
+            not now_in_windows(windows, base + 31 * SLOT),
+            "still off at 101.81 €/MWh",
+        )
+        assert_true(len(windows) >= 1, "at least one bottom")
+        # Contiguous 7.75 h under the cap becomes 5 h + leftover, not 15-min islands.
 
     def test_idle_after_window_same_horizon():
         slots = ts_slots(base, [0.04] * 16)
@@ -351,6 +467,14 @@ def main():
     case("join_current_slot", test_join_current_slot)
     case("freeze_does_not_slide", test_freeze_does_not_slide)
     case("switch_when_tomorrow_cheaper", test_switch_when_tomorrow_cheaper)
+    case("min_drops_short_bottoms", test_min_drops_short_bottoms)
+    case("one_hour_min_joins_short_pauses", test_one_hour_min_joins_short_pauses)
+    case("adjacent_bands_stay_split", test_adjacent_bands_stay_split)
+    case("over_ceiling_pause_not_joined", test_over_ceiling_pause_not_joined)
+    case("join_respects_max_hours", test_join_respects_max_hours)
+    case("frozen_short_pause_is_joined", test_frozen_short_pause_is_joined)
+    case("offsun_does_not_fill_blocked_hour", test_offsun_does_not_fill_blocked_hour)
+    case("nordpool_fi_2026_09_03_night", test_nordpool_fi_2026_09_03_night)
     case("idle_after_window_same_horizon", test_idle_after_window_same_horizon)
     case("replan_when_ceiling_changes", test_replan_when_ceiling_changes)
     case("end_to_end_script", test_end_to_end_script)

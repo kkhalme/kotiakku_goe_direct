@@ -437,6 +437,36 @@ def main():
         on, seen = until_unplug_tick(True, False, False)
         assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
 
+    def test_one_hour_min_joins_short_pauses_over_time():
+        day = datetime.datetime(2026, 9, 3, 21, 45, tzinfo=timezone.utc)
+        base = day.timestamp()
+        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
+        attrs = {"raw_today": slots_from(base, prices)}
+        clock = Clock(day)
+        results = plan_ranks(clock, attrs, {}, min_hours=1.0, max_hours=5.0, ceiling=0.1)
+        off = results["offsun"]["raw_windows"]
+        assert_true(off, "planned bottoms")
+        for w in off:
+            assert_true((w["end"] - w["start"]) / 3600 + 0.01 >= 1.0, "session ≥ 1 h")
+        last = max(ends_of(results["offsun"]))
+        for ts in tick_times(base, last, off):
+            clock.set(datetime.datetime.fromtimestamp(ts, tz=timezone.utc))
+            results = plan_ranks(clock, attrs, results, min_hours=1.0, max_hours=5.0, ceiling=0.1)
+            slot_i = int((ts - base) // 900)
+            if slot_i < 0 or slot_i >= len(prices):
+                continue
+            active = now_in_windows(results["offsun"]["raw_windows"], ts)
+            if prices[slot_i] > 0.1:
+                assert_eq(active, False, "spike stays off @ %s" % iso(ts))
+            assert_eq(
+                charger_full_power(POLICY_SUPERCHEAP, results, ts),
+                active,
+                "Supercheap follows offsun @ %s" % iso(ts),
+            )
+        assert_true(now_in_windows(off, base), "starts on the 0.02 bottom")
+        assert_true(now_in_windows(off, base + 900), "no 15 min pause after the bottom")
+        assert_true(not now_in_windows(off, base + 5 * 900), "spike off")
+
     def test_boundary_exclusive_end():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
@@ -464,6 +494,7 @@ def main():
     case("surplus_split_hold_over_15_min", test_surplus_split_hold_over_15_min)
     case("surplus_phase_hold_over_15_min", test_surplus_phase_hold_over_15_min)
     case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
+    case("one_hour_min_joins_short_pauses_over_time", test_one_hour_min_joins_short_pauses_over_time)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
 
     run()
