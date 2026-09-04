@@ -271,6 +271,8 @@ The spot chart is `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead cu
 python3 custom_components/kotiakku_goe_direct/tests/test_serial.py
 python3 custom_components/kotiakku_goe_direct/tests/test_planner.py
 python3 custom_components/kotiakku_goe_direct/tests/test_clock_roll.py
+python3 custom_components/kotiakku_goe_direct/tests/test_spec_windows.py
+python3 custom_components/kotiakku_goe_direct/tests/test_spec_surplus.py
 python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py
 python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
 python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot --cheapest
