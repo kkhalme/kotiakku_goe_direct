@@ -618,6 +618,21 @@ def main():
 
     def test_leftover_and_budget():
         assert_eq(leftover_w(3000, 1000, 500), 2500, "leftover")
+        assert_eq(leftover_w(800, 3500, 3000), 300, "house includes 3 kW EV: add back")
+        assert_eq(
+            leftover_w(800, 500, 3000),
+            300,
+            "house misses the 3 kW car: do not invent surplus",
+        )
+        assert_eq(
+            leftover_w(3800, 3500, 12000),
+            300,
+            "Controller still has an unplugged car: do not add 12 kW",
+        )
+        assert_eq(surplus.effective_ev_w(12000, 3000), 3000, "nrg beats lagged Controller")
+        assert_eq(surplus.effective_ev_w(0, 3000, controller_usable=False), 3000, "unknown Controller uses nrg")
+        assert_eq(surplus.effective_ev_w(3000, None), 3000, "no nrg keeps Controller")
+        assert_eq(surplus.effective_ev_w(3000, 0), 3000, "zero nrg is missing, keep Controller")
         lot, psm, amp = budget(2500, 6, 32, 50, 230, 4140)
         assert_eq(lot, 10, "2500 W 1-phase lot")
         assert_eq(psm, 1, "1-phase")
@@ -867,6 +882,58 @@ def main():
             ),
             {b: 8000},
             "higher priority unplugged: next plugged gets leftover",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=300,
+                lops=lops,
+                plugged={a: False, b: True},
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 0, b: 3000},
+                states={a: "Idle", b: "Charging"},
+                split_hold=True,
+            ),
+            {b: 300},
+            "unplugged first + stale 3 kW steal: only leftover, not 3 kW",
+        )
+        tiny = leftover_w(800, 500, 3000)
+        assert_eq(tiny, 300, "house-without-EV leftover is 300 W")
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=tiny,
+                lops=lops,
+                plugged={a: False, b: True},
+                split_min_w=3000,
+                charger_max_w=22080,
+                split_hold=True,
+            ),
+            {b: 300},
+            "300 W leftover on the only plugged car, no 3 kW floor",
+        )
+        _lot, psm_tiny, amp_tiny = surplus.budget(tiny, 6, 32, 50, 230, 4140)
+        assert_eq((psm_tiny, amp_tiny), (1, 6), "300 W budgets 6 A, not 13 A / 3 kW")
+        held = surplus.surplus_decision(
+            True, 1500, 96, window_ok=True, hold_active=True, hold_exit_w=2000
+        )
+        assert_true(held["use_floor_budget"], "1500 W stays in 6 A hold until 2000 W")
+        recovered = surplus.surplus_decision(
+            True, 2100, 96, window_ok=True, hold_active=True, hold_exit_w=2000
+        )
+        assert_true(not recovered["arm_floor"], "2100 W leaves the hold")
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=8000,
+                lops={a: 50, b: 50},
+                plugged={a: False, b: True},
+                split_min_w=3000,
+                charger_max_w=22080,
+            ),
+            {b: 8000},
+            "equal priority: unplugged charger is not offered leftover",
         )
         assert_eq(
             alloc(

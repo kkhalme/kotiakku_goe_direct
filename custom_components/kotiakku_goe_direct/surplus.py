@@ -41,8 +41,48 @@ def watts(state, in_kw, default=0):
     return int(value * (1000 if in_kw else 1))
 
 
+def house_includes_ev(house_w, ev_w):
+    """True when house watts already contain the EV take.
+
+    Leftover is ``solar − house + EV`` only in that case (house CT includes
+    the car, so EV must be added back). If house is clearly below the EV
+    take — house excludes the charger, or the Controller 5-min mean still
+    has a car that just unplugged — adding EV invents surplus and will
+    keep charging from the grid.
+    """
+    house_w = int(house_w)
+    ev_w = int(ev_w)
+    if ev_w <= 0:
+        return True
+    margin = max(1000, ev_w // 5)
+    return house_w >= ev_w - margin
+
+
+def effective_ev_w(controller_w, nrg_w=None, *, controller_usable=True):
+    """EV watts for leftover: instant charger ``nrg`` when known.
+
+    Controller Car-power is a 5-min mean. After a car unplugs or amp
+    drops, that mean stays high while house has already fallen. Prefer
+    the lower of Controller and summed charger ``nrg`` so leftover is
+    not inflated. Unknown Controller with ``nrg`` uses ``nrg``. Missing
+    ``nrg`` keeps Controller (or 0).
+    """
+    nrg = None if nrg_w is None else max(int(nrg_w), 0)
+    ctrl = max(int(controller_w or 0), 0) if controller_usable else None
+    if nrg:
+        if ctrl:
+            return min(ctrl, nrg)
+        return nrg
+    return ctrl or 0
+
+
 def leftover_w(solar_w, house_w, ev_w):
-    return int(solar_w) - int(house_w) + int(ev_w)
+    solar_w = int(solar_w)
+    house_w = int(house_w)
+    ev_w = max(int(ev_w), 0)
+    if ev_w > 0 and not house_includes_ev(house_w, ev_w):
+        return solar_w - house_w
+    return solar_w - house_w + ev_w
 
 
 UNUSABLE_STATES = ("", "unknown", "unavailable", "none", "nan")
@@ -260,6 +300,8 @@ def surplus_decision(
     start_min_w=2000,
     hold_min_w=1000,
     floor_expired=False,
+    hold_active=False,
+    hold_exit_w=None,
 ):
     """Start / hold / stop for leftover surplus.
 
@@ -267,10 +309,20 @@ def surplus_decision(
     Low hold (6 A for hold_min): leftover < hold_min_w, SoC below
     soc_on − hyst, or Kotiakku SoC/solar/house unusable. Recovered
     sensors cancel the timer. Cannot start while sensors are unusable.
+    Once the low-hold timer is running, leftover must reach
+    ``hold_exit_w`` (default start leftover) before the hold cancels, so
+    chatter around 1000 W cannot reset the 15 min forever.
     """
     soc_start = window_ok and soc >= soc_on
     soc_low = window_ok and soc < (soc_on - soc_hyst)
     leftover_low = leftover < hold_min_w
+    try:
+        exit_w = hold_min_w if hold_exit_w is None else int(hold_exit_w)
+    except (TypeError, ValueError):
+        exit_w = hold_min_w
+    exit_w = max(int(hold_min_w), exit_w)
+    if hold_active:
+        leftover_low = leftover < exit_w
     in_low_hold = (not window_ok) or leftover_low or soc_low
     write_off = session and floor_expired and in_low_hold
     write_on = not write_off and (
@@ -587,6 +639,13 @@ def _can_charge(watts, min_amp, volts, phase3_min_w):
     return watts >= min_charge_w(watts, min_amp, volts, phase3_min_w)
 
 
+def _plugged(plugged, serial):
+    """Unknown plugged map / missing serial: treat as plugged (old callers)."""
+    if not isinstance(plugged, dict) or serial not in plugged:
+        return True
+    return bool(plugged[serial])
+
+
 def _serial_take(serial, remaining, charger_max_w, take_w, states):
     offered = min(max(int(remaining), 0), max(int(charger_max_w), 0))
     if take_w is not None and serial in take_w:
@@ -636,15 +695,29 @@ def surplus_allocation_plan(
     leftover then shrinks so the first would use it all, keep stealing
     3 kW for the hold minutes unless ``split_expired``. ``lops`` is HA
     charger priority, not app ``lop``. HA does not write ``lop``.
-    A single charger always gets the leftover.
+    A single plugged charger always gets the leftover. Unplugged or
+    finished chargers are not offered leftover and cannot keep a 3 kW
+    steal alive. The 3 kW steal only runs when leftover itself is at
+    least ``split_min_w`` and the higher-priority car is actually taking
+    power — a WaitCar / idle first slot must not invent 3 kW for the
+    next car.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]
     empty = {"allocations": {}, "remainder_w": leftover_w, "arm_split_hold": False}
     if not serials:
         return empty
-    shared = {serial: leftover_w for serial in serials}
-    if len(serials) == 1:
+    take_w = take_w if isinstance(take_w, dict) else None
+    states = states if isinstance(states, dict) else None
+    plugged_on = [serial for serial in serials if _plugged(plugged, serial)]
+    if states is not None:
+        plugged_on = [
+            serial for serial in plugged_on if not car_finished(states.get(serial))
+        ]
+    shared = {serial: leftover_w for serial in plugged_on}
+    if not plugged_on:
+        return empty
+    if len(plugged_on) == 1:
         return {"allocations": shared, "remainder_w": leftover_w, "arm_split_hold": False}
     ranks = []
     for serial in serials:
@@ -658,22 +731,19 @@ def surplus_allocation_plan(
         ranks.append(int(rank))
     if len(set(ranks)) <= 1:
         return {"allocations": shared, "remainder_w": leftover_w, "arm_split_hold": False}
-    order = sorted(serials, key=lambda serial: (int(lops[serial]), serials.index(serial)))
-    plugged_on = [serial for serial in order if plugged.get(serial)]
-    pool = plugged_on or order
+    order = sorted(
+        plugged_on, key=lambda serial: (int(lops[serial]), serials.index(serial))
+    )
+    pool = order
     remaining = leftover_w
     charger_max_w = max(int(charger_max_w), 0)
     split_min_w = int(split_min_w)
     split_floor_w = int(split_floor_w)
-    take_w = take_w if isinstance(take_w, dict) else None
-    states = states if isinstance(states, dict) else None
     allocations = {}
     prev = None
     prev_take = 0
     remainder_after_high = leftover_w
     for serial in pool:
-        if states is not None and car_finished(states.get(serial)):
-            continue
         if not allocations:
             if not _can_charge(remaining, min_amp, volts, phase3_min_w):
                 break
@@ -695,7 +765,11 @@ def surplus_allocation_plan(
             prev_take = take
             continue
         in_dead = remaining <= split_floor_w
-        want_steal = (not in_dead) or (split_hold and not split_expired)
+        want_steal = (
+            leftover_w >= split_min_w
+            and prev_take >= 100
+            and ((not in_dead) or (split_hold and not split_expired))
+        )
         keep_w = _steal_keep_w(
             remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w
         )
