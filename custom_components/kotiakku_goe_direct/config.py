@@ -193,6 +193,20 @@ def _with_legacy(raw: dict) -> dict:
     return src
 
 
+def source_refresh_ids(*groups) -> list[str]:
+    """Unique entity ids this integration reads from other integrations."""
+    out = []
+    seen = set()
+    for group in groups:
+        for raw in group or ():
+            eid = str(raw or "").strip()
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            out.append(eid)
+    return out
+
+
 def persistable(raw: dict) -> dict:
     src = _with_legacy(raw)
     cfg = default_config()

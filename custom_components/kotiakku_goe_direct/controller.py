@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState
+from homeassistant.helpers.entity_component import async_update_entity
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_utc_time,
@@ -15,7 +19,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .config import clamp_priority, entry_config
+from .config import clamp_priority, entry_config, source_refresh_ids
 from .const import (
     CONF_CONTROLLER_ENTITY,
     CONF_CONTROLLER_IN_KW,
@@ -198,6 +202,7 @@ class KotiakkuGoeDirectController:
         self._price_unsub = None
         self._tracked_price = None
         self._logged_kotiakku_unusable = False
+        self._refreshing = False
         self._surplus_amp = {}
         self._surplus_psm = {}
         self._kotiakku_ids = {
@@ -428,6 +433,59 @@ class KotiakkuGoeDirectController:
     def surplus_hours(self):
         return list((self.window_result or {}).get("blocked") or [])
 
+    def _source_refresh_ids(self) -> list[str]:
+        extras = [self.price_entity_id()]
+        extras.extend(self.car_entity(serial) for serial in self.chargers)
+        extras.extend(self.power_entity(serial) for serial in self.chargers)
+        return source_refresh_ids(
+            (
+                self.soc_entity,
+                self.solar_entity,
+                self.house_entity,
+                self.controller_entity,
+                self.solar_today_entity,
+                self.solar_tomorrow_entity,
+            ),
+            extras,
+        )
+
+    async def _refresh_one_entity(self, entity_id: str) -> None:
+        if self.hass.states.get(entity_id) is None:
+            return
+        try:
+            await async_update_entity(self.hass, entity_id)
+        except Exception as exc:
+            _LOGGER.debug(
+                "kotiakku_goe_direct: update %s at start failed: %s",
+                entity_id,
+                exc,
+            )
+
+    async def _refresh_source_entities(self) -> None:
+        """Ask wired sensors to fetch so the first plan is not leftover restore."""
+        entity_ids = self._source_refresh_ids()
+        if not entity_ids:
+            return
+        self._refreshing = True
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(self._refresh_one_entity(eid) for eid in entity_ids),
+                    return_exceptions=True,
+                ),
+                timeout=20,
+            )
+        except TimeoutError:
+            _LOGGER.debug("kotiakku_goe_direct: source refresh timed out at start")
+        finally:
+            self._refreshing = False
+
+    async def _on_hass_started(self, _event=None):
+        await self._refresh_source_entities()
+        await self.async_plan()
+        await self.async_charge()
+        self._schedule_surplus()
+
     async def async_setup(self):
         stored = await self._store.async_load()
         if stored:
@@ -436,6 +494,7 @@ class KotiakkuGoeDirectController:
             self.restore.update(stored.get("restore") or {})
             self.seen.update(stored.get("seen") or {})
             self._charge_session.update(stored.get("charge_session") or {})
+        await self._refresh_source_entities()
         track = [
             self.soc_entity,
             self.solar_entity,
@@ -469,6 +528,12 @@ class KotiakkuGoeDirectController:
         await self.async_plan()
         self._schedule_surplus()
         await self.async_charge()
+        if self.hass.state is not CoreState.running:
+            self._unsubs.append(
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._on_hass_started
+                )
+            )
 
     def _cancel(self, attr):
         unsub = getattr(self, attr)
@@ -514,6 +579,8 @@ class KotiakkuGoeDirectController:
             )
 
     async def _on_state(self, event):
+        if self._refreshing:
+            return
         entity = event.data.get("entity_id")
         if entity in self._kotiakku_ids:
             self._schedule_surplus()
@@ -549,6 +616,8 @@ class KotiakkuGoeDirectController:
             self._schedule_surplus()
 
     async def _on_price(self, _event):
+        if self._refreshing:
+            return
         await self.async_plan()
         await self.async_charge()
 

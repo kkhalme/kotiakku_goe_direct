@@ -129,6 +129,8 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
 
+On load — and again when Home Assistant has finished starting — the integration asks every wired sensor (Kotiakku, Forecast.Solar, Nordpool, charger car/power) to update before it plans, so restored leftover values are not used.
+
 After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):

@@ -378,6 +378,42 @@ def main():
         assert_eq(picked["solar_today_entity"], "", "does not invent today")
         assert_eq(picked["solar_tomorrow_entity"], "", "does not invent tomorrow")
 
+    def test_source_refresh_ids():
+        ids = config.source_refresh_ids(
+            (
+                "sensor.soc",
+                "sensor.pv",
+                "sensor.house",
+                "sensor.ev",
+                "sensor.energy_production_today",
+                "sensor.energy_production_tomorrow",
+                "",
+                None,
+            ),
+            (
+                "sensor.nordpool_kwh_fi",
+                "sensor.energy_production_today",
+                "sensor.go_echarger_111111_car_state",
+                "  ",
+            ),
+        )
+        assert_eq(
+            ids,
+            [
+                "sensor.soc",
+                "sensor.pv",
+                "sensor.house",
+                "sensor.ev",
+                "sensor.energy_production_today",
+                "sensor.energy_production_tomorrow",
+                "sensor.nordpool_kwh_fi",
+                "sensor.go_echarger_111111_car_state",
+            ],
+            "unique wired sources in order",
+        )
+        assert_eq(config.source_refresh_ids(), [], "no groups")
+        assert_eq(config.source_refresh_ids(None, []), [], "empty groups")
+
     def test_persistable_legacy_solar_keys():
         migrated = config.persistable(
             {
@@ -728,6 +764,7 @@ def main():
     case("normalize_and_form", test_normalize_and_form)
     case("entry_config_options_overlay", test_entry_config_options_overlay)
     case("persistable_does_not_invent_entities", test_persistable_does_not_invent_entities)
+    case("source_refresh_ids", test_source_refresh_ids)
     case("persistable_legacy_solar_keys", test_persistable_legacy_solar_keys)
     case("psm_and_surplus_eids", test_psm_and_surplus_eids)
     case("window_sensor_registry_migration", test_window_sensor_registry_migration)
