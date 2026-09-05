@@ -7,7 +7,10 @@ budget amps, phase hold, group lot beside full-power.
 
 from __future__ import annotations
 
-from harness import assert_eq, assert_true, case_runner, load_mod
+import datetime
+from zoneinfo import ZoneInfo
+
+from harness import Clock, assert_eq, assert_true, case_runner, load_mod
 
 surplus = load_mod("surplus", "_spec_sur")
 planner = load_mod("planner", "_spec_sur_p")
@@ -153,6 +156,21 @@ def main():
         hyst_edge = decide(True, 4000, 90, window_ok=True)
         assert_true(hyst_edge["write_on"] and not hyst_edge["arm_floor"], "SoC == soc_on-hyst is not low hold")
         assert_true(not decide(False, 3000, 90, window_ok=True)["write_on"], "SoC 90 cannot start")
+        default_exit = decide(True, 1500, 96, window_ok=True, hold_active=True)
+        assert_true(
+            default_exit["write_on"] and not default_exit["arm_floor"],
+            "hold_exit_w None uses hold_min_w: 1500 W already cancels",
+        )
+        raised_exit = decide(True, 999, 96, window_ok=True, hold_active=True, hold_exit_w=500)
+        assert_true(raised_exit["use_floor_budget"], "hold_exit_w below hold_min_w is raised")
+        still_on = decide(True, 4000, 96, window_ok=True, floor_expired=True)
+        assert_true(still_on["write_on"] and not still_on["write_off"], "expired hold does not stop while leftover is healthy")
+        sensors_dead = decide(True, 5000, 96, window_ok=False, hold_active=True, hold_exit_w=2000)
+        assert_true(sensors_dead["use_floor_budget"], "unusable Kotiakku stays in hold even at 5 kW")
+        recovered_ok = decide(True, 4000, 96, window_ok=True, hold_active=True, hold_exit_w=2000)
+        assert_true(recovered_ok["write_on"] and not recovered_ok["arm_floor"], "usable + leftover ≥ exit cancels hold")
+        deficit = decide(True, -200, 96, window_ok=True)
+        assert_true(deficit["use_floor_budget"], "negative leftover is a low hold, not abs'd")
 
     def test_three_kw_is_13a_one_phase_not_a_hold():
         lot, psm, amp = surplus.budget(3000, MIN_A, MAX_A, ECO_LOT, VOLTS, P3)
@@ -167,6 +185,17 @@ def main():
         assert_eq((psm, amp), (1, 10), "2500 W is 1-phase 10 A")
         hold3 = surplus.budget(3000, MIN_A, MAX_A, ECO_LOT, VOLTS, P3, force_psm=2)
         assert_eq((hold3[1], hold3[2]), (2, 6), "forced 3-phase below 4140 W stays 6 A")
+        lot, psm, amp = surplus.budget(4139, MIN_A, MAX_A, ECO_LOT, VOLTS, P3)
+        assert_eq((psm, amp), (1, 17), "1 W under 4140 W stays 1-phase")
+        lot, psm, amp = surplus.budget(-100, MIN_A, MAX_A, ECO_LOT, VOLTS, P3)
+        assert_eq((psm, amp), (1, 6), "negative leftover still floors at 6 A")
+        lot, psm, amp = surplus.budget(100000, MIN_A, MAX_A, ECO_LOT, VOLTS, P3)
+        assert_eq((lot, amp), (50, 32), "eco_lot then max_amp clip a huge leftover")
+        lot, psm, amp = surplus.budget(8000, MIN_A, MAX_A, ECO_LOT, VOLTS, P3, force_psm="x")
+        assert_eq((psm, amp), (2, 11), "bad force_psm is auto")
+        assert_eq(surplus.min_charge_w(0, MIN_A, VOLTS, P3), 1380, "0 W floor is 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(4139, MIN_A, VOLTS, P3), 1380, "just under 3-phase min")
+        assert_eq(surplus.min_charge_w(4140, MIN_A, VOLTS, P3), 4140, "at 3-phase min")
 
     def test_unplugged_first_does_not_keep_3kw_steal():
         alloc = surplus.surplus_allocations
@@ -348,6 +377,214 @@ def main():
         assert_eq(full("SolarPriority", result, 3500, enough_solar=True), False, "skip 22 kW")
         assert_eq(full("Supercheap", result, 3500), True, "legacy Supercheap maps")
         assert_eq(full("Cheapest", result, 3500, enough_solar=True), False, "legacy Cheapest now skips")
+        assert_eq(surplus.enough_solar(39.9, 40), False, "just under threshold")
+        assert_eq(surplus.enough_solar(0, 40), False, "0 kWh is not enough")
+        assert_eq(surplus.enough_solar(50, "x"), False, "bad threshold")
+        assert_eq(surplus.upcoming_solar_kwh(10, None), 10, "remaining only")
+        assert_eq(surplus.upcoming_solar_kwh(0, 0), 0, "both zero")
+        assert_eq(surplus.energy_kwh("10"), 10.0, "unitless is kWh")
+        assert_eq(surplus.energy_kwh("2", "MWh"), 2000.0, "MWh → kWh")
+        assert_eq(surplus.energy_kwh("10", "kW"), None, "kW is power")
+        assert_eq(surplus.energy_kwh("unknown", "kWh"), None, "unusable energy")
+
+    def test_nrg_parse_and_car_state_edges():
+        nrg = surplus.nrg_total_w
+        sample = [230, 230, 230, 0, 10, 10, 10, 0, 2300, 2300, 2300, 6900]
+        assert_eq(nrg(sample), 6900, "list index 11")
+        assert_eq(nrg("[230,230,230,0,10,10,10,0,2300,2300,2300,6900]"), 6900, "JSON list")
+        assert_eq(nrg('{"nrg":[230,230,230,0,10,10,10,0,2300,2300,2300,6900]}'), 6900, "JSON dict")
+        assert_eq(nrg("230,230,230,0,10,10,10,0,2300,2300,2300,6900"), 6900, "comma string")
+        assert_eq(nrg("1500"), 1500, "numeric sensor")
+        assert_eq(nrg([1, 2, 3]), None, "short list")
+        assert_eq(nrg(""), None, "empty")
+        assert_eq(nrg(None), None, "missing")
+        assert_eq(surplus.car_plugged("Error"), True, "Error is still plugged")
+        assert_eq(surplus.car_plugged("Connected"), True, "Connected")
+        assert_eq(surplus.car_plugged("Wait for car"), True, "spaces fold")
+        assert_eq(surplus.car_charging("2"), True, "numeric charging")
+        assert_eq(surplus.car_finished("Finished"), True, "Finished")
+        assert_eq(surplus.car_finished("4"), True, "numeric complete")
+        assert_eq(surplus.car_plugged(None), False, "missing state")
+        assert_eq(surplus.charger_take_w("Charging", 50, 8000, 22080), 8000, "take under 100 W is not accepting: assume leftover")
+        assert_eq(surplus.charger_take_w("Error", 3000, 8000, 22080), 0, "Error is plugged but not charging")
+        assert_eq(surplus.charger_take_w("Charging", 5000, 0, 22080), 0, "no leftover")
+        assert_eq(surplus.parse_lop("99"), 99, "lop 99")
+        assert_eq(surplus.parse_lop("100"), None, "lop 100 out of range")
+        assert_eq(surplus.parse_lop("1.6"), 2, "lop rounds")
+        assert_eq(surplus.sensor_usable("nan"), False, "nan")
+        assert_eq(surplus.sensor_usable(" none "), False, "none")
+        assert_eq(surplus.effective_ev_w(3000, 12000), 3000, "nrg higher than Controller: keep the lower")
+        assert_eq(surplus.effective_ev_w(3000, -50), 3000, "negative nrg is missing")
+        assert_eq(surplus.leftover_w(0, 0, 0), 0, "all zero")
+        assert_eq(surplus.leftover_w(0, 1000, 0), -1000, "house-only deficit")
+        margin = max(1000, 12000 // 5)
+        assert_eq(surplus.house_includes_ev(12000 - margin, 12000), True, "12 kW EV include threshold")
+        assert_eq(surplus.house_includes_ev(12000 - margin - 1, 12000), False, "1 W under 12 kW threshold")
+
+    def test_want_w_and_group_lot_edges():
+        want = surplus.surplus_want_w
+        assert_eq(want(12000, 50), 50, "take under 100 W is not accepting")
+        assert_eq(want(12000, "x"), 12000, "bad take wants leftover")
+        assert_eq(want(8000, 3000, last_amp=None, last_psm=2), 8000, "unknown last amp wants leftover")
+        assert_eq(
+            want(4140, 4140, last_amp=6, last_psm=2),
+            4140,
+            "at cap but leftover cannot raise amp: stay at take",
+        )
+        assert_eq(
+            surplus.group_lot_for_amps(17, [], 50),
+            17,
+            "no amps keeps leftover lot",
+        )
+        assert_eq(
+            surplus.group_lot_for_amps(17, [32, 21], 50),
+            50,
+            "1-phase 32 A + 21 A sums to 53 and is capped at eco_lot",
+        )
+        assert_eq(
+            surplus.group_lot_for_allocations(
+                17, {A: 8000}, min_amp=6, max_amp=32, eco_lot=50, volts=230, phase3_min_w=4140
+            ),
+            17,
+            "single allocation does not raise lot",
+        )
+        assert_eq(
+            surplus.group_surplus_setpoint(10, 1, 10, n_full=2, eco_lot=50),
+            (50, 1, 10),
+            "two full-power chargers still keep eco_lot",
+        )
+        assert_eq(surplus.phase_hold_psm(2, "x")["arm"], False, "bad last psm is first-start")
+        assert_eq(surplus.phase_hold_psm(2, 0), {"psm": 2, "arm": False}, "last psm 0 is not held")
+
+    def test_tiny_leftover_and_steal_below_floor():
+        alloc = surplus.surplus_allocations
+        both = leftover_kw_args()
+        assert_eq(
+            alloc([A, B], leftover_w=300, **both),
+            {},
+            "300 W + two unequal plugged cars: first cannot meet 6 A, no MQTT",
+        )
+        assert_eq(
+            alloc([A], leftover_w=300, **both),
+            {A: 300},
+            "300 W on a single plugged car is still offered",
+        )
+        equal = leftover_kw_args(lops={A: 50, B: 50})
+        assert_eq(
+            alloc([A, B], leftover_w=300, **equal),
+            {A: 300, B: 300},
+            "equal priority: both still get the tiny leftover",
+        )
+        assert_eq(
+            alloc([A, B], leftover_w=2999, take_w={A: 2000, B: 0}, states={A: "Charging", B: "Charging"}, **both),
+            {A: 2000},
+            "leftover under 3 kW cannot steal",
+        )
+        assert_eq(
+            alloc(
+                [A, B], leftover_w=4000, split_hold=True,
+                take_w={A: 3900, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 3900},
+            "steal would leave high at 1000 W < 6 A: no steal",
+        )
+        assert_eq(
+            alloc(
+                [A, B], leftover_w=4500, split_hold=True,
+                take_w={A: 4400, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 1500, B: 3000},
+            "steal that still leaves 6 A 1-phase on high: 1.5+3",
+        )
+        assert_eq(
+            alloc(
+                [A, B], leftover_w=8000,
+                take_w={A: 99, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 99, B: 7901},
+            "high take under 100 W is not a steal: remainder is unused leftover",
+        )
+        assert_eq(
+            surplus.surplus_allocation_plan([], leftover_w=8000, **both)["allocations"],
+            {},
+            "no serials",
+        )
+        assert_eq(
+            alloc([A, B], leftover_w=0, **both),
+            {},
+            "0 W leftover + unequal: nothing to offer",
+        )
+        assert_eq(
+            alloc([A, B], leftover_w=12000, take_w={A: 5000, B: 0}, states={A: "Charging", B: "Charging"}, **both),
+            {A: 5000, B: 7000},
+            "high taking 5 kW leaves 7 kW ≥ 3 kW for the next car",
+        )
+        tiny_max = leftover_kw_args(charger_max_w=5000)
+        assert_eq(
+            alloc([A, B], leftover_w=12000, take_w={A: 5000, B: 0}, states={A: "Charging", B: "Charging"}, **tiny_max),
+            {A: 5000, B: 5000},
+            "per-charger max 5 kW caps both shares",
+        )
+
+    def test_mqtt_start_floor_and_steal_amps():
+        dec, cmds = mqtt_for(2000, False, serials=[A], plugged={A: True})
+        assert_true(dec["write_on"] and not dec["use_floor_budget"], "start at 2000 W tracks leftover")
+        assert_eq(cmds[A]["amp"], 8, "2000 W publishes 8 A, not the 6 A floor")
+        assert_eq(cmds[A]["psm"], 1, "2000 W is 1-phase")
+        dec, cmds = mqtt_for(
+            12000,
+            True,
+            take_w={A: 10000, B: 0},
+            states={A: "Charging", B: "Charging"},
+        )
+        assert_eq(cmds[A]["amp"], 13, "9 kW steal share is 3-phase 13 A")
+        assert_eq(cmds[A]["psm"], 2, "9 kW is 3-phase")
+        assert_eq(cmds[B]["amp"], 13, "3 kW steal share is 1-phase 13 A")
+        assert_eq(cmds[B]["psm"], 1, "3 kW is 1-phase")
+        dec, cmds = mqtt_for(8000, True, last_psm={A: 1}, serials=[A], plugged={A: True})
+        assert_eq((cmds[A]["psm"], cmds[A]["amp"]), (1, 32), "MQTT path holds 1-phase at 32 A")
+
+    def test_offsun_hour_spread_tomorrow_and_evening():
+        hel = ZoneInfo("Europe/Helsinki")
+        noon = Clock(datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel), tz=hel)
+        both = surplus.surplus_hour_ranges(noon, 50.0, 50.0, 1.0, 60.17, 24.94)
+        tom_noon = datetime.datetime(2026, 3, 16, 12, 0, tzinfo=hel).timestamp()
+        assert_true(
+            any(start <= tom_noon < end for start, end in both),
+            "tomorrow kWh blocks tomorrow midday",
+        )
+        assert_true(len(both) >= 1, "today + tomorrow productive hours merge into ranges")
+        evening = Clock(datetime.datetime(2026, 3, 15, 20, 0, tzinfo=hel), tz=hel)
+        hours = surplus.expected_hour_kwh(
+            evening,
+            evening.now(),
+            evening.start_of_local_day(evening.now()) + datetime.timedelta(days=1),
+            50.0,
+            60.17,
+            24.94,
+        )
+        morning = datetime.datetime(2026, 3, 15, 8, 0, tzinfo=hel).timestamp()
+        assert_true(
+            all(abs(start - morning) > 1 for start, _end, _kwh in hours),
+            "remaining-today starts at now: morning hours are already gone",
+        )
+        assert_eq(
+            surplus.surplus_hour_ranges(noon, -5, None, 1.0, 60.17, 24.94),
+            [],
+            "negative remaining energy does not invent blocked hours",
+        )
+        assert_eq(
+            surplus.surplus_hour_ranges(noon, 50.0, None, "x", 60.17, 24.94),
+            [],
+            "bad hour threshold excludes nothing",
+        )
+        assert_eq(
+            surplus.expected_hour_kwh(
+                noon, noon.now(), noon.now(), None, 60.17, 24.94
+            ),
+            [],
+            "unknown energy: no hour profile",
+        )
 
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
@@ -359,6 +596,11 @@ def main():
     case("phase_hold_tracks_amp_on_held_phase", test_phase_hold_tracks_amp_on_held_phase)
     case("car_states_plugged_charging_finished", test_car_states_plugged_charging_finished)
     case("enough_solar_and_offsun_hours", test_enough_solar_and_offsun_hours)
+    case("nrg_parse_and_car_state_edges", test_nrg_parse_and_car_state_edges)
+    case("want_w_and_group_lot_edges", test_want_w_and_group_lot_edges)
+    case("tiny_leftover_and_steal_below_floor", test_tiny_leftover_and_steal_below_floor)
+    case("mqtt_start_floor_and_steal_amps", test_mqtt_start_floor_and_steal_amps)
+    case("offsun_hour_spread_tomorrow_and_evening", test_offsun_hour_spread_tomorrow_and_evening)
     run()
 
 

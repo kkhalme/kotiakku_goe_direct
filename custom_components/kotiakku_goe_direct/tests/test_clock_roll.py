@@ -352,6 +352,14 @@ def main():
         assert_true(not no_start["write_on"], "cannot start while unusable")
         off = decide(False, 0, 96, window_ok=True)
         assert_true(not off["write_on"] and not off["write_off"], "stay off; do not restart under 2000 W")
+        at_hold = decide(True, 1000, 96, window_ok=True)
+        assert_true(at_hold["write_on"] and not at_hold["arm_floor"], "exactly 1000 W still tracks")
+        under = decide(True, 999, 96, window_ok=True)
+        assert_true(under["use_floor_budget"], "999 W starts the 6 A hold")
+        leave_exact = decide(True, 2000, 96, window_ok=True, hold_active=True, hold_exit_w=2000)
+        assert_true(leave_exact["write_on"] and not leave_exact["arm_floor"], "exactly 2000 W cancels hold")
+        default_exit = decide(True, 1500, 96, window_ok=True, hold_active=True)
+        assert_true(not default_exit["arm_floor"], "without hold_exit_w, 1500 W already clears hold_min_w")
 
     def test_surplus_split_hold_over_15_min():
         alloc = surplus.surplus_allocations
@@ -377,6 +385,17 @@ def main():
         assert_eq(held["arm_split_hold"], True, "arm the same 15 min hold")
         dropped = alloc([a, b], leftover_w=10000, split_hold=True, split_expired=True, **kwargs)
         assert_eq(dropped, {a: 10000}, "drop the second car after 15 min")
+        too_small = alloc(
+            [a, b],
+            leftover_w=4000,
+            take_w={a: 3900, b: 0},
+            states={a: "Charging", b: "Charging"},
+            split_hold=True,
+            **kwargs,
+        )
+        assert_eq(too_small, {a: 3900}, "grace does not steal if high would drop below 6 A")
+        tiny = alloc([a, b], leftover_w=300, **kwargs)
+        assert_eq(tiny, {}, "300 W two unequal cars: first cannot meet 6 A")
 
     def test_surplus_phase_hold_over_15_min():
         phase = surplus.surplus_phase_budget
