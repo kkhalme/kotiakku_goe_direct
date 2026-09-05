@@ -14,7 +14,7 @@ from .const import (
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENTITY,
     CONF_SOLAR_ENOUGH_KWH,
-    CONF_SOLAR_REMAINING_ENTITY,
+    CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
     DEFAULT_CONTROLLER_IN_KW,
     DEFAULT_ECO_PSM,
@@ -28,8 +28,11 @@ from .serial import valid_serial
 
 CHARGER_SLOTS = 4
 
-# Older stored YAML / options. persistable() writes only the new keys.
-_LEGACY_SOLAR_REMAINING = "solar_forecast_remaining_entity"
+# Older stored YAML / options. persistable() writes only the current keys.
+_LEGACY_SOLAR_TODAY = (
+    "solar_remaining_entity",
+    "solar_forecast_remaining_entity",
+)
 _LEGACY_SOLAR_TOMORROW = "solar_forecast_tomorrow_entity"
 _LEGACY_SOLAR_ENOUGH = "supercheap_min_kwh"
 
@@ -44,7 +47,7 @@ STRING_KEYS = (
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENTITY,
     CONF_HOUSE_ENTITY,
-    CONF_SOLAR_REMAINING_ENTITY,
+    CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
 )
 
@@ -178,8 +181,11 @@ def chargers_from_form(user_input) -> list[dict]:
 def _with_legacy(raw: dict) -> dict:
     """Copy stored options, mapping old solar keys onto the current names."""
     src = dict(raw or {})
-    if CONF_SOLAR_REMAINING_ENTITY not in src and src.get(_LEGACY_SOLAR_REMAINING):
-        src[CONF_SOLAR_REMAINING_ENTITY] = src[_LEGACY_SOLAR_REMAINING]
+    if not src.get(CONF_SOLAR_TODAY_ENTITY):
+        for key in _LEGACY_SOLAR_TODAY:
+            if src.get(key):
+                src[CONF_SOLAR_TODAY_ENTITY] = src[key]
+                break
     if CONF_SOLAR_TOMORROW_ENTITY not in src and src.get(_LEGACY_SOLAR_TOMORROW):
         src[CONF_SOLAR_TOMORROW_ENTITY] = src[_LEGACY_SOLAR_TOMORROW]
     if CONF_SOLAR_ENOUGH_KWH not in src and _LEGACY_SOLAR_ENOUGH in src:

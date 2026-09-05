@@ -172,7 +172,7 @@ def main():
         clipped = plan(
             clock,
             attrs,
-            remaining_today=10.0,
+            today_kwh=10.0,
             tomorrow_kwh=None,
             flex_pct=0,
             flex_euro=0,
@@ -183,7 +183,7 @@ def main():
             "tomorrow prices ignored without tomorrow kWh",
         )
         fallback = plan(
-            clock, attrs, remaining_today=None, tomorrow_kwh=None, flex_pct=0, flex_euro=0
+            clock, attrs, today_kwh=None, tomorrow_kwh=None, flex_pct=0, flex_euro=0
         )
         assert_eq(
             fallback["raw_windows"][0]["start"],
@@ -387,14 +387,14 @@ def main():
         no_flag = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=0, flex_euro=0)
         assert_eq(no_flag["tomorrow_ok"], False, "today-only prices are not tomorrow_ok")
 
-    def test_horizon_tomorrow_only_and_zero_remaining():
+    def test_horizon_tomorrow_only_and_zero_today():
         today = slots_from(base, [0.001] * 16)
         tomorrow = slots_from(base + 86400, [0.08] * 16)
         clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
         tom = plan(
             clock,
             {"raw_today": today, "raw_tomorrow": tomorrow},
-            remaining_today=None,
+            today_kwh=None,
             tomorrow_kwh=12.0,
             flex_pct=0,
             flex_euro=0,
@@ -403,7 +403,7 @@ def main():
         zero = plan(
             clock,
             {"raw_today": today, "raw_tomorrow": tomorrow},
-            remaining_today=0.0,
+            today_kwh=0.0,
             tomorrow_kwh=None,
             flex_pct=0,
             flex_euro=0,
@@ -415,7 +415,7 @@ def main():
                 "raw_today": slots_from(base, [0.08] * 16),
                 "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
             },
-            remaining_today=5.0,
+            today_kwh=5.0,
             tomorrow_kwh=5.0,
             flex_pct=0,
             flex_euro=0,
@@ -427,7 +427,7 @@ def main():
         tie = plan(
             clock,
             {"raw_today": slots_from(base, [0.08] * 16), "raw_tomorrow": tomorrow},
-            remaining_today=5.0,
+            today_kwh=5.0,
             tomorrow_kwh=5.0,
             flex_pct=0,
             flex_euro=0,
@@ -460,7 +460,7 @@ def main():
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
     case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
     case("current_or_next_and_flex_attrs", test_current_or_next_and_flex_attrs)
-    case("horizon_tomorrow_only_and_zero_remaining", test_horizon_tomorrow_only_and_zero_remaining)
+    case("horizon_tomorrow_only_and_zero_today", test_horizon_tomorrow_only_and_zero_today)
 
     surplus = load_mod("surplus")
     leftover_w = surplus.leftover_w
@@ -581,7 +581,7 @@ def main():
         dawn_only = surplus.surplus_hour_ranges(clock, 4.0, None, 1.0, 60.17, 24.94)
         assert_true(
             not any(start <= night < end for start, end in dawn_only),
-            "4 kWh remaining does not exclude night",
+            "4 kWh today does not exclude night",
         )
         assert_eq(
             surplus.surplus_hour_ranges(clock, 50.0, 50.0, 0, 60.17, 24.94),

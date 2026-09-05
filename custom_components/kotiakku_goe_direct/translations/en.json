@@ -42,7 +42,7 @@
           "solar_entity": "Kotiakku solar power",
           "house_entity": "Kotiakku house power (includes EV)",
           "kotiakku_in_kw": "Kotiakku power sensors are in kW",
-          "solar_remaining_entity": "Solar today",
+          "solar_today_entity": "Solar today",
           "solar_tomorrow_entity": "Solar tomorrow"
         }
       }
@@ -82,7 +82,7 @@
           "solar_entity": "Kotiakku solar power",
           "house_entity": "Kotiakku house power (includes EV)",
           "kotiakku_in_kw": "Kotiakku power sensors are in kW",
-          "solar_remaining_entity": "Solar today",
+          "solar_today_entity": "Solar today",
           "solar_tomorrow_entity": "Solar tomorrow"
         }
       }

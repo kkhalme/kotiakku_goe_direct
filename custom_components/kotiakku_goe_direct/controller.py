@@ -24,7 +24,7 @@ from .const import (
     CONF_PRICE_ENTITY,
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENTITY,
-    CONF_SOLAR_REMAINING_ENTITY,
+    CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
     DEFAULT_CEILING,
     DEFAULT_FLEX_EUR,
@@ -171,7 +171,7 @@ class KotiakkuGoeDirectController:
         self.solar_entity = data[CONF_SOLAR_ENTITY]
         self.house_entity = data[CONF_HOUSE_ENTITY]
         self.controller_entity = data[CONF_CONTROLLER_ENTITY]
-        self.solar_remaining_entity = data.get(CONF_SOLAR_REMAINING_ENTITY, "") or ""
+        self.solar_today_entity = data.get(CONF_SOLAR_TODAY_ENTITY, "") or ""
         self.solar_tomorrow_entity = data.get(CONF_SOLAR_TOMORROW_ENTITY, "") or ""
         self.kotiakku_in_kw = bool(data[CONF_KOTIAKKU_IN_KW])
         self.controller_in_kw = bool(data[CONF_CONTROLLER_IN_KW])
@@ -212,7 +212,7 @@ class KotiakkuGoeDirectController:
         }
         self._forecast_ids = {
             eid
-            for eid in (self.solar_remaining_entity, self.solar_tomorrow_entity)
+            for eid in (self.solar_today_entity, self.solar_tomorrow_entity)
             if eid
         }
         self._car_ids = {self.car_entity(s) for s in self.chargers}
@@ -368,9 +368,9 @@ class KotiakkuGoeDirectController:
         return energy_kwh(st.state, unit)
 
     @property
-    def remaining_today_kwh(self):
-        """Full-day solar production estimate (config key solar_remaining_entity)."""
-        return self._forecast_kwh(self.solar_remaining_entity)
+    def today_kwh(self):
+        """Today's full-day solar production estimate."""
+        return self._forecast_kwh(self.solar_today_entity)
 
     @property
     def tomorrow_kwh(self):
@@ -378,7 +378,7 @@ class KotiakkuGoeDirectController:
 
     @property
     def upcoming_solar_kwh(self):
-        return forecast_upcoming_kwh(self.remaining_today_kwh, self.tomorrow_kwh)
+        return forecast_upcoming_kwh(self.today_kwh, self.tomorrow_kwh)
 
     @property
     def solar_enough_kwh(self):
@@ -393,7 +393,7 @@ class KotiakkuGoeDirectController:
         lat, lon = self._site_lat_lon()
         return solar_enough_now(
             self.clock,
-            self.remaining_today_kwh,
+            self.today_kwh,
             self.tomorrow_kwh,
             self.solar_enough_kwh,
             lat,
@@ -405,7 +405,7 @@ class KotiakkuGoeDirectController:
         lat, lon = self._site_lat_lon()
         return forecast_gating_kwh(
             self.clock,
-            self.remaining_today_kwh,
+            self.today_kwh,
             self.tomorrow_kwh,
             lat,
             lon,
@@ -441,7 +441,7 @@ class KotiakkuGoeDirectController:
             self.solar_entity,
             self.house_entity,
             self.controller_entity,
-            self.solar_remaining_entity,
+            self.solar_today_entity,
             self.solar_tomorrow_entity,
         ]
         track.extend(WINDOW_EIDS)
@@ -653,7 +653,7 @@ class KotiakkuGoeDirectController:
         lat, lon = self._site_lat_lon()
         blocked = surplus_hour_ranges(
             self.clock,
-            self.remaining_today_kwh,
+            self.today_kwh,
             self.tomorrow_kwh,
             self.offsun_hour_kwh,
             lat,
@@ -669,7 +669,7 @@ class KotiakkuGoeDirectController:
             flex_euro=flex_euro,
             source_entity=price_entity,
             blocked=blocked,
-            remaining_today=self.remaining_today_kwh,
+            today_kwh=self.today_kwh,
             tomorrow_kwh=self.tomorrow_kwh,
         )
         _LOGGER.info(

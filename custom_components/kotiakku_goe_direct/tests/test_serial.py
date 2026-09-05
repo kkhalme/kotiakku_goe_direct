@@ -375,7 +375,7 @@ def main():
         assert_eq(picked["controller_entity"], "sensor.my_ev_mean", "keeps pick")
         assert_eq(picked["soc_entity"], "sensor.my_soc", "keeps soc")
         assert_eq(picked["house_entity"], "", "does not fill house")
-        assert_eq(picked["solar_remaining_entity"], "", "does not invent remaining")
+        assert_eq(picked["solar_today_entity"], "", "does not invent today")
         assert_eq(picked["solar_tomorrow_entity"], "", "does not invent tomorrow")
 
     def test_persistable_legacy_solar_keys():
@@ -387,9 +387,9 @@ def main():
             }
         )
         assert_eq(
-            migrated["solar_remaining_entity"],
+            migrated["solar_today_entity"],
             "sensor.energy_production_today_remaining",
-            "legacy remaining",
+            "legacy remaining key maps to solar today",
         )
         assert_eq(
             migrated["solar_tomorrow_entity"],
@@ -401,17 +401,31 @@ def main():
         assert_eq(
             "solar_forecast_remaining_entity" in migrated,
             False,
-            "legacy remaining not stored",
+            "legacy remaining key is not stored",
+        )
+        from_remaining = config.persistable(
+            {"solar_remaining_entity": "sensor.energy_production_today_remaining"}
+        )
+        assert_eq(
+            from_remaining["solar_today_entity"],
+            "sensor.energy_production_today_remaining",
+            "solar_remaining_entity maps to solar today",
+        )
+        assert_eq(
+            "solar_remaining_entity" in from_remaining,
+            False,
+            "solar_remaining_entity is not stored",
         )
         prefer = config.persistable(
             {
-                "solar_remaining_entity": "sensor.new_remaining",
-                "solar_forecast_remaining_entity": "sensor.old_remaining",
+                "solar_today_entity": "sensor.energy_production_today",
+                "solar_remaining_entity": "sensor.old_remaining",
                 "solar_enough_kwh": 30,
                 "supercheap_min_kwh": 50,
             }
         )
-        assert_eq(prefer["solar_remaining_entity"], "sensor.new_remaining", "new remaining wins")
+        assert_eq(prefer["solar_today_entity"], "sensor.energy_production_today", "today key wins")
+        assert_eq("solar_remaining_entity" in prefer, False, "old remaining key is not stored")
         assert_eq(prefer["solar_enough_kwh"], 30, "new enough wins")
 
     def test_psm_and_surplus_eids():
@@ -463,6 +477,14 @@ def main():
         assert_eq(const.EID_FLEX_PCT, "number.kotiakku_goe_direct_window_flex_pct", "flex percent")
         assert_eq(const.EID_FLEX_EUR, "number.kotiakku_goe_direct_window_flex_eur", "flex euro")
         assert_eq(const.EID_WINDOW, "sensor.kotiakku_goe_direct_window", "window sensor")
+        assert_eq(const.EID_SOLAR_TODAY_KWH, "sensor.kotiakku_goe_direct_solar_today_kwh", "solar today")
+        assert_eq(const.EID_SOLAR_TOMORROW_KWH, "sensor.kotiakku_goe_direct_solar_tomorrow_kwh", "solar tomorrow")
+        assert_eq(const.EID_SOLAR_GATING_KWH, "sensor.kotiakku_goe_direct_solar_gating_kwh", "solar gating")
+        assert_eq(const.EID_SOLAR_GATING_DAY, "sensor.kotiakku_goe_direct_solar_gating_day", "gating day")
+        assert_eq(const.SOLAR_TODAY_UNIQUE_ID, "kotiakku_goe_direct_solar_today_kwh", "today unique id")
+        assert_eq(const.SOLAR_TOMORROW_UNIQUE_ID, "kotiakku_goe_direct_solar_tomorrow_kwh", "tomorrow unique id")
+        assert_eq(const.SOLAR_GATING_KWH_UNIQUE_ID, "kotiakku_goe_direct_solar_gating_kwh", "gating kWh unique id")
+        assert_eq(const.SOLAR_GATING_DAY_UNIQUE_ID, "kotiakku_goe_direct_solar_gating_day", "gating day unique id")
         assert_eq(
             const.EID_WINDOW_ACTIVE,
             "binary_sensor.kotiakku_goe_direct_window_active",

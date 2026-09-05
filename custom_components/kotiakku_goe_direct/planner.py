@@ -232,15 +232,14 @@ def drop_blocked(slots, blocked):
     ]
 
 
-def clip_slots_to_forecast(clock, slots, remaining_today, tomorrow_kwh, now_dt):
+def clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt):
     """Keep price slots on days that have solar kWh.
 
-    ``remaining_today`` is today's full-day production estimate, not energy
-    left from now. If both forecast values are missing, return all price
-    slots (prices-only fallback). A day stays only when that day's kWh is
-    present.
+    ``today_kwh`` is today's full-day production estimate. If both forecast
+    values are missing, return all price slots (prices-only fallback). A day
+    stays only when that day's kWh is present.
     """
-    if remaining_today is None and tomorrow_kwh is None:
+    if today_kwh is None and tomorrow_kwh is None:
         return slots
     try:
         today_start = float(clock.as_timestamp(clock.start_of_local_day(now_dt)))
@@ -255,7 +254,7 @@ def clip_slots_to_forecast(clock, slots, remaining_today, tomorrow_kwh, now_dt):
     out = []
     for slot in slots:
         start = slot[0]
-        if remaining_today is not None and start < tomorrow_start - 1:
+        if today_kwh is not None and start < tomorrow_start - 1:
             if start >= today_start - 1:
                 out.append(slot)
         elif tomorrow_kwh is not None and tomorrow_start - 1 <= start < day_after:
@@ -564,7 +563,7 @@ def plan(
     flex_euro=DEFAULT_FLEX_EUR,
     source_entity="",
     blocked=None,
-    remaining_today=None,
+    today_kwh=None,
     tomorrow_kwh=None,
 ):
     min_hours, max_hours = clamp_hours(min_hours, max_hours)
@@ -579,7 +578,7 @@ def plan(
     if attrs is None:
         return empty
     slots = collect_slots(clock, attrs, now_dt)
-    slots = clip_slots_to_forecast(clock, slots, remaining_today, tomorrow_kwh, now_dt)
+    slots = clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt)
     chosen = choose(
         slots,
         min_hours,
