@@ -30,9 +30,11 @@ surplus = load_mod("surplus", "_clock")
 const = load_mod("const", "_clock")
 now_in_windows = planner.now_in_windows
 charger_full_power = planner.charger_full_power
+charger_surplus = planner.charger_surplus
 until_unplug_step = planner.until_unplug_step
 SLOT = planner.SLOT_SECONDS
 POLICY_SOLAR_PRIORITY = const.POLICY_SOLAR_PRIORITY
+POLICY_SOLAR_AND_GRID = const.POLICY_SOLAR_AND_GRID
 POLICY_FORCE_ON = const.POLICY_FORCE_ON
 POLICY_FORCE_OFF = const.POLICY_FORCE_OFF
 
@@ -109,9 +111,34 @@ def main():
                 "Force off never full power",
             )
             assert_eq(
+                charger_surplus(POLICY_FORCE_OFF, result, ts),
+                False,
+                "Force off never leftover",
+            )
+            assert_eq(
+                charger_surplus(POLICY_SOLAR_PRIORITY, result, ts),
+                not full,
+                "SolarPriority leftover outside the window",
+            )
+            assert_eq(
+                charger_full_power(POLICY_SOLAR_AND_GRID, result, ts),
+                active,
+                "SolarAndGrid full power follows the window",
+            )
+            assert_eq(
+                charger_surplus(POLICY_SOLAR_AND_GRID, result, ts),
+                not active,
+                "SolarAndGrid leftover outside the window",
+            )
+            assert_eq(
                 charger_full_power(POLICY_FORCE_ON, result, ts),
                 True,
                 "Force on always full power",
+            )
+            assert_eq(
+                charger_surplus(POLICY_FORCE_ON, result, ts),
+                False,
+                "Force on is not leftover",
             )
 
         in_first = now_in_windows(result["raw_windows"], base + 60)
@@ -261,9 +288,34 @@ def main():
             "enough solar skips 22 kW even in the window",
         )
         assert_eq(
+            charger_surplus(POLICY_SOLAR_PRIORITY, result, night, enough_solar=True),
+            True,
+            "SolarPriority leftover when enough solar skips 22 kW",
+        )
+        assert_eq(
+            charger_full_power(POLICY_SOLAR_AND_GRID, result, night, enough_solar=True),
+            True,
+            "SolarAndGrid 22 kW even when enough solar",
+        )
+        assert_eq(
+            charger_surplus(POLICY_SOLAR_AND_GRID, result, night, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is not leftover",
+        )
+        assert_eq(
+            charger_surplus(POLICY_SOLAR_AND_GRID, result, midday, enough_solar=True),
+            True,
+            "SolarAndGrid leftover outside the window",
+        )
+        assert_eq(
             charger_full_power(POLICY_FORCE_OFF, result, midday),
             False,
-            "Force off stays surplus-only",
+            "Force off never full power",
+        )
+        assert_eq(
+            charger_surplus(POLICY_FORCE_OFF, result, midday),
+            False,
+            "Force off never leftover",
         )
         assert_eq(
             charger_full_power(POLICY_FORCE_ON, result, midday),

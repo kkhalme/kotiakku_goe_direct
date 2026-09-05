@@ -318,6 +318,36 @@ def main():
         result = {"raw_windows": [{"start": 1000, "end": 2000}]}
         assert_eq(full("Force off", result, 1500), False, "force off")
         assert_eq(
+            planner.charger_surplus("Force off", result, 1500),
+            False,
+            "Force off never leftover",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarPriority", result, 0),
+            True,
+            "SolarPriority leftover outside a window",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
+        assert_eq(
+            full("SolarAndGrid", result, 1500, enough_solar=True),
+            True,
+            "SolarAndGrid 22 kW ignores enough solar",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 1500, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is not leftover",
+        )
+        assert_eq(
+            planner.charger_surplus("Force off", result, 1500, until_unplug=True),
+            False,
+            "until unplug is full-power, not leftover",
+        )
+        assert_eq(
             full("Force off", result, 1500, until_unplug=True),
             True,
             "until unplug overrides Force off",
@@ -500,6 +530,16 @@ def main():
         )
         assert_eq(full("Force off", result, 3500), False, "force off")
         assert_eq(full("Force on", result, 0, enough_solar=True), True, "Force on ignores enough solar")
+        assert_eq(
+            full("SolarAndGrid", result, 3500, enough_solar=True),
+            True,
+            "SolarAndGrid ignores enough solar",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
         assert_eq(full("Longest", result, 3500, enough_solar=True), False, "legacy Longest skips")
         assert_eq(full("SolarPriority", {}, 3500), False, "empty result")
         assert_eq(full("SolarPriority", None, 0), False, "missing result")
@@ -682,27 +722,27 @@ def main():
 
     def test_group_surplus_setpoint_keeps_app_priorities():
         setp = surplus.group_surplus_setpoint
-        leftover = setp(10, 1, 10, n_full=0, eco_lot=50)
+        leftover = setp(10, 1, 10, n_full=0, group_lot=50)
         assert_eq(leftover, (10, 1, 10), "pure surplus uses leftover lot")
         assert_eq(
-            setp(10, 1, 10, n_full=1, eco_lot=50),
+            setp(10, 1, 10, n_full=1, group_lot=50),
             (50, 1, 10),
             "mixed: keep group lot 50, leftover amp",
         )
         assert_eq(
-            setp(25, 2, 25, n_full=1, eco_lot=50),
+            setp(25, 2, 25, n_full=1, group_lot=50),
             (50, 2, 25),
             "mixed: do not cap leftover amp to reserve 32 A",
         )
         assert_eq(
-            setp(6, 1, 6, n_full=1, eco_lot=50),
+            setp(6, 1, 6, n_full=1, group_lot=50),
             (50, 1, 6),
             "mixed: 6 A leftover amp beside full-power",
         )
         assert_eq(
-            setp(10, 1, 10, n_full=1, eco_lot=32),
+            setp(10, 1, 10, n_full=1, group_lot=32),
             (32, 1, 10),
-            "mixed: keep eco_lot, leftover amp; app lop splits the group",
+            "mixed: keep group_lot, leftover amp; app lop splits the group",
         )
 
     case("solar_forecast_and_full_power", test_solar_forecast_and_full_power)
@@ -997,14 +1037,14 @@ def main():
         assert_eq((low_psm, low_amp), (1, 13), "low 3 kW is 1-phase 13 A")
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, eco_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
             ),
             26,
             "9+3 kW: raise group lot to 13 A + 13 A so both amp caps fit",
         )
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, eco_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
             ),
             17,
             "same leftover on both: keep leftover lot",

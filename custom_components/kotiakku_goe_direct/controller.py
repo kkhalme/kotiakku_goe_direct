@@ -33,7 +33,7 @@ from .const import (
     DEFAULT_CEILING,
     DEFAULT_FLEX_EUR,
     DEFAULT_FLEX_PCT,
-    DEFAULT_ECO_LOT,
+    DEFAULT_GROUP_LOT,
     DEFAULT_HOLD_MIN,
     DEFAULT_HOLD_MIN_W,
     DEFAULT_MAX_AMP,
@@ -53,8 +53,7 @@ from .const import (
     EID_CEILING,
     EID_FLEX_EUR,
     EID_FLEX_PCT,
-    EID_ECO_LOT,
-    EID_ECO_PSM,
+    EID_GROUP_LOT,
     EID_HOLD_MIN,
     EID_HOLD_MIN_W,
     EID_MAX,
@@ -74,6 +73,8 @@ from .const import (
     EID_VOLTS,
     POLICY_FORCE_OFF,
     POLICIES,
+    charger_off_mqtt,
+    charger_on_mqtt,
     restore_policy,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -81,12 +82,12 @@ from .const import (
     WINDOW_EIDS,
     default_charger_priority,
     priority_entity_id,
-    psm_int,
     until_unplug_entity_id,
 )
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import (
     charger_full_power as policy_full_power,
+    charger_surplus as policy_surplus,
     now_in_windows,
     plan,
     until_unplug_step,
@@ -331,11 +332,7 @@ class KotiakkuGoeDirectController:
     min_amp = _int_prop(EID_MIN_AMP, DEFAULT_MIN_AMP)
     max_amp = _int_prop(EID_MAX_AMP, DEFAULT_MAX_AMP)
     phase3_min_w = _int_prop(EID_PHASE3_MIN_W, DEFAULT_PHASE3_MIN_W)
-    eco_lot = _int_prop(EID_ECO_LOT, DEFAULT_ECO_LOT)
-
-    @property
-    def eco_psm(self):
-        return psm_int(self._state(EID_ECO_PSM))
+    group_lot = _int_prop(EID_GROUP_LOT, DEFAULT_GROUP_LOT)
 
     async def async_knobs_changed(self):
         self._schedule_surplus()
@@ -352,6 +349,15 @@ class KotiakkuGoeDirectController:
 
     def charger_full_power(self, serial):
         return policy_full_power(
+            self.policy(serial),
+            self.window_result,
+            self._now_ts(),
+            enough_solar=self.enough_solar,
+            until_unplug=self.until_unplug(serial),
+        )
+
+    def surplus_allowed(self, serial):
+        return policy_surplus(
             self.policy(serial),
             self.window_result,
             self._now_ts(),
@@ -900,12 +906,16 @@ class KotiakkuGoeDirectController:
                 await self._stop_surplus()
             return
         if dec["write_on"]:
+            surplus = [serial for serial in self.chargers if self.surplus_allowed(serial)]
+            if not surplus:
+                await self._stop_surplus()
+                return
             target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
             lot, psm, amp = budget(
                 target_w,
                 self.min_amp,
                 self.max_amp,
-                self.eco_lot,
+                self.group_lot,
                 self.volts,
                 self.phase3_min_w,
             )
@@ -915,11 +925,14 @@ class KotiakkuGoeDirectController:
                 psm,
                 amp,
                 n_full=n_full,
-                eco_lot=self.eco_lot,
+                group_lot=self.group_lot,
             )
             self.session = True
             await self._save()
-            surplus = [serial for serial in self.chargers if not self.charger_full_power(serial)]
+            for serial in self.chargers:
+                if serial in surplus or self.charger_full_power(serial):
+                    continue
+                await self._publish_off(serial)
             lops = {serial: self.charger_priority(serial) for serial in surplus}
             plugged = {}
             states = {}
@@ -942,7 +955,7 @@ class KotiakkuGoeDirectController:
                     volts=self.volts,
                     min_amp=self.min_amp,
                     max_amp=self.max_amp,
-                    eco_lot=self.eco_lot,
+                    group_lot=self.group_lot,
                     phase3_min_w=self.phase3_min_w,
                 )
             alloc_w = snap["available_w"]
@@ -973,7 +986,7 @@ class KotiakkuGoeDirectController:
                     allocations["allocations"],
                     min_amp=self.min_amp,
                     max_amp=self.max_amp,
-                    eco_lot=self.eco_lot,
+                    group_lot=self.group_lot,
                     volts=self.volts,
                     phase3_min_w=self.phase3_min_w,
                 )
@@ -991,7 +1004,7 @@ class KotiakkuGoeDirectController:
                     source_w,
                     self.min_amp,
                     self.max_amp,
-                    self.eco_lot,
+                    self.group_lot,
                     self.volts,
                     self.phase3_min_w,
                     last_psm=self._surplus_psm.get(serial),
@@ -1001,7 +1014,7 @@ class KotiakkuGoeDirectController:
                 self._arm_phase(serial, pub["arm_phase"])
             if n_full <= 0:
                 lot = group_lot_for_amps(
-                    lot, [pub["amp"] for pub in targets.values()], self.eco_lot
+                    lot, [pub["amp"] for pub in targets.values()], self.group_lot
                 )
             for serial, pub in targets.items():
                 await self._publish_on(serial, pub["psm"], lot, pub["amp"])
@@ -1040,16 +1053,23 @@ class KotiakkuGoeDirectController:
                 until_unplug=new_on,
             )
             want_off = self._charge_session.get(serial) and not want_on
+            force_idle = (
+                self.policy(serial) == POLICY_FORCE_OFF and not new_on and not want_on
+            )
             if want_on:
                 if not self._charge_session.get(serial):
                     changed = True
                 self._charge_session[serial] = True
                 self._arm_phase(serial, False)
-                await self._publish_on(serial, 2, self.eco_lot, self.max_amp)
-            elif want_off:
+                await self._publish_on(serial, 2, self.group_lot, self.max_amp)
+            elif force_idle or want_off:
+                was_charging = bool(
+                    self._charge_session.get(serial) or serial in self._surplus_amp
+                )
                 await self._publish_off(serial)
                 self._charge_session[serial] = False
-                changed = True
+                if was_charging:
+                    changed = True
             self._last_policy[serial] = self.policy(serial)
         if changed:
             await self._save()
@@ -1088,25 +1108,13 @@ class KotiakkuGoeDirectController:
         )
 
     async def _publish_on(self, serial, psm, lot, amp):
-        await self._mqtt_many(
-            serial,
-            (("fup", "false"), ("psm", psm), ("lot", lot), ("amp", amp), ("frc", "2")),
-        )
+        await self._mqtt_many(serial, charger_on_mqtt(psm, lot, amp))
         if serial:
             self._surplus_psm[serial] = int(psm)
             self._surplus_amp[serial] = int(amp)
 
     async def _publish_off(self, serial):
-        await self._mqtt_many(
-            serial,
-            (
-                ("frc", "0"),
-                ("fup", "false"),
-                ("psm", self.eco_psm),
-                ("lot", self.eco_lot),
-                ("amp", self.max_amp),
-            ),
-        )
+        await self._mqtt_many(serial, charger_off_mqtt())
         if serial:
             self._arm_phase(serial, False)
             self._surplus_psm.pop(serial, None)

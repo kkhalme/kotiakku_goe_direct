@@ -13,6 +13,7 @@ from datetime import timezone
 from harness import Clock, SLOT, assert_eq, assert_true, case_runner, load_mod, slots_from
 
 planner = load_mod("planner", "_spec_win")
+const = load_mod("const", "_spec_win_c")
 choose = planner.choose
 clamp_hours = planner.clamp_hours
 now_in_windows = planner.now_in_windows
@@ -21,6 +22,7 @@ pick_windows = planner.pick_windows
 find_seed = planner.find_seed
 flex_headroom = planner.flex_headroom
 charger_full_power = planner.charger_full_power
+charger_surplus = planner.charger_surplus
 until_unplug_step = planner.until_unplug_step
 
 
@@ -238,6 +240,54 @@ def main():
         assert_eq(charger_full_power("Supercheap", result, 3500), True, "legacy Supercheap maps")
         assert_eq(charger_full_power("Cheapest", result, 3500), True, "legacy Cheapest maps")
         assert_eq(charger_full_power("Force off", result, 3500), False, "force off")
+        assert_eq(charger_surplus("Force off", result, 3500), False, "Force off never surplus")
+        assert_eq(charger_surplus("Force off", result, 0), False, "Force off never leftover either")
+        assert_eq(
+            charger_surplus("SolarPriority", result, 3500),
+            False,
+            "in-window SolarPriority is full-power, not surplus",
+        )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 0),
+            True,
+            "SolarPriority outside a window may take leftover",
+        )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 3500, enough_solar=True),
+            True,
+            "enough solar skips 22 kW and leaves leftover",
+        )
+        assert_eq(
+            charger_full_power("SolarAndGrid", result, 3500),
+            True,
+            "SolarAndGrid in window",
+        )
+        assert_eq(
+            charger_full_power("SolarAndGrid", result, 3500, enough_solar=True),
+            True,
+            "SolarAndGrid still 22 kW when enough solar",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 3500, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is full-power, not leftover",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 0, enough_solar=True),
+            True,
+            "SolarAndGrid leftover outside a window even if enough solar",
+        )
+        assert_eq(charger_surplus("Force on", result, 0), False, "Force on is not surplus")
+        assert_eq(
+            charger_surplus("Force off", result, 0, until_unplug=True),
+            False,
+            "until-unplug is full-power, not surplus",
+        )
         assert_eq(charger_full_power("Force on", result, 0), True, "force on")
         assert_eq(
             charger_full_power("SolarPriority", result, 0, until_unplug=True),
@@ -267,6 +317,10 @@ def main():
         assert_eq(charger_full_power("unknown", result, 3500), False, "unknown policy")
         ov, seen = until_unplug_step(True, False, True)
         assert_eq((ov, seen), (False, False), "clears on unplug after seen")
+        off = const.charger_off_mqtt()
+        assert_eq(off[0], ("frc", "1"), "leaving a window publishes force off, not Neutral")
+        assert_eq(off, (("frc", "1"), ("fup", "false")), "idle MQTT is force off only")
+        assert_true(("frc", "0") not in off, "Neutral would keep charging in Basic/default")
 
     def test_plan_result_is_a_window_list():
         out = plan(

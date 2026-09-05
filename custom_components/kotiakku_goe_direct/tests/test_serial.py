@@ -475,7 +475,7 @@ def main():
         assert_eq(len(spec_ids), 15, "fifteen surplus numbers")
         for entity_id in spec_ids:
             assert_true(entity_id in const.SURPLUS_EIDS, entity_id)
-        assert_true(const.EID_ECO_PSM in const.SURPLUS_EIDS, "eco psm")
+        assert_true(const.EID_GROUP_LOT in const.SURPLUS_EIDS, "group lot")
         assert_true(const.EID_HOLD_MIN_W in const.SURPLUS_EIDS, "hold leftover")
         assert_true(const.EID_SPLIT_MIN_W in const.SURPLUS_EIDS, "split leftover")
         assert_true(const.EID_SPLIT_FLOOR_W in const.SURPLUS_EIDS, "remainder floor")
@@ -489,7 +489,8 @@ def main():
         assert_eq(config.persistable({})["split_floor_w"], 500, "persist remainder floor")
         assert_eq(config.persistable({})["solar_enough_kwh"], 40, "persist enough solar")
         assert_eq(config.persistable({})["offsun_hour_kwh"], 1, "persist offsun hour")
-        assert_eq(const.POLICIES, ("SolarPriority", "Force on", "Force off"), "three policies")
+        assert_eq(const.POLICIES, ("SolarPriority", "SolarAndGrid", "Force on", "Force off"), "four policies")
+        assert_eq(const.POLICY_SOLAR_AND_GRID, "SolarAndGrid", "SolarAndGrid name")
         assert_eq("Supercheap" in const.POLICIES, False, "Supercheap is not a live policy")
         assert_eq("Force on until unplug" in const.POLICIES, False, "until unplug is not a policy")
         assert_eq(const.POLICY_UNTIL_UNPLUG, "Force on until unplug", "legacy until unplug name")
@@ -714,6 +715,42 @@ def main():
         const.migrate_window_entities(fresh)
         assert_eq(fresh.updates, [], "new install has nothing to migrate")
         assert_eq(fresh.removed, [], "new install removes nothing")
+        lot = Registry(
+            [
+                {
+                    "domain": "number",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_eco_lot_a",
+                    "entity_id": "number.kotiakku_goe_direct_eco_lot_a",
+                },
+                {
+                    "domain": "select",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_eco_phase",
+                    "entity_id": "select.kotiakku_goe_direct_eco_phase",
+                },
+            ]
+        )
+        const.migrate_group_lot_entities(lot)
+        assert_eq(
+            lot.async_get_entity_id("number", const.DOMAIN, "kotiakku_goe_direct_group_lot_a"),
+            "number.kotiakku_goe_direct_group_lot_a",
+            "eco lot renamed to group lot",
+        )
+        assert_eq(
+            lot.async_get_entity_id("number", const.DOMAIN, "kotiakku_goe_direct_eco_lot_a"),
+            None,
+            "old eco lot unique_id gone",
+        )
+        assert_eq(
+            lot.async_get_entity_id("select", const.DOMAIN, "kotiakku_goe_direct_eco_phase"),
+            None,
+            "eco phase select removed",
+        )
+        assert_true(
+            "select.kotiakku_goe_direct_eco_phase" in lot.removed,
+            "eco phase entity removed",
+        )
         assert_eq(
             const.EID_CEILING,
             "number.kotiakku_goe_direct_electricity_price_ceiling",
@@ -725,8 +762,8 @@ def main():
         assert_eq(const.EID_VOLTS, "number.kotiakku_goe_direct_voltage_v", "voltage")
         assert_eq(const.EID_MIN_AMP, "number.kotiakku_goe_direct_min_a", "min amp")
         assert_eq(const.EID_MAX_AMP, "number.kotiakku_goe_direct_max_a", "max amp")
-        assert_eq(const.EID_ECO_LOT, "number.kotiakku_goe_direct_eco_lot_a", "eco lot")
-        assert_eq(const.EID_ECO_PSM, "select.kotiakku_goe_direct_eco_phase", "eco phase")
+        assert_eq(const.EID_GROUP_LOT, "number.kotiakku_goe_direct_group_lot_a", "group lot")
+        assert_eq(const.GROUP_LOT_UNIQUE_ID, "kotiakku_goe_direct_group_lot_a", "group lot unique_id")
         assert_eq(
             const.EID_SOLAR_ENOUGH_KWH,
             "number.kotiakku_goe_direct_solar_enough_kwh",
@@ -759,7 +796,16 @@ def main():
                 spec["default"],
                 "INT_KEYS matches %s" % spec["conf"],
             )
-        assert_eq(config.INT_KEYS[const.CONF_ECO_PSM], const.DEFAULT_ECO_PSM, "eco psm persist")
+        assert_eq(config.persistable({})["group_lot"], 50, "persist group lot")
+        assert_eq(config.persistable({"eco_lot": 40})["group_lot"], 40, "legacy eco_lot seeds group_lot")
+        assert_eq("eco_lot" in config.persistable({"eco_lot": 40}), False, "legacy eco_lot is not stored")
+        assert_eq(
+            config.persistable({"group_lot": 45, "eco_lot": 40})["group_lot"],
+            45,
+            "group_lot wins over legacy eco_lot",
+        )
+        assert_eq("eco_psm" in config.INT_KEYS, False, "eco psm is not persisted")
+        assert_eq("eco_psm" in config.persistable({"eco_psm": 2}), False, "eco psm is not stored")
 
     case("normalize_and_form", test_normalize_and_form)
     case("entry_config_options_overlay", test_entry_config_options_overlay)

@@ -61,7 +61,7 @@
     "step": {
       "init": {
         "title": "Configure Kotiakku go-e Direct",
-        "description": "Charger 1 is required; chargers 2–4 are optional. Each charger is an entity, MQTT serial, and leftover priority (1 = highest). MQTT publishes to go-eCharger/<serial>/set. Surplus numbers, ECO phase, window bounds, Enough solar, policies, and priority knobs live on the Kotiakku go-e Direct device.",
+        "description": "Charger 1 is required; chargers 2–4 are optional. Each charger is an entity, MQTT serial, and leftover priority (1 = highest). MQTT publishes to go-eCharger/<serial>/set. Surplus numbers, group lot, window bounds, Enough solar, policies, and priority knobs live on the Kotiakku go-e Direct device.",
         "data": {
           "price_entity": "Spot-price sensor (raw_today / raw_tomorrow)",
           "charger_1_entity": "Charger 1 entity",
