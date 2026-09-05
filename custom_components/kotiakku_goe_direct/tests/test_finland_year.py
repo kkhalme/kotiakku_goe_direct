@@ -152,7 +152,7 @@ def nordpool_attrs(now, start, days):
     return {"raw_today": days[idx], "raw_tomorrow": [], "tomorrow_valid": False}
 
 
-def plan_once(clock, attrs, result, blocked=None, remaining_today=None, tomorrow_kwh=None):
+def plan_once(clock, attrs, result, blocked=None, today_kwh=None, tomorrow_kwh=None):
     return run_once(
         planner,
         clock,
@@ -165,7 +165,7 @@ def plan_once(clock, attrs, result, blocked=None, remaining_today=None, tomorrow
         flex_euro=0.02,
         source_entity="sensor.nordpool_kwh_fi",
         blocked=blocked,
-        remaining_today=remaining_today,
+        today_kwh=today_kwh,
         tomorrow_kwh=tomorrow_kwh,
     )
 
@@ -326,10 +326,10 @@ def simulate(
     for now in iter_ticks(start, hours):
         clock.set(now)
         attrs = nordpool_attrs(now, start, days)
-        remaining, tomorrow = solar_forecast(now, ts_list, prefix)
+        today_kwh, tomorrow = solar_forecast(now, ts_list, prefix)
         blocked = surplus.surplus_hour_ranges(
             clock,
-            remaining,
+            today_kwh,
             tomorrow,
             OFFSUN_HOUR_KWH,
             lat=60.17,
@@ -340,13 +340,13 @@ def simulate(
             attrs,
             result,
             blocked=blocked,
-            remaining_today=remaining,
+            today_kwh=today_kwh,
             tomorrow_kwh=tomorrow,
         )
         ts = clock.as_timestamp(now)
-        upcoming = surplus.upcoming_solar_kwh(remaining, tomorrow)
+        upcoming = surplus.upcoming_solar_kwh(today_kwh, tomorrow)
         enough = surplus.enough_solar_now(
-            clock, remaining, tomorrow, solar_enough_kwh, 60.17, 24.94
+            clock, today_kwh, tomorrow, solar_enough_kwh, 60.17, 24.94
         )
         gating_day = surplus.gating_solar_day(clock, 60.17, 24.94)
         in_window = window_on(result, ts)
@@ -430,7 +430,7 @@ def simulate(
                 "cheap_full": cheap_full,
                 "enough": enough,
                 "gating_day": gating_day,
-                "remaining_kwh": remaining,
+                "today_kwh": today_kwh,
                 "tomorrow_kwh": tomorrow,
                 "upcoming_kwh": upcoming,
                 "a": a,
@@ -706,7 +706,7 @@ def plot_sim(sim, path):
     times = [t["now"] for t in ticks]
     prices = [t["price"] for t in ticks]
     leftover_kw = [t["leftover"] / 1000.0 for t in ticks]
-    remaining = [t["remaining_kwh"] for t in ticks]
+    today_kwh = [t["today_kwh"] for t in ticks]
     tomorrow = [t["tomorrow_kwh"] for t in ticks]
     upcoming = [t["upcoming_kwh"] for t in ticks]
     a_amp = [t["a"]["amp"] if t["a"]["amp"] else 0 for t in ticks]
@@ -773,13 +773,13 @@ def plot_sim(sim, path):
     ax = axes[1]
     for start, end in _spans(ticks, lambda t: t["enough"]):
         ax.axvspan(start, end, color="#bcbd22", alpha=0.18, zorder=0)
-    ax.plot(times, remaining, color="#ffbb78", lw=1.3, label="Remaining today")
+    ax.plot(times, today_kwh, color="#ffbb78", lw=1.3, label="Solar today")
     ax.plot(times, tomorrow, color="#9467bd", lw=1.3, label="Tomorrow")
     ax.plot(times, upcoming, color="#8c564b", lw=1.8, label="Upcoming (max)")
     ax.axhline(threshold, color="#d62728", ls="--", lw=1.1, label="Enough %s kWh" % threshold)
     ax.set_ylabel("kWh")
     ax.set_title(
-        "Forecast.Solar-style energy  ·  SolarPriority skips 22 kW when upcoming ≥ %s kWh; Off-sun drops hours ≥ 1 kWh"
+        "Forecast.Solar-style energy  ·  SolarPriority skips 22 kW when the gating day's kWh ≥ %s; Off-sun drops hours ≥ 1 kWh"
         % threshold
     )
     ax.legend(loc="upper right", fontsize=8, ncol=3)
@@ -1036,7 +1036,7 @@ def main():
         for t in night_after_sun:
             assert_eq(t["cheap_full"], False, "after sunset tomorrow ≥ 40 skips 22 kW @ %s" % t["now"])
         for t in sim["ticks"]:
-            if t["gating_day"] == "today" and t["remaining_kwh"] >= SOLAR_ENOUGH_KWH:
+            if t["gating_day"] == "today" and t["today_kwh"] >= SOLAR_ENOUGH_KWH:
                 assert_eq(t["cheap_full"], False, "before sunset today ≥ 40 skips 22 kW @ %s" % t["now"])
         assert_true(
             any(t["tomorrow_kwh"] >= SOLAR_ENOUGH_KWH for t in sim["ticks"]),
@@ -1108,7 +1108,7 @@ def main():
                 assert_eq(t["offsun_window"], True, "22 kW is in the (blocked-hour) window @ %s" % t["now"])
                 blocked = surplus.surplus_hour_ranges(
                     Clock(t["now"], tz=HEL),
-                    t["remaining_kwh"],
+                    t["today_kwh"],
                     t["tomorrow_kwh"],
                     OFFSUN_HOUR_KWH,
                     lat=60.17,

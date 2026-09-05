@@ -189,7 +189,7 @@ def main():
         clipped = plan(
             clock,
             attrs,
-            remaining_today=10.0,
+            today_kwh=10.0,
             tomorrow_kwh=None,
             flex_pct=0,
             flex_euro=0,
@@ -199,7 +199,7 @@ def main():
             clipped["raw_windows"][0]["end"] <= base + 86400 + 1,
             "tomorrow prices ignored without tomorrow kWh",
         )
-        fallback = plan(clock, attrs, remaining_today=None, tomorrow_kwh=None, flex_pct=0, flex_euro=0)
+        fallback = plan(clock, attrs, today_kwh=None, tomorrow_kwh=None, flex_pct=0, flex_euro=0)
         assert_eq(
             fallback["raw_windows"][0]["start"],
             base + 86400,
@@ -458,7 +458,7 @@ def main():
         attrs = {"raw_today": today, "raw_tomorrow": tomorrow}
         clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
         tom_only = plan(
-            clock, attrs, remaining_today=None, tomorrow_kwh=10.0, flex_pct=0, flex_euro=0
+            clock, attrs, today_kwh=None, tomorrow_kwh=10.0, flex_pct=0, flex_euro=0
         )
         assert_true(
             tom_only["raw_windows"][0]["start"] >= base + 86400 - 1,
@@ -470,7 +470,7 @@ def main():
                 "raw_today": slots_from(base, [0.01] * 16),
                 "raw_tomorrow": slots_from(base + 86400, [0.08] * 16),
             },
-            remaining_today=10.0,
+            today_kwh=10.0,
             tomorrow_kwh=8.0,
             flex_pct=0,
             flex_euro=0,
@@ -485,7 +485,7 @@ def main():
                 "raw_today": slots_from(base, [0.08] * 16),
                 "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
             },
-            remaining_today=10.0,
+            today_kwh=10.0,
             tomorrow_kwh=8.0,
             flex_pct=0,
             flex_euro=0,
@@ -497,19 +497,19 @@ def main():
         zero_today = plan(
             clock,
             attrs,
-            remaining_today=0.0,
+            today_kwh=0.0,
             tomorrow_kwh=None,
             flex_pct=0,
             flex_euro=0,
         )
         assert_true(
             zero_today["raw_windows"][0]["end"] <= base + 86400 + 1,
-            "remaining_today=0 is present: keep today, ignore tomorrow",
+            "today_kwh=0 is present: keep today, ignore tomorrow",
         )
         no_tom_prices = plan(
             clock,
             {"raw_today": today},
-            remaining_today=None,
+            today_kwh=None,
             tomorrow_kwh=10.0,
             flex_pct=0,
             flex_euro=0,

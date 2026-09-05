@@ -56,7 +56,7 @@ def plan_once(clock, attrs, result, min_hours=2.0, max_hours=5.0, ceiling=0.2, b
         flex_euro=extra.get("flex_euro", 0.02),
         source_entity="sensor.price",
         blocked=blocked,
-        remaining_today=extra.get("remaining_today"),
+        today_kwh=extra.get("today_kwh"),
         tomorrow_kwh=extra.get("tomorrow_kwh"),
     )
 
@@ -292,14 +292,14 @@ def main():
         clock = Clock(day)
         attrs = {"raw_today": today, "raw_tomorrow": tomorrow, "tomorrow_valid": True}
         clipped = plan_once(
-            clock, attrs, None, remaining_today=10.0, tomorrow_kwh=None, flex_pct=0, flex_euro=0
+            clock, attrs, None, today_kwh=10.0, tomorrow_kwh=None, flex_pct=0, flex_euro=0
         )
         assert_true(
             clipped["raw_windows"][0]["end"] <= tomorrow_start + 1,
             "tomorrow prices ignored until tomorrow solar kWh exists",
         )
         both = plan_once(
-            clock, attrs, clipped, remaining_today=10.0, tomorrow_kwh=8.0, flex_pct=0, flex_euro=0
+            clock, attrs, clipped, today_kwh=10.0, tomorrow_kwh=8.0, flex_pct=0, flex_euro=0
         )
         assert_eq(both["reason"], "planned", "tomorrow solar appearing is a new environment")
         assert_true(

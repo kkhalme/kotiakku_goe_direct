@@ -27,7 +27,7 @@ from .const import (
     CONF_PRIORITY,
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENTITY,
-    CONF_SOLAR_REMAINING_ENTITY,
+    CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
     DOMAIN,
     PRIORITY_MAX,
@@ -44,10 +44,10 @@ _HOUSE_KEYS = (
     CONF_SOLAR_ENTITY,
     CONF_HOUSE_ENTITY,
     CONF_KOTIAKKU_IN_KW,
-    CONF_SOLAR_REMAINING_ENTITY,
+    CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
 )
-_HOUSE_OPTIONAL = (CONF_SOLAR_REMAINING_ENTITY, CONF_SOLAR_TOMORROW_ENTITY)
+_HOUSE_OPTIONAL = (CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY)
 
 
 def _entity(domain=None):
@@ -145,7 +145,7 @@ def _house_fields():
         vol.Required(CONF_SOLAR_ENTITY): _entity("sensor"),
         vol.Required(CONF_HOUSE_ENTITY): _entity("sensor"),
         vol.Required(CONF_KOTIAKKU_IN_KW): _bool(),
-        vol.Optional(CONF_SOLAR_REMAINING_ENTITY): _entity("sensor"),
+        vol.Optional(CONF_SOLAR_TODAY_ENTITY): _entity("sensor"),
         vol.Optional(CONF_SOLAR_TOMORROW_ENTITY): _entity("sensor"),
     }
 

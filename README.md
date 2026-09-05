@@ -26,7 +26,7 @@ The integration does not assume entity ids. **Add integration** and **Configure*
 | Controller Car-power 5-min mean | go-e Controller EV watts for leftover math. Unknown → **0 W**. Do **not** keep last sample. Never written to. |
 | Charger entities | Charger 1 is required; 2–4 are optional. Any entity on each charger device (car state is ideal), then that charger’s MQTT serial and leftover priority |
 | Spot-price sensor | Needs `raw_today` / `raw_tomorrow` (HACS Nordpool) |
-| Solar today | Optional. Forecast.Solar / Solcast **full-day** today kWh (example `sensor.energy_production_today`). SolarPriority. Do not leave a leftover `…_remaining` sensor here — pick the new entity in Configure. |
+| Solar today | Optional. Forecast.Solar / Solcast **full-day** today kWh (example `sensor.energy_production_today`). SolarPriority. This is today's production, not leftover-from-now. |
 | Solar tomorrow | Optional. Forecast.Solar / Solcast tomorrow kWh. SolarPriority |
 
 Same form: whether Kotiakku solar/house are in kW (default on) and whether the Controller mean is in kW (default off = watts).
@@ -142,7 +142,7 @@ kotiakku_goe_direct:
   solar_entity: sensor.solar_power
   house_entity: sensor.house_power
   kotiakku_in_kw: true
-  solar_remaining_entity: sensor.energy_production_today
+  solar_today_entity: sensor.energy_production_today
   solar_tomorrow_entity: sensor.energy_production_tomorrow
   chargers:
     - entity: sensor.go_echarger_111111_car_state
@@ -216,7 +216,12 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_phase3_min_w` | 4140 W | Switch leftover to 3-phase (after the 15 min `psm` hold) |
 | `number.kotiakku_goe_direct_eco_lot_a` | 50 A | Group lot when restoring ECO |
 | `select.kotiakku_goe_direct_eco_phase` | Auto | Restore `psm` (Auto / Force 1-phase / Force 3-phase) |
-| `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until sunset, then when tomorrow ≥ this. Missing tomorrow after sunset is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition. `sensor.kotiakku_goe_direct_solar_kwh` is max(today, tomorrow); `gating_kwh` / `gating_day` say which day is gating |
+| `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until sunset, then when tomorrow ≥ this. Missing tomorrow after sunset is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition |
+| `sensor.kotiakku_goe_direct_solar_today_kwh` | from Configure | Today's full-day kWh. Attribute `source` is the picker entity |
+| `sensor.kotiakku_goe_direct_solar_tomorrow_kwh` | from Configure | Tomorrow kWh. Attribute `source` is the picker entity |
+| `sensor.kotiakku_goe_direct_solar_gating_kwh` | today or tomorrow | kWh that currently gates the 22 kW skip (today until sunset, then tomorrow) |
+| `sensor.kotiakku_goe_direct_solar_gating_day` | `today` / `tomorrow` | Which day's kWh is gating |
+| `sensor.kotiakku_goe_direct_solar_kwh` | max(today, tomorrow) | Headline forecast. Attributes: `source_today`, `source_tomorrow`, `enough_solar`, `offsun_hour_kwh` |
 | `number.kotiakku_goe_direct_offsun_hour_kwh` | 1 kWh | Drop a local hour from the search when its expected forecast energy ≥ this. 0 disables. Dawn/dusk/night under 1 kWh stay searchable |
 
 YAML `soc_on`, `eco_lot`, charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.

@@ -52,20 +52,34 @@ views:
           - type: glance
             show_name: true
             show_state: true
-            columns: 7
+            columns: 6
             entities:
               - entity: binary_sensor.kotiakku_goe_direct_window_active
                 name: Window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
                 name: Enough solar
-              - entity: sensor.kotiakku_goe_direct_solar_kwh
-                name: Forecast solar
               - entity: select.kotiakku_goe_direct_policy_111111
                 name: Charger 1
               - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
                 name: 1 full power
               - entity: select.kotiakku_goe_direct_policy_222222
                 name: Charger 2
+
+          - type: glance
+            show_name: true
+            show_state: true
+            columns: 5
+            entities:
+              - entity: sensor.kotiakku_goe_direct_solar_today_kwh
+                name: Solar today
+              - entity: sensor.kotiakku_goe_direct_solar_tomorrow_kwh
+                name: Solar tomorrow
+              - entity: sensor.kotiakku_goe_direct_solar_gating_kwh
+                name: Solar gating
+              - entity: sensor.kotiakku_goe_direct_solar_gating_day
+                name: Gating day
+              - entity: sensor.kotiakku_goe_direct_solar_kwh
+                name: Forecast solar
 
           - type: custom:apexcharts-card
             header:
