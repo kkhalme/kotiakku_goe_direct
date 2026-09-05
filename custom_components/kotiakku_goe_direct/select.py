@@ -12,6 +12,7 @@ from .const import (
     POLICIES,
     POLICY_FORCE_OFF,
     POLICY_UNTIL_UNPLUG,
+    restore_policy,
     PSM_OPTIONS,
     psm_option,
 )
@@ -42,7 +43,12 @@ class _HubSelect(SelectEntity, RestoreEntity):
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is not None and last.state in self._attr_options:
+        if last is None:
+            return
+        mapped = restore_policy(last.state)
+        if mapped in self._attr_options:
+            self._attr_current_option = mapped
+        elif last.state in self._attr_options:
             self._attr_current_option = last.state
 
     async def async_select_option(self, option: str):

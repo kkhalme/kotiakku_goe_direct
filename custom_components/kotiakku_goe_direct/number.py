@@ -14,10 +14,14 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .config import clamp_priority, entry_config
 from .const import (
     DEFAULT_CEILING,
+    DEFAULT_FLEX_EUR,
+    DEFAULT_FLEX_PCT,
     DEFAULT_MAX_HOURS,
     DEFAULT_MIN_HOURS,
     DOMAIN,
     EID_CEILING,
+    EID_FLEX_EUR,
+    EID_FLEX_PCT,
     EID_MAX,
     EID_MIN,
     EID_SOLAR_ENOUGH_KWH,
@@ -47,6 +51,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         WindowHours(controller, EID_MIN, "kotiakku_goe_direct_window_min_h", "Window min", DEFAULT_MIN_HOURS),
         WindowHours(controller, EID_MAX, "kotiakku_goe_direct_window_max_h", "Window max", DEFAULT_MAX_HOURS),
         PriceCeiling(controller),
+        WindowFlexPct(controller),
+        WindowFlexEuro(controller),
     ]
     cfg = entry_config(entry)
     entities.extend(SurplusNumber(controller, spec, cfg) for spec in SURPLUS_NUMBER_SPECS)
@@ -121,6 +127,35 @@ class PriceCeiling(_HubNumber):
         self.entity_id = EID_CEILING
         self._attr_unique_id = "kotiakku_goe_direct_electricity_price_ceiling"
         self._attr_name = "Electricity price ceiling"
+
+
+class WindowFlexPct(_HubNumber):
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:percent-outline"
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self._attr_native_value = DEFAULT_FLEX_PCT
+        self.entity_id = EID_FLEX_PCT
+        self._attr_unique_id = "kotiakku_goe_direct_window_flex_pct"
+        self._attr_name = "Window price flex"
+
+
+class WindowFlexEuro(_HubNumber):
+    _attr_native_min_value = 0
+    _attr_native_max_value = 1
+    _attr_native_step = 0.001
+    _attr_icon = "mdi:currency-eur"
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self._attr_native_value = DEFAULT_FLEX_EUR
+        self.entity_id = EID_FLEX_EUR
+        self._attr_unique_id = "kotiakku_goe_direct_window_flex_eur"
+        self._attr_name = "Window price flex euro"
 
 
 class SurplusNumber(_HubNumber):

@@ -264,7 +264,7 @@ def surplus_hour_ranges(
     Remaining-today is spread over the rest of the local day; tomorrow kWh
     over the next local day. Spot windows stay independent of Kotiakku
     leftover. Unknown energy or a non-positive hour threshold excludes
-    nothing (Off-sun then matches Cheapest).
+    nothing (SolarPriority then searches every remaining price slot).
     """
     try:
         threshold = float(hour_kwh)
@@ -656,7 +656,12 @@ def _serial_take(serial, remaining, charger_max_w, take_w, states):
 
 
 def _steal_keep_w(remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w):
-    keep_w = int(remaining) + int(prev_take) - int(split_min_w)
+    """Watts the high car keeps after a split_min steal. None unless both
+    shares are at least ``split_min_w`` and still meet 6 A."""
+    split_min_w = int(split_min_w)
+    keep_w = int(remaining) + int(prev_take) - split_min_w
+    if keep_w < split_min_w:
+        return None
     if not _can_charge(keep_w, min_amp, volts, phase3_min_w):
         return None
     if not _can_charge(split_min_w, min_amp, volts, phase3_min_w):
@@ -689,16 +694,19 @@ def surplus_allocation_plan(
     (at the published cap, leftover would allow more). Unused leftover
     above ``split_floor_w`` (default 500 W) goes to the next car. If that
     remainder is below ``split_min_w`` (default 3 kW), cut the
-    high-priority share so the next car still gets 3 kW — only if the
-    first still meets 6 A. Remainder at or below 500 W is a dead zone:
+    high-priority share so the next car still gets 3 kW — only if
+    leftover itself is at least ``2 × split_min_w`` (each car keeps at
+    least 3 kW), the first is actually taking power, and both shares
+    still meet 6 A. Remainder at or below 500 W is a dead zone:
     do not start the next car. If the next car was already on and
     leftover then shrinks so the first would use it all, keep stealing
-    3 kW for the hold minutes unless ``split_expired``. ``lops`` is HA
-    charger priority, not app ``lop``. HA does not write ``lop``.
+    3 kW for the hold minutes unless ``split_expired`` or leftover is
+    below 6 kW. ``lops`` is HA charger priority, not app ``lop``.
+    HA does not write ``lop``.
     A single plugged charger always gets the leftover. Unplugged or
     finished chargers are not offered leftover and cannot keep a 3 kW
-    steal alive. The 3 kW steal only runs when leftover itself is at
-    least ``split_min_w`` and the higher-priority car is actually taking
+    steal alive. The steal only runs when leftover itself is at least
+    ``2 × split_min_w`` and the higher-priority car is actually taking
     power — a WaitCar / idle first slot must not invent 3 kW for the
     next car.
     """
@@ -766,7 +774,7 @@ def surplus_allocation_plan(
             continue
         in_dead = remaining <= split_floor_w
         want_steal = (
-            leftover_w >= split_min_w
+            leftover_w >= 2 * split_min_w
             and prev_take >= 100
             and ((not in_dead) or (split_hold and not split_expired))
         )

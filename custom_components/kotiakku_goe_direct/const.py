@@ -1,39 +1,26 @@
 DOMAIN = "kotiakku_goe_direct"
 
-RANKS = ("cheapest", "longest", "earliest", "offsun")
-RANK_LABELS = {
-    "cheapest": "Cheapest",
-    "longest": "Longest",
-    "earliest": "Earliest",
-    "offsun": "Off-sun",
-}
-POLICY_CHEAPEST = "Cheapest"
-POLICY_SUPERCHEAP = "Supercheap"
-POLICY_LONGEST = "Longest"
-POLICY_EARLIEST = "Earliest"
+POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_FORCE_ON = "Force on"
 POLICY_FORCE_OFF = "Force off"
 POLICY_UNTIL_UNPLUG = "Force on until unplug"  # legacy select option; now a switch
 POLICIES = (
-    POLICY_CHEAPEST,
-    POLICY_SUPERCHEAP,
-    POLICY_LONGEST,
-    POLICY_EARLIEST,
+    POLICY_SOLAR_PRIORITY,
     POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
 )
-RANKED_POLICIES = (POLICY_CHEAPEST, POLICY_SUPERCHEAP, POLICY_LONGEST, POLICY_EARLIEST)
-FORCE_POLICIES = (POLICY_FORCE_ON,)
-POLICY_RANK = {
-    POLICY_CHEAPEST: "cheapest",
-    POLICY_SUPERCHEAP: "offsun",
-    POLICY_LONGEST: "longest",
-    POLICY_EARLIEST: "earliest",
+LEGACY_POLICY_MAP = {
+    "Cheapest": POLICY_SOLAR_PRIORITY,
+    "Supercheap": POLICY_SOLAR_PRIORITY,
+    "Longest": POLICY_SOLAR_PRIORITY,
+    "Earliest": POLICY_SOLAR_PRIORITY,
 }
 
 
-def rank_label(rank):
-    return RANK_LABELS.get(rank, str(rank).capitalize())
+def restore_policy(policy):
+    if policy in POLICIES:
+        return policy
+    return LEGACY_POLICY_MAP.get(policy, policy)
 
 CONF_PRICE_ENTITY = "price_entity"
 CONF_SOC_ENTITY = "soc_entity"
@@ -81,7 +68,9 @@ DEFAULT_ECO_PSM = 0
 DEFAULT_ECO_LOT = 50
 DEFAULT_MIN_HOURS = 2.0
 DEFAULT_MAX_HOURS = 5.0
-DEFAULT_CEILING = 0.1
+DEFAULT_CEILING = 0.2
+DEFAULT_FLEX_PCT = 20.0
+DEFAULT_FLEX_EUR = 0.02
 DEFAULT_KOTIAKKU_IN_KW = True
 DEFAULT_CONTROLLER_IN_KW = False
 DEFAULT_SOLAR_ENOUGH_KWH = 40
@@ -98,6 +87,12 @@ HUB_ID = "kotiakku_goe_direct"
 EID_MIN = "number.kotiakku_goe_direct_window_min_h"
 EID_MAX = "number.kotiakku_goe_direct_window_max_h"
 EID_CEILING = "number.kotiakku_goe_direct_electricity_price_ceiling"
+EID_FLEX_PCT = "number.kotiakku_goe_direct_window_flex_pct"
+EID_FLEX_EUR = "number.kotiakku_goe_direct_window_flex_eur"
+EID_WINDOW = "sensor.kotiakku_goe_direct_window"
+EID_WINDOW_ACTIVE = "binary_sensor.kotiakku_goe_direct_window_active"
+WINDOW_SENSOR_UNIQUE_ID = "kotiakku_goe_direct_window"
+WINDOW_ACTIVE_UNIQUE_ID = "kotiakku_goe_direct_window_active"
 EID_PRICE = "text.kotiakku_goe_direct_electricity_price_sensor"
 EID_SOC_ON = "number.kotiakku_goe_direct_soc_on_pct"
 EID_SOC_HYST = "number.kotiakku_goe_direct_soc_hyst_pct"
@@ -116,7 +111,7 @@ EID_ECO_PSM = "select.kotiakku_goe_direct_eco_phase"
 EID_SOLAR_ENOUGH_KWH = "number.kotiakku_goe_direct_solar_enough_kwh"
 EID_OFFSUN_HOUR_KWH = "number.kotiakku_goe_direct_offsun_hour_kwh"
 
-WINDOW_EIDS = (EID_MIN, EID_MAX, EID_CEILING, EID_PRICE)
+WINDOW_EIDS = (EID_MIN, EID_MAX, EID_CEILING, EID_FLEX_PCT, EID_FLEX_EUR, EID_PRICE)
 SURPLUS_EIDS = (
     EID_SOC_ON,
     EID_SOC_HYST,
@@ -345,41 +340,78 @@ def until_unplug_entity_id(serial) -> str:
     return f"switch.kotiakku_goe_direct_until_unplug_{serial}"
 
 
-def window_sensor_unique_id(rank) -> str:
-    return f"kotiakku_goe_direct_{rank}_window"
+_REMOVED_WINDOW_RANKS = ("cheapest", "longest", "earliest")
+_OFFSUN_WINDOW_UIDS = (
+    "kotiakku_goe_direct_offsun_window",
+    "kotiakku_goe_direct_offsun_window_start",
+)
+_OFFSUN_ACTIVE_UID = "kotiakku_goe_direct_offsun_window_active"
 
 
-def window_sensor_entity_id(rank) -> str:
-    return f"sensor.{window_sensor_unique_id(rank)}"
+def _registry_remove(registry, domain, unique_id) -> None:
+    entity_id = registry.async_get_entity_id(domain, DOMAIN, unique_id)
+    if entity_id is None:
+        return
+    try:
+        registry.async_remove(entity_id)
+    except (ValueError, KeyError, AttributeError):
+        return
 
 
-def window_sensor_legacy_unique_id(rank) -> str:
-    return f"kotiakku_goe_direct_{rank}_window_start"
+def _registry_rename(registry, domain, old_uid, new_uid, new_entity_id) -> bool:
+    """Move old_uid onto new_uid. Returns True if the old row was handled."""
+    entity_id = registry.async_get_entity_id(domain, DOMAIN, old_uid)
+    if entity_id is None:
+        return True
+    if registry.async_get_entity_id(domain, DOMAIN, new_uid) is not None:
+        return False
+    kwargs = {"new_unique_id": new_uid}
+    default_old = f"{domain}.{old_uid}"
+    if entity_id == default_old and registry.async_get(new_entity_id) is None:
+        kwargs["new_entity_id"] = new_entity_id
+    try:
+        registry.async_update_entity(entity_id, **kwargs)
+    except ValueError:
+        return False
+    return True
 
 
-def migrate_window_sensor_ids(registry) -> None:
-    """Move ``…_window_start`` unique_ids onto ``…_window``.
+def migrate_window_entities(registry) -> None:
+    """Rename offsun window entities; delete leftover rank window entities.
 
-    Duck-typed like Home Assistant's entity registry. Default entity ids
-    are renamed; a custom entity id is kept so history and automations
-    that already renamed it stay put.
+    Duck-typed like Home Assistant's entity registry. A custom entity id on
+    the offsun sensor is kept. If the new unique_id already exists, the
+    offsun row is removed instead of leaving both.
     """
-    for rank in RANKS:
-        old_uid = window_sensor_legacy_unique_id(rank)
-        new_uid = window_sensor_unique_id(rank)
-        entity_id = registry.async_get_entity_id("sensor", DOMAIN, old_uid)
-        if entity_id is None:
-            continue
-        if registry.async_get_entity_id("sensor", DOMAIN, new_uid) is not None:
-            continue
-        new_entity_id = window_sensor_entity_id(rank)
-        kwargs = {"new_unique_id": new_uid}
-        if entity_id == f"sensor.{old_uid}" and registry.async_get(new_entity_id) is None:
-            kwargs["new_entity_id"] = new_entity_id
-        try:
-            registry.async_update_entity(entity_id, **kwargs)
-        except ValueError:
-            continue
+    renamed = _registry_rename(
+        registry, "sensor", _OFFSUN_WINDOW_UIDS[0], WINDOW_SENSOR_UNIQUE_ID, EID_WINDOW
+    )
+    if not renamed:
+        _registry_remove(registry, "sensor", _OFFSUN_WINDOW_UIDS[0])
+    start_renamed = _registry_rename(
+        registry,
+        "sensor",
+        _OFFSUN_WINDOW_UIDS[1],
+        WINDOW_SENSOR_UNIQUE_ID,
+        EID_WINDOW,
+    )
+    if not start_renamed:
+        _registry_remove(registry, "sensor", _OFFSUN_WINDOW_UIDS[1])
+    active_renamed = _registry_rename(
+        registry,
+        "binary_sensor",
+        _OFFSUN_ACTIVE_UID,
+        WINDOW_ACTIVE_UNIQUE_ID,
+        EID_WINDOW_ACTIVE,
+    )
+    if not active_renamed:
+        _registry_remove(registry, "binary_sensor", _OFFSUN_ACTIVE_UID)
+    for rank in _REMOVED_WINDOW_RANKS:
+        _registry_remove(registry, "sensor", f"kotiakku_goe_direct_{rank}_window")
+        _registry_remove(registry, "sensor", f"kotiakku_goe_direct_{rank}_window_start")
+        _registry_remove(
+            registry, "binary_sensor", f"kotiakku_goe_direct_{rank}_window_active"
+        )
 
 
 def default_charger_priority(slot) -> int:

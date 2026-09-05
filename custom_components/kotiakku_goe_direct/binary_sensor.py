@@ -4,15 +4,21 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, RANKS, rank_label
+from .const import (
+    DOMAIN,
+    EID_WINDOW_ACTIVE,
+    WINDOW_ACTIVE_UNIQUE_ID,
+    migrate_window_entities,
+)
 from .device import HubEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    migrate_window_entities(er.async_get(hass))
     controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [RankBinary(controller, rank) for rank in RANKS]
-    entities.append(EnoughSolarBinary(controller))
+    entities = [WindowActiveBinary(controller), EnoughSolarBinary(controller)]
     entities.extend(ChargerBinary(controller, serial) for serial in controller.chargers)
     entities.append(AnyChargerBinary(controller))
     async_add_entities(entities)
@@ -23,17 +29,16 @@ class _Base(HubEntity, BinarySensorEntity):
     _attr_icon = "mdi:ev-station"
 
 
-class RankBinary(_Base):
-    def __init__(self, controller, rank):
+class WindowActiveBinary(_Base):
+    def __init__(self, controller):
         super().__init__(controller)
-        self._rank = rank
-        self.entity_id = f"binary_sensor.kotiakku_goe_direct_{rank}_window_active"
-        self._attr_unique_id = f"kotiakku_goe_direct_{rank}_window_active"
-        self._attr_name = f"{rank_label(rank)} window active"
+        self.entity_id = EID_WINDOW_ACTIVE
+        self._attr_unique_id = WINDOW_ACTIVE_UNIQUE_ID
+        self._attr_name = "Window active"
 
     @property
     def is_on(self):
-        return self._controller.rank_active(self._rank)
+        return self._controller.window_active()
 
 
 class EnoughSolarBinary(_Base):

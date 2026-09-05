@@ -27,6 +27,8 @@ from .const import (
     CONF_SOLAR_REMAINING_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
     DEFAULT_CEILING,
+    DEFAULT_FLEX_EUR,
+    DEFAULT_FLEX_PCT,
     DEFAULT_ECO_LOT,
     DEFAULT_HOLD_MIN,
     DEFAULT_HOLD_MIN_W,
@@ -45,6 +47,8 @@ from .const import (
     DEFAULT_OFFSUN_HOUR_KWH,
     DEFAULT_VOLTS,
     EID_CEILING,
+    EID_FLEX_EUR,
+    EID_FLEX_PCT,
     EID_ECO_LOT,
     EID_ECO_PSM,
     EID_HOLD_MIN,
@@ -66,7 +70,7 @@ from .const import (
     EID_VOLTS,
     POLICY_FORCE_OFF,
     POLICIES,
-    RANKS,
+    restore_policy,
     STORAGE_KEY,
     STORAGE_VERSION,
     SURPLUS_EIDS,
@@ -172,7 +176,7 @@ class KotiakkuGoeDirectController:
         self.controller_in_kw = bool(data[CONF_CONTROLLER_IN_KW])
         self._config_price = data.get(CONF_PRICE_ENTITY, "") or ""
         self.clock = HassClock()
-        self.window_results = {rank: None for rank in RANKS}
+        self.window_result = None
         self.session = False
         self.split_session = False
         self.restore = {s: POLICY_FORCE_OFF for s in self.chargers}
@@ -331,7 +335,7 @@ class KotiakkuGoeDirectController:
         await self.async_charge()
 
     def policy(self, serial):
-        state = self._state(self.policy_entity(serial))
+        state = restore_policy(self._state(self.policy_entity(serial)))
         if state not in POLICIES:
             return POLICY_FORCE_OFF
         return state
@@ -342,7 +346,7 @@ class KotiakkuGoeDirectController:
     def charger_full_power(self, serial):
         return policy_full_power(
             self.policy(serial),
-            self.window_results,
+            self.window_result,
             self._now_ts(),
             enough_solar=self.enough_solar,
             until_unplug=self.until_unplug(serial),
@@ -351,8 +355,8 @@ class KotiakkuGoeDirectController:
     def any_charger_full_power(self):
         return any(self.charger_full_power(s) for s in self.chargers)
 
-    def rank_active(self, rank):
-        result = self.window_results.get(rank) or {}
+    def window_active(self):
+        result = self.window_result or {}
         return now_in_windows(result.get("raw_windows") or [], self._now_ts())
 
     def _forecast_kwh(self, entity_id):
@@ -396,7 +400,7 @@ class KotiakkuGoeDirectController:
 
     @property
     def surplus_hours(self):
-        return list((self.window_results.get("offsun") or {}).get("blocked") or [])
+        return list((self.window_result or {}).get("blocked") or [])
 
     async def async_setup(self):
         stored = await self._store.async_load()
@@ -592,12 +596,11 @@ class KotiakkuGoeDirectController:
         self._cancel("_boundary_unsub")
         now_ts = self._now_ts()
         times = []
-        for result in self.window_results.values():
-            for w in (result or {}).get("raw_windows") or []:
-                if w["start"] > now_ts:
-                    times.append(w["start"])
-                if w["end"] > now_ts:
-                    times.append(w["end"])
+        for w in (self.window_result or {}).get("raw_windows") or []:
+            if w["start"] > now_ts:
+                times.append(w["start"])
+            if w["end"] > now_ts:
+                times.append(w["end"])
         if not times:
             return
         when = self.clock.utc_from_timestamp(min(times))
@@ -619,6 +622,8 @@ class KotiakkuGoeDirectController:
         min_hours = self._float_entity(EID_MIN, DEFAULT_MIN_HOURS)
         max_hours = self._float_entity(EID_MAX, DEFAULT_MAX_HOURS)
         ceiling = self._float_entity(EID_CEILING, DEFAULT_CEILING)
+        flex_pct = self._float_entity(EID_FLEX_PCT, DEFAULT_FLEX_PCT)
+        flex_euro = self._float_entity(EID_FLEX_EUR, DEFAULT_FLEX_EUR)
         lat, lon = self._site_lat_lon()
         blocked = surplus_hour_ranges(
             self.clock,
@@ -628,25 +633,26 @@ class KotiakkuGoeDirectController:
             lat,
             lon,
         )
-        for rank in RANKS:
-            prev = prev_from_result(self.clock, self.window_results.get(rank))
-            self.window_results[rank] = plan(
-                self.clock,
-                attrs,
-                min_hours=min_hours,
-                max_hours=max_hours,
-                ceiling=ceiling,
-                rank=rank,
-                prev=prev,
-                source_entity=price_entity,
-                blocked=blocked,
-            )
-            _LOGGER.info(
-                "kotiakku_goe_direct plan rank=%s reason=%s count=%s",
-                rank,
-                self.window_results[rank]["reason"],
-                self.window_results[rank]["count"],
-            )
+        prev = prev_from_result(self.clock, self.window_result)
+        self.window_result = plan(
+            self.clock,
+            attrs,
+            min_hours=min_hours,
+            max_hours=max_hours,
+            ceiling=ceiling,
+            flex_pct=flex_pct,
+            flex_euro=flex_euro,
+            prev=prev,
+            source_entity=price_entity,
+            blocked=blocked,
+            remaining_today=self.remaining_today_kwh,
+            tomorrow_kwh=self.tomorrow_kwh,
+        )
+        _LOGGER.info(
+            "kotiakku_goe_direct plan reason=%s count=%s",
+            self.window_result["reason"],
+            self.window_result["count"],
+        )
         self._schedule_boundaries()
         self.notify()
 
@@ -916,7 +922,7 @@ class KotiakkuGoeDirectController:
                 changed = True
             want_on = policy_full_power(
                 self.policy(serial),
-                self.window_results,
+                self.window_result,
                 self._now_ts(),
                 enough_solar=self.enough_solar,
                 until_unplug=new_on,

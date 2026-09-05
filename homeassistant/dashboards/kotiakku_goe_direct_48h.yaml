@@ -38,14 +38,12 @@ views:
               {% set house_kw = house | float(0) | abs %}
               {% set ev_kw = (ev_s | float(0) | abs / 1000) if ev_s | is_number else 0 %}
               {% set leftover = (solar_kw - house_kw + ev_kw) if (solar | is_number and house | is_number) else none %}
-              **48 h from local midnight** · green = Cheapest windows · dark green = Off-sun
-              (Supercheap) · red = price ceiling.
+              **48 h from local midnight** · green = SolarPriority window · red = price ceiling.
 
               Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
               · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
               (`|solar| − |house| + |ev|`)
-              · cheapest {{ states('sensor.kotiakku_goe_direct_cheapest_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_cheapest_window', 'end') }}
-              · off-sun {{ states('sensor.kotiakku_goe_direct_offsun_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_offsun_window', 'end') }}.
+              · window {{ states('sensor.kotiakku_goe_direct_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_window', 'end') }}.
 
               Delete charger 2 cards/series if you only have one charger. Leftover
               chart sources: `sensor.solar_power`, `sensor.house_power`,
@@ -56,10 +54,8 @@ views:
             show_state: true
             columns: 7
             entities:
-              - entity: binary_sensor.kotiakku_goe_direct_cheapest_window_active
-                name: Cheapest
-              - entity: binary_sensor.kotiakku_goe_direct_offsun_window_active
-                name: Off-sun
+              - entity: binary_sensor.kotiakku_goe_direct_window_active
+                name: Window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
                 name: Enough solar
               - entity: sensor.kotiakku_goe_direct_solar_kwh
@@ -74,7 +70,7 @@ views:
           - type: custom:apexcharts-card
             header:
               show: true
-              title: Spot · cheapest / off-sun windows (today + tomorrow)
+              title: Spot · SolarPriority window (today + tomorrow)
               show_states: false
             graph_span: 2d
             span:
@@ -95,8 +91,8 @@ views:
                   title:
                     text: €/kWh
             series:
-              - entity: sensor.kotiakku_goe_direct_cheapest_window
-                name: Cheapest
+              - entity: sensor.kotiakku_goe_direct_window
+                name: Window
                 yaxis_id: price
                 type: area
                 curve: stepline
@@ -158,20 +154,6 @@ views:
                     pts.push([t, on ? slotVal(entry) : 0]);
                   }
                   return pts;
-              - entity: sensor.kotiakku_goe_direct_offsun_window
-                name: Off-sun
-                yaxis_id: price
-                type: area
-                curve: stepline
-                color: "#1b7a1b"
-                opacity: 0.38
-                stroke_width: 0
-                extend_to: false
-                unit: €/kWh
-                show:
-                  in_header: false
-                  legend_value: false
-                data_generator: *window_band
               - entity: text.kotiakku_goe_direct_electricity_price_sensor
                 name: Spot
                 yaxis_id: price
@@ -298,17 +280,10 @@ views:
                   const serial = entity.entity_id.split('_').pop();
                   const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
                   const enough = String(((hass.states['binary_sensor.kotiakku_goe_direct_solar_enough'] || {}).state) || '') === 'on';
-                  const rank = {
-                    Cheapest: 'cheapest',
-                    Supercheap: enough ? '' : 'offsun',
-                    Longest: 'longest',
-                    Earliest: 'earliest',
-                  }[policy] || '';
+                  const solar = ['SolarPriority', 'Cheapest', 'Supercheap', 'Longest', 'Earliest'].indexOf(policy) >= 0;
                   const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
                   const force = policy === 'Force on' || until;
-                  const windows = rank
-                    ? windowsFrom(((hass.states['sensor.kotiakku_goe_direct_' + rank + '_window'] || {}).attributes) || {})
-                    : [];
+                  const windows = windowsFrom(((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {});
                   const full = 32 * 230 * 3 / 1000;
                   const pts = [];
                   for (const entry of priceSlots()) {
@@ -316,7 +291,7 @@ views:
                     if (!Number.isFinite(t)) continue;
                     let on = 0;
                     if (force) on = full;
-                    else if (rank && inWin(windows, t)) on = full;
+                    else if (solar && !enough && inWin(windows, t)) on = full;
                     pts.push([t, on]);
                   }
                   return pts;
@@ -449,14 +424,13 @@ views:
               - entity: select.kotiakku_goe_direct_policy_222222
               - entity: switch.kotiakku_goe_direct_until_unplug_222222
               - entity: number.kotiakku_goe_direct_priority_222222
-              - entity: sensor.kotiakku_goe_direct_cheapest_window
-              - entity: sensor.kotiakku_goe_direct_offsun_window
-              - entity: sensor.kotiakku_goe_direct_longest_window
-              - entity: sensor.kotiakku_goe_direct_earliest_window
+              - entity: sensor.kotiakku_goe_direct_window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
               - entity: sensor.kotiakku_goe_direct_solar_kwh
               - entity: number.kotiakku_goe_direct_window_min_h
               - entity: number.kotiakku_goe_direct_window_max_h
+              - entity: number.kotiakku_goe_direct_window_flex_pct
+              - entity: number.kotiakku_goe_direct_window_flex_eur
               - entity: number.kotiakku_goe_direct_electricity_price_ceiling
               - entity: number.kotiakku_goe_direct_solar_enough_kwh
               - entity: number.kotiakku_goe_direct_offsun_hour_kwh

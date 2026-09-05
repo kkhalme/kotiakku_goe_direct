@@ -1,7 +1,7 @@
 """Roll the planner clock forward the way the controller does.
 
-``async_plan`` stores one result per rank and feeds ``prev_from_result`` on
-the next tick. These tests walk 15-minute (and boundary) ticks so freeze,
+``async_plan`` stores one SolarPriority result and feeds ``prev_from_result``
+on the next tick. These tests walk 15-minute (and boundary) ticks so freeze,
 active windows, tomorrow switch, surplus floor, split hold, and 1↔3
 ``psm`` hold can be seen over time.
 """
@@ -19,7 +19,7 @@ from harness import (
     case_runner,
     iso,
     load_mod,
-    plan_ranks as run_ranks,
+    plan_once as run_once,
     slots_from,
     window_ends,
     window_starts,
@@ -32,10 +32,7 @@ now_in_windows = planner.now_in_windows
 charger_full_power = planner.charger_full_power
 until_unplug_step = planner.until_unplug_step
 SLOT = planner.SLOT_SECONDS
-POLICY_CHEAPEST = const.POLICY_CHEAPEST
-POLICY_SUPERCHEAP = const.POLICY_SUPERCHEAP
-POLICY_LONGEST = const.POLICY_LONGEST
-POLICY_EARLIEST = const.POLICY_EARLIEST
+POLICY_SOLAR_PRIORITY = const.POLICY_SOLAR_PRIORITY
 POLICY_FORCE_ON = const.POLICY_FORCE_ON
 POLICY_FORCE_OFF = const.POLICY_FORCE_OFF
 
@@ -46,17 +43,21 @@ starts_of = window_starts
 ends_of = window_ends
 
 
-def plan_ranks(clock, attrs, results, min_hours=2.0, max_hours=5.0, ceiling=0.1, blocked=None):
-    return run_ranks(
+def plan_once(clock, attrs, result, min_hours=2.0, max_hours=5.0, ceiling=0.2, blocked=None, **extra):
+    return run_once(
         planner,
         clock,
         attrs,
-        results,
+        result,
         min_hours=min_hours,
         max_hours=max_hours,
         ceiling=ceiling,
+        flex_pct=extra.get("flex_pct", 20),
+        flex_euro=extra.get("flex_euro", 0.02),
         source_entity="sensor.price",
         blocked=blocked,
+        remaining_today=extra.get("remaining_today"),
+        tomorrow_kwh=extra.get("tomorrow_kwh"),
     )
 
 
@@ -81,137 +82,102 @@ def tick_times(start_ts, end_ts, windows, step=SLOT):
 def main():
     case, run = case_runner()
 
-    def test_roll_uniform_8h_freeze_and_active():
+    def test_roll_uniform_freeze_and_active():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
-        attrs = {"raw_today": slots_from(base, [0.05] * 32)}
+        attrs = {"raw_today": slots_from(base, [0.05] * 8)}
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {})
-        cheap = results["cheapest"]
-        assert_eq(cheap["reason"], "planned", "first plan")
-        assert_eq(len(cheap["raw_windows"]), 2, "5h + 3h")
-        frozen_starts = starts_of(cheap)
-        assert_eq(round((frozen_starts[1] - frozen_starts[0]) / 3600, 2), 5.0, "first 5h")
-
-        last = max(ends_of(cheap))
-        for ts in tick_times(base, last + 3600, cheap["raw_windows"]):
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "first plan")
+        assert_eq(len(result["raw_windows"]), 1, "one window")
+        assert_eq(round((result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600, 2), 2.0, "min hours, no flex")
+        frozen_starts = starts_of(result)
+        last = max(ends_of(result))
+        for ts in tick_times(base, last + 3600, result["raw_windows"]):
             clock.set(datetime.datetime.fromtimestamp(ts, tz=timezone.utc))
-            results = plan_ranks(clock, attrs, results)
-            cheap = results["cheapest"]
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
             if ts < last:
-                assert_eq(cheap["reason"], "frozen", "still inside last end @ %s" % iso(ts))
-                assert_eq(starts_of(cheap), frozen_starts, "starts did not slide @ %s" % iso(ts))
+                assert_eq(result["reason"], "frozen", "still inside last end @ %s" % iso(ts))
+                assert_eq(starts_of(result), frozen_starts, "starts did not slide @ %s" % iso(ts))
             else:
-                assert_eq(cheap["reason"], "idle_after_window", "idle after last end @ %s" % iso(ts))
-                assert_eq(starts_of(cheap), frozen_starts, "keep old set after idle")
-            active = now_in_windows(cheap["raw_windows"], ts)
-            expect = any(w["start"] <= ts < w["end"] for w in cheap["raw_windows"])
+                assert_eq(result["reason"], "idle_after_window", "idle after last end @ %s" % iso(ts))
+                assert_eq(starts_of(result), frozen_starts, "keep old set after idle")
+            active = now_in_windows(result["raw_windows"], ts)
+            expect = any(w["start"] <= ts < w["end"] for w in result["raw_windows"])
             assert_eq(active, expect, "now_in_windows @ %s" % iso(ts))
-            full = charger_full_power(POLICY_CHEAPEST, results, ts)
-            assert_eq(full, active, "Cheapest full power follows windows")
+            full = charger_full_power(POLICY_SOLAR_PRIORITY, result, ts)
+            assert_eq(full, active, "SolarPriority full power follows the window")
             assert_eq(
-                charger_full_power(POLICY_FORCE_OFF, results, ts),
+                charger_full_power(POLICY_FORCE_OFF, result, ts),
                 False,
                 "Force off never full power",
             )
             assert_eq(
-                charger_full_power(POLICY_FORCE_ON, results, ts),
+                charger_full_power(POLICY_FORCE_ON, result, ts),
                 True,
                 "Force on always full power",
             )
 
-        in_first = now_in_windows(cheap["raw_windows"], base + 60)
-        in_gap = now_in_windows(cheap["raw_windows"], last)
+        in_first = now_in_windows(result["raw_windows"], base + 60)
+        in_gap = now_in_windows(result["raw_windows"], last)
         assert_true(in_first, "first minute is inside")
         assert_true(not in_gap, "exactly last end is outside")
 
-    def test_longest_does_not_slide_on_falling_prices():
+    def test_window_does_not_slide_on_falling_prices():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
         prices = [0.09] * 8 + [0.04] * 24
         attrs = {"raw_today": slots_from(base, prices)}
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {})
-        first = results["longest"]
-        assert_eq(round((first["raw_windows"][0]["end"] - first["raw_windows"][0]["start"]) / 3600, 2), 5.0, "longest 5h")
-        start0 = first["raw_windows"][0]["start"]
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(round((result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600, 2), 2.0, "seed 2h")
+        start0 = result["raw_windows"][0]["start"]
+        assert_eq(start0, base + 8 * SLOT, "seed is the 0.04 dip")
         for i in range(1, 12):
             clock.advance(minutes=15)
-            results = plan_ranks(clock, attrs, results)
-            long = results["longest"]
-            assert_eq(long["reason"], "frozen", "tick %s frozen" % i)
-            assert_eq(long["raw_windows"][0]["start"], start0, "longest start did not slide")
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "tick %s frozen" % i)
+            assert_eq(result["raw_windows"][0]["start"], start0, "start did not slide")
 
     def test_tomorrow_switch_then_freeze():
         day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
         today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
         tomorrow_start = today_start + 24 * 3600
-        # 10:00–22:00 at 0.09 so 14:00 is still inside the frozen set.
         today = slots_from(today_start + 10 * 3600, [0.09] * 48)
         clock = Clock(day)
         attrs = {"raw_today": today, "tomorrow_valid": False}
-        results = plan_ranks(clock, attrs, {})
-        first_start = starts_of(results["cheapest"])
-        assert_eq(results["cheapest"]["reason"], "planned", "morning plan")
+        result = plan_once(clock, attrs, None)
+        first_start = starts_of(result)
+        assert_eq(result["reason"], "planned", "morning plan")
         assert_true(
-            max(ends_of(results["cheapest"])) > day.timestamp() + 4 * 3600,
-            "window lasts past 14:00",
+            max(ends_of(result)) > day.timestamp() + 4 * 3600,
+            "flex grows the 0.09 plateau past 14:00",
         )
 
         clock.advance(hours=4)
-        still = plan_ranks(clock, attrs, results)
-        assert_eq(still["cheapest"]["reason"], "frozen", "same curve frozen at 14:00")
-        assert_eq(starts_of(still["cheapest"]), first_start, "morning starts held")
+        still = plan_once(clock, attrs, result)
+        assert_eq(still["reason"], "frozen", "same curve frozen at 14:00")
+        assert_eq(starts_of(still), first_start, "morning starts held")
 
         attrs = {
             "raw_today": today,
             "raw_tomorrow": slots_from(tomorrow_start, [0.02] * 16),
             "tomorrow_valid": True,
         }
-        results = plan_ranks(clock, attrs, still)
-        assert_eq(results["cheapest"]["reason"], "switched", "cheaper tomorrow")
+        result = plan_once(clock, attrs, still)
+        assert_eq(result["reason"], "switched", "cheaper tomorrow")
         assert_true(
-            results["cheapest"]["raw_windows"][0]["start"] >= tomorrow_start - 1,
+            result["raw_windows"][0]["start"] >= tomorrow_start - 1,
             "new window is tomorrow",
         )
-        switched_starts = starts_of(results["cheapest"])
+        switched_starts = starts_of(result)
         for _ in range(8):
             clock.advance(minutes=15)
-            results = plan_ranks(clock, attrs, results)
-            assert_eq(results["cheapest"]["reason"], "frozen", "hold the switched set")
-            assert_eq(starts_of(results["cheapest"]), switched_starts, "switched set does not slide")
-
-    def test_three_ranks_independent_over_time():
-        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
-        base = day.timestamp()
-        prices = [0.09] * 8 + [0.01] * 8 + [0.09] * 16
-        attrs = {"raw_today": slots_from(base, prices)}
-        clock = Clock(day)
-        results = plan_ranks(clock, attrs, {})
-        cheap0 = starts_of(results["cheapest"])
-        long0 = starts_of(results["longest"])
-        early0 = starts_of(results["earliest"])
-        assert_true(cheap0[0] > early0[0], "cheapest is the dip, earliest is the start")
-        last = max(
-            max(ends_of(results["cheapest"])),
-            max(ends_of(results["longest"])),
-            max(ends_of(results["earliest"])),
-        )
-        ts = base
-        while ts < last:
-            clock.set(datetime.datetime.fromtimestamp(ts, tz=timezone.utc))
-            results = plan_ranks(clock, attrs, results)
-            if ts > base:
-                assert_eq(results["cheapest"]["reason"], "frozen", "cheap frozen")
-                assert_eq(results["longest"]["reason"], "frozen", "longest frozen")
-                assert_eq(results["earliest"]["reason"], "frozen", "earliest frozen")
-            assert_eq(starts_of(results["cheapest"]), cheap0, "cheap starts")
-            assert_eq(starts_of(results["longest"]), long0, "longest starts")
-            assert_eq(starts_of(results["earliest"]), early0, "earliest starts")
-            ts += SLOT
+            result = plan_once(clock, attrs, result)
+            assert_eq(result["reason"], "frozen", "hold the switched set")
+            assert_eq(starts_of(result), switched_starts, "switched set does not slide")
 
     def test_helsinki_midnight_keeps_frozen_iso_slots():
-        local_day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=HELSINKI)
         evening = datetime.datetime(2026, 3, 15, 22, 0, tzinfo=HELSINKI)
         next_midnight = datetime.datetime(2026, 3, 16, 0, 0, tzinfo=HELSINKI)
         cheap_start = datetime.datetime(2026, 3, 16, 2, 0, tzinfo=HELSINKI)
@@ -223,14 +189,13 @@ def main():
             "raw_tomorrow": tomorrow,
             "tomorrow_valid": True,
         }
-        results = plan_ranks(clock, attrs, {})
-        cheap = results["cheapest"]
-        assert_eq(cheap["reason"], "planned", "evening plan uses tomorrow")
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "evening plan uses tomorrow")
         assert_true(
-            cheap["raw_windows"][0]["start"] >= cheap_start.timestamp() - 1,
+            result["raw_windows"][0]["start"] >= cheap_start.timestamp() - 1,
             "window is the 02:00 dip",
         )
-        frozen = starts_of(cheap)
+        frozen = starts_of(result)
 
         clock.set(next_midnight)
         rolled = {
@@ -238,23 +203,23 @@ def main():
             "raw_tomorrow": [],
             "tomorrow_valid": False,
         }
-        results = plan_ranks(clock, rolled, results)
-        assert_eq(results["cheapest"]["reason"], "frozen", "midnight does not replan")
-        assert_eq(starts_of(results["cheapest"]), frozen, "ISO slots survive day roll")
+        result = plan_once(clock, rolled, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "midnight does not replan")
+        assert_eq(starts_of(result), frozen, "ISO slots survive day roll")
         assert_true(
-            not now_in_windows(results["cheapest"]["raw_windows"], next_midnight.timestamp()),
+            not now_in_windows(result["raw_windows"], next_midnight.timestamp()),
             "02:00 window not active at midnight",
         )
         clock.set(cheap_start)
-        results = plan_ranks(clock, rolled, results)
+        result = plan_once(clock, rolled, result, flex_pct=0, flex_euro=0)
         assert_true(
-            now_in_windows(results["cheapest"]["raw_windows"], clock.as_timestamp(clock.now())),
+            now_in_windows(result["raw_windows"], clock.as_timestamp(clock.now())),
             "active at 02:00",
         )
         assert_eq(
-            charger_full_power(POLICY_CHEAPEST, results, clock.as_timestamp(clock.now())),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, clock.as_timestamp(clock.now())),
             True,
-            "Cheapest on at 02:00",
+            "SolarPriority on at 02:00",
         )
 
     def test_spot_price_independent_of_kotiakku():
@@ -262,80 +227,88 @@ def main():
         base = day.timestamp()
         attrs = {"raw_today": slots_from(base, [0.04] * 16)}
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {})
-        w = results["cheapest"]["raw_windows"][0]
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        w = result["raw_windows"][0]
         mid = (w["start"] + w["end"]) / 2
         dead = surplus.surplus_decision(True, 0, -1, window_ok=False)
         assert_true(dead["arm_floor"], "surplus holds when Kotiakku is down")
         assert_eq(
-            charger_full_power(POLICY_CHEAPEST, results, mid),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, mid),
             True,
-            "Cheapest still full power with Kotiakku down",
+            "SolarPriority still full power with Kotiakku down",
         )
 
-    def test_supercheap_uses_offsun_windows():
+    def test_blocked_hours_and_enough_solar():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
         prices = [0.05] * 32 + [0.01] * 32 + [0.2] * 32
         attrs = {"raw_today": slots_from(base, prices)}
         blocked = [(base + 8 * 3600, base + 16 * 3600)]
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {}, blocked=blocked)
-        cheap = results["cheapest"]["raw_windows"][0]
-        off = results["offsun"]["raw_windows"][0]
-        assert_eq(cheap["start"], base + 8 * 3600, "cheapest is the midday dip")
-        assert_eq(off["start"], base, "offsun is the night")
-        midday = cheap["start"] + 1800
-        night = off["start"] + 1800
+        result = plan_once(clock, attrs, None, blocked=blocked, flex_pct=0, flex_euro=0)
+        assert_eq(result["raw_windows"][0]["start"], base, "night, not the blocked midday dip")
+        midday = base + 10 * 3600
+        night = base + 1800
         assert_eq(
-            charger_full_power(POLICY_CHEAPEST, results, midday),
-            True,
-            "Cheapest ignores surplus hours",
-        )
-        assert_eq(
-            charger_full_power(POLICY_SUPERCHEAP, results, midday),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, midday),
             False,
-            "Supercheap skips surplus hours",
+            "blocked midday is not in the window",
         )
         assert_eq(
-            charger_full_power(POLICY_SUPERCHEAP, results, night),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, night),
             True,
-            "Supercheap 22 kW in offsun night",
+            "SolarPriority 22 kW in the night window",
         )
         assert_eq(
-            charger_full_power(POLICY_SUPERCHEAP, results, night, enough_solar=True),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, night, enough_solar=True),
             False,
-            "enough solar skips Supercheap even in offsun",
+            "enough solar skips 22 kW even in the window",
         )
         assert_eq(
-            charger_full_power(POLICY_FORCE_OFF, results, midday),
+            charger_full_power(POLICY_FORCE_OFF, result, midday),
             False,
             "Force off stays surplus-only",
         )
         assert_eq(
-            charger_full_power(POLICY_FORCE_ON, results, midday),
+            charger_full_power(POLICY_FORCE_ON, result, midday),
             True,
             "Force on ignores Kotiakku",
         )
         clock.set(datetime.datetime.fromtimestamp(night, tz=timezone.utc))
-        results = plan_ranks(clock, attrs, results, blocked=blocked)
-        assert_eq(results["offsun"]["reason"], "frozen", "offsun windows still freeze")
-        assert_true(
-            now_in_windows(results["offsun"]["raw_windows"], night),
-            "offsun active at night",
-        )
+        result = plan_once(clock, attrs, result, blocked=blocked, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "window still freezes")
+        assert_true(now_in_windows(result["raw_windows"], night), "active at night")
         clock.set(datetime.datetime.fromtimestamp(midday, tz=timezone.utc))
-        results = plan_ranks(clock, attrs, results, blocked=blocked)
+        result = plan_once(clock, attrs, result, blocked=blocked, flex_pct=0, flex_euro=0)
         assert_true(
-            not now_in_windows(results["offsun"]["raw_windows"], midday),
-            "offsun not active in blocked midday",
+            not now_in_windows(result["raw_windows"], midday),
+            "not active in blocked midday",
         )
         dead = surplus.surplus_decision(True, 0, -1, window_ok=False)
         assert_true(dead["arm_floor"], "surplus holds when Kotiakku is down")
-        assert_eq(
-            charger_full_power(POLICY_CHEAPEST, results, midday),
-            True,
-            "Cheapest still full power with Kotiakku down",
+
+    def test_horizon_clip_over_time():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.09] * 48)
+        tomorrow = slots_from(tomorrow_start, [0.01] * 16)
+        clock = Clock(day)
+        attrs = {"raw_today": today, "raw_tomorrow": tomorrow, "tomorrow_valid": True}
+        clipped = plan_once(
+            clock, attrs, None, remaining_today=10.0, tomorrow_kwh=None, flex_pct=0, flex_euro=0
+        )
+        assert_true(
+            clipped["raw_windows"][0]["end"] <= tomorrow_start + 1,
+            "tomorrow prices ignored until tomorrow solar kWh exists",
+        )
+        both = plan_once(
+            clock, attrs, clipped, remaining_today=10.0, tomorrow_kwh=8.0, flex_pct=0, flex_euro=0
+        )
+        assert_eq(both["reason"], "switched", "tomorrow solar appearing is a horizon switch")
+        assert_true(
+            both["raw_windows"][0]["start"] >= tomorrow_start - 1,
+            "switched onto tomorrow",
         )
 
     def test_surplus_floor_over_15_min():
@@ -379,6 +352,14 @@ def main():
         assert_true(not no_start["write_on"], "cannot start while unusable")
         off = decide(False, 0, 96, window_ok=True)
         assert_true(not off["write_on"] and not off["write_off"], "stay off; do not restart under 2000 W")
+        at_hold = decide(True, 1000, 96, window_ok=True)
+        assert_true(at_hold["write_on"] and not at_hold["arm_floor"], "exactly 1000 W still tracks")
+        under = decide(True, 999, 96, window_ok=True)
+        assert_true(under["use_floor_budget"], "999 W starts the 6 A hold")
+        leave_exact = decide(True, 2000, 96, window_ok=True, hold_active=True, hold_exit_w=2000)
+        assert_true(leave_exact["write_on"] and not leave_exact["arm_floor"], "exactly 2000 W cancels hold")
+        default_exit = decide(True, 1500, 96, window_ok=True, hold_active=True)
+        assert_true(not default_exit["arm_floor"], "without hold_exit_w, 1500 W already clears hold_min_w")
 
     def test_surplus_split_hold_over_15_min():
         alloc = surplus.surplus_allocations
@@ -404,6 +385,26 @@ def main():
         assert_eq(held["arm_split_hold"], True, "arm the same 15 min hold")
         dropped = alloc([a, b], leftover_w=10000, split_hold=True, split_expired=True, **kwargs)
         assert_eq(dropped, {a: 10000}, "drop the second car after 15 min")
+        too_small = alloc(
+            [a, b],
+            leftover_w=4500,
+            take_w={a: 4400, b: 0},
+            states={a: "Charging", b: "Charging"},
+            split_hold=True,
+            **kwargs,
+        )
+        assert_eq(too_small, {a: 4400}, "grace does not steal below 3 kW per car")
+        min_split = alloc(
+            [a, b],
+            leftover_w=6000,
+            take_w={a: 5900, b: 0},
+            states={a: "Charging", b: "Charging"},
+            split_hold=True,
+            **kwargs,
+        )
+        assert_eq(min_split, {a: 3000, b: 3000}, "grace at 6 kW leftover is 3+3")
+        tiny = alloc([a, b], leftover_w=300, **kwargs)
+        assert_eq(tiny, {}, "300 W two unequal cars: first cannot meet 6 A")
 
     def test_surplus_phase_hold_over_15_min():
         phase = surplus.surplus_phase_budget
@@ -434,72 +435,166 @@ def main():
         assert_eq(other_on, False, "other charger untouched")
         assert_eq(other_seen, False, "other charger seen stays off")
         assert_eq(
-            charger_full_power(POLICY_CHEAPEST, {"cheapest": {"raw_windows": []}}, 0),
+            charger_full_power(POLICY_SOLAR_PRIORITY, {"raw_windows": []}, 0),
             False,
             "policy is unchanged when the override clears",
         )
         on, seen = until_unplug_tick(True, False, False)
         assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
 
-    def test_one_hour_min_joins_short_pauses_over_time():
-        day = datetime.datetime(2026, 9, 3, 21, 45, tzinfo=timezone.utc)
+    def test_min_equals_max_stays_fixed_over_time():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
-        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
-        attrs = {"raw_today": slots_from(base, prices)}
+        attrs = {"raw_today": slots_from(base, [0.04] * 16)}
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {}, min_hours=1.0, max_hours=5.0, ceiling=0.1)
-        off = results["offsun"]["raw_windows"]
-        assert_true(off, "planned bottoms")
-        for w in off:
-            assert_true((w["end"] - w["start"]) / 3600 + 0.01 >= 1.0, "session ≥ 1 h")
-        last = max(ends_of(results["offsun"]))
-        for ts in tick_times(base, last, off):
-            clock.set(datetime.datetime.fromtimestamp(ts, tz=timezone.utc))
-            results = plan_ranks(clock, attrs, results, min_hours=1.0, max_hours=5.0, ceiling=0.1)
-            slot_i = int((ts - base) // 900)
-            if slot_i < 0 or slot_i >= len(prices):
-                continue
-            active = now_in_windows(results["offsun"]["raw_windows"], ts)
-            if prices[slot_i] > 0.1:
-                assert_eq(active, False, "spike stays off @ %s" % iso(ts))
-            assert_eq(
-                charger_full_power(POLICY_SUPERCHEAP, results, ts),
-                active,
-                "Supercheap follows offsun @ %s" % iso(ts),
-            )
-        assert_true(now_in_windows(off, base), "starts on the 0.02 bottom")
-        assert_true(now_in_windows(off, base + 900), "no 15 min pause after the bottom")
-        assert_true(not now_in_windows(off, base + 5 * 900), "spike off")
+        result = plan_once(clock, attrs, None, min_hours=2.0, max_hours=2.0, flex_pct=50, flex_euro=1)
+        assert_eq(round((result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600, 2), 2.0, "fixed 2h")
+        start0 = result["raw_windows"][0]["start"]
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, min_hours=2.0, max_hours=2.0, flex_pct=50, flex_euro=1)
+            assert_eq(result["reason"], "frozen", "fixed-length window freezes")
+            assert_eq(result["raw_windows"][0]["start"], start0, "does not grow while frozen")
 
     def test_boundary_exclusive_end():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
         attrs = {"raw_today": slots_from(base, [0.04] * 8)}
         clock = Clock(day)
-        results = plan_ranks(clock, attrs, {})
-        w = results["cheapest"]["raw_windows"][0]
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        w = result["raw_windows"][0]
         assert_true(now_in_windows([w], w["start"]), "on at start")
         assert_true(now_in_windows([w], w["end"] - 1), "on 1s before end")
         assert_true(not now_in_windows([w], w["end"]), "off at end")
         assert_eq(
-            charger_full_power(POLICY_CHEAPEST, results, w["end"]),
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, w["end"]),
             False,
             "binary off at end",
         )
 
-    case("roll_uniform_8h_freeze_and_active", test_roll_uniform_8h_freeze_and_active)
-    case("longest_does_not_slide_on_falling_prices", test_longest_does_not_slide_on_falling_prices)
+    def test_horizon_grew_but_not_cheaper_stays_frozen():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.03] * 48)
+        clock = Clock(day)
+        attrs = {"raw_today": today, "tomorrow_valid": False}
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        start0 = result["raw_windows"][0]["start"]
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "held before tomorrow arrives")
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.12] * 16),
+            "tomorrow_valid": True,
+        }
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "dearer tomorrow does not switch")
+        assert_eq(result["raw_windows"][0]["start"], start0, "started set kept")
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "still frozen after a dearer horizon grow")
+            assert_eq(result["raw_windows"][0]["start"], start0, "start does not slide")
+
+    def test_started_window_switches_then_freezes():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.09] * 48)
+        clock = Clock(day)
+        result = plan_once(clock, {"raw_today": today}, None, flex_pct=0, flex_euro=0)
+        now_ts = day.timestamp()
+        assert_true(
+            result["raw_windows"][0]["start"] <= now_ts < result["raw_windows"][0]["end"],
+            "window has already started",
+        )
+        clock.advance(minutes=15)
+        result = plan_once(clock, {"raw_today": today}, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "in-progress window freezes")
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.02] * 16),
+            "tomorrow_valid": True,
+        }
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "switched", "in-progress window is still replaceable")
+        assert_true(result["raw_windows"][0]["start"] >= tomorrow_start - 1, "moved to tomorrow")
+        switched = result["raw_windows"][0]["start"]
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "switched set freezes")
+            assert_eq(result["raw_windows"][0]["start"], switched, "does not slide after switch")
+
+    def test_later_island_planned_after_first_ends():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        prices = [0.02] * 8 + [0.20] * 16 + [0.04] * 8
+        attrs = {"raw_today": slots_from(base, prices)}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["raw_windows"][0]["start"], base, "first island")
+        last = result["raw_windows"][0]["end"]
+        clock.set(datetime.datetime.fromtimestamp(last + 60, tz=timezone.utc))
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "same horizon, later island after idle")
+        assert_eq(result["raw_windows"][0]["start"], base + 24 * SLOT, "second island")
+        start1 = result["raw_windows"][0]["start"]
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "frozen", "second island then freezes")
+        assert_eq(result["raw_windows"][0]["start"], start1, "second start held")
+
+    def test_min_hours_change_replans_during_roll():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        attrs = {"raw_today": slots_from(base, [0.04] * 24)}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, min_hours=2.0, max_hours=5.0, flex_pct=0, flex_euro=0)
+        assert_eq(round((result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600, 2), 2.0, "first 2 h")
+        clock.advance(minutes=15)
+        result = plan_once(clock, attrs, result, min_hours=3.0, max_hours=5.0, flex_pct=0, flex_euro=0)
+        assert_eq(result["reason"], "planned", "min hours change is not frozen")
+        assert_true(
+            (result["raw_windows"][0]["end"] - result["raw_windows"][0]["start"]) / 3600 >= 3.0 - 0.01,
+            "replanned to 3 h",
+        )
+
+    def test_hourly_curve_freezes_on_hour_steps():
+        day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
+        base = day.timestamp()
+        hourly = [0.10] * 10 + [0.02] * 4 + [0.10] * 10
+        attrs = {"raw_today": hourly}
+        clock = Clock(day)
+        result = plan_once(clock, attrs, None, flex_pct=0, flex_euro=0)
+        assert_eq(result["raw_windows"][0]["start"], base + 10 * 3600, "hourly dip")
+        start0 = result["raw_windows"][0]["start"]
+        for _ in range(4):
+            clock.advance(minutes=15)
+            result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
+            assert_eq(result["reason"], "frozen", "hourly plan still freezes every 15 min")
+            assert_eq(result["raw_windows"][0]["start"], start0, "hourly start does not slide")
+
+    case("roll_uniform_freeze_and_active", test_roll_uniform_freeze_and_active)
+    case("window_does_not_slide_on_falling_prices", test_window_does_not_slide_on_falling_prices)
     case("tomorrow_switch_then_freeze", test_tomorrow_switch_then_freeze)
-    case("three_ranks_independent_over_time", test_three_ranks_independent_over_time)
     case("helsinki_midnight_keeps_frozen_iso_slots", test_helsinki_midnight_keeps_frozen_iso_slots)
     case("spot_price_independent_of_kotiakku", test_spot_price_independent_of_kotiakku)
-    case("supercheap_uses_offsun_windows", test_supercheap_uses_offsun_windows)
+    case("blocked_hours_and_enough_solar", test_blocked_hours_and_enough_solar)
+    case("horizon_clip_over_time", test_horizon_clip_over_time)
     case("surplus_floor_over_15_min", test_surplus_floor_over_15_min)
     case("surplus_split_hold_over_15_min", test_surplus_split_hold_over_15_min)
     case("surplus_phase_hold_over_15_min", test_surplus_phase_hold_over_15_min)
     case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
-    case("one_hour_min_joins_short_pauses_over_time", test_one_hour_min_joins_short_pauses_over_time)
+    case("min_equals_max_stays_fixed_over_time", test_min_equals_max_stays_fixed_over_time)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
+    case("horizon_grew_but_not_cheaper_stays_frozen", test_horizon_grew_but_not_cheaper_stays_frozen)
+    case("started_window_switches_then_freezes", test_started_window_switches_then_freezes)
+    case("later_island_planned_after_first_ends", test_later_island_planned_after_first_ends)
+    case("min_hours_change_replans_during_roll", test_min_hours_change_replans_during_roll)
+    case("hourly_curve_freezes_on_hour_steps", test_hourly_curve_freezes_on_hour_steps)
 
     run()
 

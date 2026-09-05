@@ -1,12 +1,13 @@
 """Charge-window planner.
 
-Same rules as the python_script version: contiguous slots, duration in
-[min, max], every 15-minute price ≤ ceiling, then greedy cheapest / longest /
-earliest / offsun. Off-sun is cheapest after dropping hours with enough
-forecast energy. Min hours is the shortest session (cold-weather): greedy
-will not pick a shorter bottom, and a pause shorter than min between two
-bottoms is joined if those slots are still under the ceiling. The ceiling
-is a hard cap, not the selection rule. Freeze is per rank.
+Find the cheapest contiguous windowMinHours seed on the remaining
+(off-sun-blocked, forecast-clipped) spot curve, then grow one native slot
+at a time toward the cheaper neighbor while the duration-weighted average
+stays under flex headroom and at most windowMaxHours. At most one window
+is appended; the result is still a list so more windows can be added later.
+The price ceiling is a safety abort on the seed average and a hard-no on
+grow neighbors; it does not score the seed. Freeze holds a planned set so
+it does not slide every 15 minutes.
 """
 
 from __future__ import annotations
@@ -19,7 +20,20 @@ TARGET_EPS_S = 30
 HOUR_EPS = 0.001
 PRICE_EPS = 0.0000001
 MAX_WINDOWS = 16
-RANKS = ("cheapest", "longest", "earliest", "offsun")
+DEFAULT_MIN_HOURS = 2.0
+DEFAULT_MAX_HOURS = 5.0
+DEFAULT_CEILING = 0.2
+DEFAULT_FLEX_PCT = 20.0
+DEFAULT_FLEX_EUR = 0.02
+
+POLICY_SOLAR_PRIORITY = "SolarPriority"
+POLICY_FORCE_ON = "Force on"
+_LEGACY_POLICIES = {
+    "Cheapest": POLICY_SOLAR_PRIORITY,
+    "Supercheap": POLICY_SOLAR_PRIORITY,
+    "Longest": POLICY_SOLAR_PRIORITY,
+    "Earliest": POLICY_SOLAR_PRIORITY,
+}
 
 
 def _to_ts(clock, value):
@@ -215,7 +229,7 @@ def _blocked_match(left, right):
 
 
 def drop_blocked(slots, blocked):
-    """Drop price slots that overlap surplus-hour ranges. Gaps split windows."""
+    """Drop price slots that overlap surplus-hour ranges. Gaps split islands."""
     blocked = _norm_blocked(blocked)
     if not blocked:
         return slots
@@ -226,52 +240,41 @@ def drop_blocked(slots, blocked):
     ]
 
 
-def norm_rank(value):
-    if value is None or value == "":
-        return "cheapest"
-    word = "".join(
-        ch for ch in str(value).strip().lower() if ch not in (" ", "-", "_")
-    )
-    if word == "longest":
-        return "longest"
-    if word == "earliest":
-        return "earliest"
-    if word == "offsun":
-        return "offsun"
-    return "cheapest"
+def clip_slots_to_forecast(clock, slots, remaining_today, tomorrow_kwh, now_dt):
+    """Keep price slots on days that have solar kWh.
+
+    If both forecast values are missing, return all price slots (prices-only
+    fallback). A day stays only when that day's kWh is present.
+    """
+    if remaining_today is None and tomorrow_kwh is None:
+        return slots
+    try:
+        today_start = float(clock.as_timestamp(clock.start_of_local_day(now_dt)))
+        tomorrow_start = float(
+            clock.as_timestamp(
+                clock.start_of_local_day(now_dt + datetime.timedelta(days=1))
+            )
+        )
+    except Exception:
+        return slots
+    day_after = tomorrow_start + 86400.0
+    out = []
+    for slot in slots:
+        start = slot[0]
+        if remaining_today is not None and start < tomorrow_start - 1:
+            if start >= today_start - 1:
+                out.append(slot)
+        elif tomorrow_kwh is not None and tomorrow_start - 1 <= start < day_after:
+            out.append(slot)
+    return out
 
 
 def _win_dur(w):
     return w["end"] - w["start"]
 
 
-def _is_better_cand(rank, avg, start, dur, best_avg, best_start, best_dur):
-    if best_start is None:
-        return True
-    longer = dur > best_dur + TARGET_EPS_S
-    same_len = abs(dur - best_dur) <= TARGET_EPS_S
-    cheaper = avg < best_avg - PRICE_EPS
-    equal_avg = abs(avg - best_avg) <= PRICE_EPS
-    earlier = start < best_start
-    same_start = abs(start - best_start) <= TARGET_EPS_S
-    if rank == "longest":
-        return longer or (same_len and cheaper) or (same_len and equal_avg and earlier)
-    if rank == "earliest":
-        return earlier or (same_start and longer) or (same_start and same_len and cheaper)
-    # cheapest and offsun: lowest average, then longer, then earlier
-    return cheaper or (equal_avg and longer) or (equal_avg and same_len and earlier)
-
-
-def _without_overlap(slots, start, end):
-    return [slot for slot in slots if not _overlaps(slot, start, end)]
-
-
 def _copy_windows(windows):
     return [{"avg": w["avg"], "start": w["start"], "end": w["end"]} for w in windows]
-
-
-def _window_spans(windows):
-    return [(w["start"], w["end"]) for w in sorted(windows, key=lambda w: w["start"])]
 
 
 def _avg_span(slots, start, end):
@@ -288,186 +291,122 @@ def _avg_span(slots, start, end):
     return total_p / total_d
 
 
-def _tiles_span(slots, start, end):
-    if not slots:
-        return False
-    ordered = sorted(slots, key=lambda slot: slot[0])
-    if ordered[0][0] > start + GAP_S:
-        return False
-    if ordered[-1][1] < end - GAP_S:
-        return False
-    for i in range(1, len(ordered)):
-        if ordered[i][0] - ordered[i - 1][1] > GAP_S:
-            return False
-    return True
+def _current_slot_ts(now_ts):
+    return (now_ts // SLOT_SECONDS) * SLOT_SECONDS
 
 
-def _rank_sort(windows, rank):
-    rank = norm_rank(rank)
-
-    def key(w):
-        dur = _win_dur(w)
-        if rank == "longest":
-            return (-dur, w["avg"], w["start"])
-        if rank == "earliest":
-            return (w["start"], -dur, w["avg"])
-        return (w["avg"], -dur, w["start"])
-
-    return sorted(windows, key=key)
+def flex_headroom(seed_avg, flex_pct, flex_euro):
+    extras = []
+    if flex_pct is not None and flex_pct > 0:
+        extras.append(abs(float(seed_avg)) * float(flex_pct) / 100.0)
+    if flex_euro is not None and flex_euro > 0:
+        extras.append(float(flex_euro))
+    if not extras:
+        return 0.0
+    return max(extras)
 
 
-def coalesce_short_gaps(windows, slots, ceiling, min_s, max_s):
-    """Join bottoms if the idle between them is shorter than min hours.
-
-    A 15-minute pause is as wasteful in the cold as a 15-minute session.
-    Gaps at least min hours, over-ceiling slots, and blocked holes stay.
-    Adjacent windows (already touching) stay split so cheapest min-length
-    bands remain separate. Merged duration stays ≤ max hours.
-    """
-    if windows is None or len(windows) < 2:
-        return windows
-    ordered = _copy_windows(windows)
-    ordered.sort(key=lambda w: w["start"])
-    out = [ordered[0]]
-    for nxt in ordered[1:]:
-        prev = out[-1]
-        gap_start = prev["end"]
-        gap_end = nxt["start"]
-        gap_dur = gap_end - gap_start
-        merged_dur = nxt["end"] - prev["start"]
-        if gap_end <= gap_start + GAP_S:
-            out.append(nxt)
-            continue
-        if gap_dur >= min_s - TARGET_EPS_S:
-            out.append(nxt)
-            continue
-        if merged_dur > max_s + TARGET_EPS_S:
-            out.append(nxt)
-            continue
-        gap = [
-            slot
-            for slot in slots
-            if slot[0] >= gap_start - 1 and slot[1] <= gap_end + 1
-        ]
-        if not _tiles_span(gap, gap_start, gap_end):
-            out.append(nxt)
-            continue
-        if any(slot[2] > ceiling + PRICE_EPS for slot in gap):
-            out.append(nxt)
-            continue
-        prev["end"] = nxt["end"]
-        prev["avg"] = _avg_span(slots, prev["start"], prev["end"])
-    return out
-
-
-def pick_best(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
+def find_seed(slots, min_s, now_ts):
+    """Cheapest contiguous windowMinHours run. Ignores the price ceiling."""
     n = len(slots)
     if n == 0:
         return None
-    slot_ts = (now_ts // SLOT_SECONDS) * SLOT_SECONDS
-    best_avg = None
-    best_start = None
-    best_end = None
-    best_dur = None
+    slot_ts = _current_slot_ts(now_ts)
+    best = None
     for i in range(n):
-        if slots[i][0] < slot_ts - 1 or slots[i][2] > ceiling + PRICE_EPS:
+        if slots[i][0] < slot_ts - 1:
             continue
         total_p = 0.0
         total_d = 0.0
-        end = None
-        blocked = False
-        j = i
-        while j < n and not blocked:
-            if j > i:
-                gap = slots[j][0] - slots[j - 1][1]
-                if gap > GAP_S:
-                    blocked = True
-            if not blocked and slots[j][2] > ceiling + PRICE_EPS:
-                blocked = True
-            if not blocked:
-                dur = slots[j][1] - slots[j][0]
-                if dur <= 0:
-                    blocked = True
-                else:
-                    total_d = total_d + dur
-                    if total_d > max_s + TARGET_EPS_S:
-                        blocked = True
-                    else:
-                        total_p = total_p + (slots[j][2] * dur)
-                        end = slots[j][1]
-                        if total_d >= min_s - TARGET_EPS_S and end is not None and end > now_ts:
-                            avg = total_p / total_d
-                            start = slots[i][0]
-                            if _is_better_cand(
-                                rank,
-                                avg,
-                                start,
-                                total_d,
-                                best_avg,
-                                best_start,
-                                best_dur,
-                            ):
-                                best_avg = avg
-                                best_start = start
-                                best_end = end
-                                best_dur = total_d
-            j = j + 1
-    if best_start is None:
-        return None
-    return [best_avg, best_start, best_end]
-
-
-def pick_all(slots, min_s, max_s, ceiling, now_ts, rank="cheapest"):
-    rank = norm_rank(rank)
-    remaining = slots
-    windows = []
-    for _ in range(MAX_WINDOWS):
-        best = pick_best(remaining, min_s, max_s, ceiling, now_ts, rank)
-        if best is None:
+        for j in range(i, n):
+            if j > i and slots[j][0] - slots[j - 1][1] > GAP_S:
+                break
+            dur = slots[j][1] - slots[j][0]
+            if dur <= 0:
+                break
+            total_d = total_d + dur
+            total_p = total_p + (slots[j][2] * dur)
+            if total_d + TARGET_EPS_S < min_s:
+                continue
+            if slots[j][1] <= now_ts:
+                break
+            avg = total_p / total_d
+            start = slots[i][0]
+            if best is None:
+                best = (avg, start, slots[j][1], i, j)
+            else:
+                cheaper = avg < best[0] - PRICE_EPS
+                same = abs(avg - best[0]) <= PRICE_EPS
+                if cheaper or (same and start < best[1]):
+                    best = (avg, start, slots[j][1], i, j)
             break
-        windows.append({"avg": best[0], "start": best[1], "end": best[2]})
-        remaining = _without_overlap(remaining, best[1], best[2])
-    joined = coalesce_short_gaps(windows, slots, ceiling, min_s, max_s)
-    return _rank_sort(joined, rank)
+    return best
 
 
-def _set_better(new, old, rank="cheapest"):
-    if new is None or len(new) == 0:
-        return False
-    if old is None or len(old) == 0:
-        return True
-    n = min(len(new), len(old))
-    for i in range(n):
-        nd = _win_dur(new[i])
-        od = _win_dur(old[i])
-        if rank == "longest":
-            if nd > od + TARGET_EPS_S:
-                return True
-            if nd < od - TARGET_EPS_S:
-                return False
-            if new[i]["avg"] < old[i]["avg"] - PRICE_EPS:
-                return True
-            if new[i]["avg"] > old[i]["avg"] + PRICE_EPS:
-                return False
-        elif rank == "earliest":
-            if new[i]["start"] < old[i]["start"] - 1:
-                return True
-            if new[i]["start"] > old[i]["start"] + 1:
-                return False
-            if nd > od + TARGET_EPS_S:
-                return True
-            if nd < od - TARGET_EPS_S:
-                return False
-            if new[i]["avg"] < old[i]["avg"] - PRICE_EPS:
-                return True
-            if new[i]["avg"] > old[i]["avg"] + PRICE_EPS:
-                return False
+def grow_window(slots, left_i, right_j, seed_avg, max_s, now_ts, ceiling, flex_pct, flex_euro):
+    """Extend the seed by one native slot per step toward the cheaper neighbor."""
+    pct_on = flex_pct is not None and flex_pct > 0
+    euro_on = flex_euro is not None and flex_euro > 0
+    if not pct_on and not euro_on:
+        start = slots[left_i][0]
+        end = slots[right_j][1]
+        return {"avg": _avg_span(slots, start, end), "start": start, "end": end}
+    allowed = seed_avg + flex_headroom(seed_avg, flex_pct, flex_euro)
+    slot_ts = _current_slot_ts(now_ts)
+    n = len(slots)
+    while True:
+        start = slots[left_i][0]
+        end = slots[right_j][1]
+        if end - start >= max_s - TARGET_EPS_S:
+            break
+        candidates = []
+        if left_i > 0:
+            nb = slots[left_i - 1]
+            if (
+                slots[left_i][0] - nb[1] <= GAP_S
+                and nb[0] >= slot_ts - 1
+                and nb[2] <= ceiling + PRICE_EPS
+            ):
+                new_end = end
+                new_start = nb[0]
+                if new_end - new_start <= max_s + TARGET_EPS_S:
+                    new_avg = _avg_span(slots, new_start, new_end)
+                    if new_avg <= allowed + PRICE_EPS:
+                        candidates.append((nb[2], -1, left_i - 1))
+        if right_j + 1 < n:
+            nb = slots[right_j + 1]
+            if (
+                nb[0] - slots[right_j][1] <= GAP_S
+                and nb[2] <= ceiling + PRICE_EPS
+            ):
+                new_start = start
+                new_end = nb[1]
+                if new_end - new_start <= max_s + TARGET_EPS_S:
+                    new_avg = _avg_span(slots, new_start, new_end)
+                    if new_avg <= allowed + PRICE_EPS:
+                        candidates.append((nb[2], 1, right_j + 1))
+        if not candidates:
+            break
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        _price, side, idx = candidates[0]
+        if side < 0:
+            left_i = idx
         else:
-            if new[i]["avg"] < old[i]["avg"] - PRICE_EPS:
-                return True
-            if new[i]["avg"] > old[i]["avg"] + PRICE_EPS:
-                return False
-    return len(new) > len(old)
+            right_j = idx
+    start = slots[left_i][0]
+    end = slots[right_j][1]
+    return {"avg": _avg_span(slots, start, end), "start": start, "end": end}
+
+
+def pick_windows(slots, min_s, max_s, ceiling, now_ts, flex_pct, flex_euro):
+    """Return a list of at most one grown window."""
+    seed = find_seed(slots, min_s, now_ts)
+    if seed is None:
+        return []
+    avg, _start, _end, left_i, right_j = seed
+    if avg > ceiling + PRICE_EPS:
+        return []
+    return [grow_window(slots, left_i, right_j, avg, max_s, now_ts, ceiling, flex_pct, flex_euro)]
 
 
 def current_or_next(windows, now_ts):
@@ -490,7 +429,7 @@ def last_end(windows):
     return end
 
 
-def _params_match(prev, min_hours, max_hours, ceiling, rank, blocked=None):
+def _params_match(prev, min_hours, max_hours, ceiling, flex_pct, flex_euro, blocked=None):
     if prev is None:
         return False
     if abs(prev["min_hours"] - min_hours) >= HOUR_EPS:
@@ -499,7 +438,9 @@ def _params_match(prev, min_hours, max_hours, ceiling, rank, blocked=None):
         return False
     if abs(prev["ceiling"] - ceiling) >= PRICE_EPS:
         return False
-    if norm_rank(prev.get("rank")) != rank:
+    if abs(float(prev.get("flex_pct", 0)) - flex_pct) >= HOUR_EPS:
+        return False
+    if abs(float(prev.get("flex_euro", 0)) - flex_euro) >= PRICE_EPS:
         return False
     if not _blocked_match(prev.get("blocked"), blocked):
         return False
@@ -510,41 +451,51 @@ def _choice(windows, horizon, reason):
     return {"windows": windows, "horizon": horizon, "reason": reason}
 
 
+def _set_better(new, old):
+    if new is None or len(new) == 0:
+        return False
+    if old is None or len(old) == 0:
+        return True
+    n = min(len(new), len(old))
+    for i in range(n):
+        if new[i]["avg"] < old[i]["avg"] - PRICE_EPS:
+            return True
+        if new[i]["avg"] > old[i]["avg"] + PRICE_EPS:
+            return False
+    return len(new) > len(old)
+
+
 def choose(
-    slots, min_hours, max_hours, ceiling, now_ts, prev, rank="cheapest", blocked=None
+    slots,
+    min_hours,
+    max_hours,
+    ceiling,
+    now_ts,
+    prev,
+    blocked=None,
+    flex_pct=DEFAULT_FLEX_PCT,
+    flex_euro=DEFAULT_FLEX_EUR,
 ):
-    rank = norm_rank(rank)
     if not slots:
         return _choice([], None, "no_slots")
     horizon = slots[-1][1]
-    if rank == "offsun":
-        blocked = _norm_blocked(blocked)
-        slots = drop_blocked(slots, blocked)
-    else:
-        blocked = []
+    blocked = _norm_blocked(blocked)
+    search = drop_blocked(slots, blocked)
     min_s = min_hours * 3600.0
     max_s = max_hours * 3600.0
-    new_windows = pick_all(slots, min_s, max_s, ceiling, now_ts, rank)
+    new_windows = pick_windows(
+        search, min_s, max_s, ceiling, now_ts, flex_pct, flex_euro
+    )
     prev_ok = False
     prev_windows = None
-    if _params_match(prev, min_hours, max_hours, ceiling, rank, blocked):
+    if _params_match(prev, min_hours, max_hours, ceiling, flex_pct, flex_euro, blocked):
         prev_windows = prev.get("windows")
         prev_ok = prev_windows is not None and len(prev_windows) > 0
-    if prev_ok:
-        joined_prev = _rank_sort(
-            coalesce_short_gaps(prev_windows, slots, ceiling, min_s, max_s),
-            rank,
-        )
-        if _window_spans(joined_prev) != _window_spans(prev_windows):
-            return _choice(joined_prev, prev.get("horizon") or horizon, "planned")
     last = last_end(prev_windows) if prev_ok else None
     if prev_ok and last is not None and last > now_ts:
-        # Same-horizon replans would drop elapsed slots and look "better"
-        # (a 15-minute slide). Keep the frozen set unless the price curve
-        # grew (typically tomorrow after 14:00) and the new set wins.
         prev_horizon = prev.get("horizon")
         horizon_grew = prev_horizon is None or horizon > prev_horizon + GAP_S
-        if horizon_grew and _set_better(new_windows, prev_windows, rank):
+        if horizon_grew and _set_better(new_windows, prev_windows):
             return _choice(new_windows, horizon, "switched")
         return _choice(prev_windows, prev["horizon"], "frozen")
     if prev_ok and last is not None and last <= now_ts:
@@ -552,7 +503,6 @@ def choose(
         if prev_horizon is None or horizon <= prev_horizon + GAP_S:
             if not new_windows:
                 return _choice(prev_windows, prev["horizon"], "idle_after_window")
-            # Same-horizon leftovers still contain another min-length bottom.
             return _choice(new_windows, horizon, "planned")
         if not new_windows:
             return _choice(prev_windows, prev["horizon"], "no_window")
@@ -566,14 +516,24 @@ def clamp_hours(min_hours, max_hours):
     min_hours = _to_price(min_hours)
     max_hours = _to_price(max_hours)
     if min_hours is None or min_hours <= 0:
-        min_hours = 2.0
+        min_hours = DEFAULT_MIN_HOURS
     if max_hours is None or max_hours <= 0:
-        max_hours = 5.0
+        max_hours = DEFAULT_MAX_HOURS
     min_hours = min(24.0, max(0.25, min_hours))
     max_hours = min(24.0, max(0.25, max_hours))
     if min_hours > max_hours:
         min_hours, max_hours = max_hours, min_hours
     return min_hours, max_hours
+
+
+def clamp_flex(flex_pct, flex_euro):
+    flex_pct = _to_price(flex_pct)
+    flex_euro = _to_price(flex_euro)
+    if flex_pct is None or flex_pct < 0:
+        flex_pct = 0.0
+    if flex_euro is None or flex_euro < 0:
+        flex_euro = 0.0
+    return flex_pct, flex_euro
 
 
 def iso_windows(clock, windows):
@@ -597,14 +557,10 @@ def now_in_windows(windows, now_ts):
     return False
 
 
-# Keep names here so tests can load this module without the package.
-_FORCE_ON = ("Force on",)
-_POLICY_RANK = {
-    "Cheapest": "cheapest",
-    "Supercheap": "offsun",
-    "Longest": "longest",
-    "Earliest": "earliest",
-}
+def restore_policy(policy):
+    if policy in _LEGACY_POLICIES:
+        return _LEGACY_POLICIES[policy]
+    return policy
 
 
 def until_unplug_step(override, plugged, seen):
@@ -624,72 +580,106 @@ def until_unplug_step(override, plugged, seen):
     return True, False
 
 
-def charger_full_power(policy, results, now_ts, *, enough_solar=False, until_unplug=False):
+def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
     """Whether this charger wants 22 kW right now. Pure; no Home Assistant."""
     if until_unplug:
         return True
-    if policy in _FORCE_ON:
+    policy = restore_policy(policy)
+    if policy == POLICY_FORCE_ON:
         return True
-    rank = _POLICY_RANK.get(policy)
-    if not rank:
+    if policy != POLICY_SOLAR_PRIORITY:
         return False
-    if policy == "Supercheap" and enough_solar:
+    if enough_solar:
         return False
-    return now_in_windows((results.get(rank) or {}).get("raw_windows") or [], now_ts)
+    windows = []
+    if isinstance(result, dict):
+        windows = result.get("raw_windows") or []
+    return now_in_windows(windows, now_ts)
 
 
-def plan(
-    clock,
-    attrs,
-    *,
-    min_hours=2.0,
-    max_hours=5.0,
-    ceiling=0.1,
-    rank="cheapest",
-    prev=None,
-    source_entity="",
-    blocked=None,
+def _empty_result(
+    min_hours,
+    max_hours,
+    ceiling,
+    flex_pct,
+    flex_euro,
+    source_entity,
+    reason="no_source",
 ):
-    min_hours, max_hours = clamp_hours(min_hours, max_hours)
-    ceiling = _to_price(ceiling)
-    if ceiling is None:
-        ceiling = 0.1
-    rank = norm_rank(rank)
-    now_dt = clock.now()
-    now_ts = float(clock.as_timestamp(now_dt))
-    empty = {
+    return {
         "start": None,
         "end": None,
         "avg": None,
         "min_hours": min_hours,
         "max_hours": max_hours,
         "ceiling": ceiling,
-        "rank": rank,
+        "flex_pct": flex_pct,
+        "flex_euro": flex_euro,
         "count": 0,
         "windows": [],
         "horizon": None,
-        "reason": "no_source",
+        "reason": reason,
         "tomorrow_ok": False,
         "source_entity": source_entity,
         "slot_count": 0,
         "blocked_ts": [],
         "blocked": [],
+        "raw_windows": [],
+        "horizon_ts": None,
     }
+
+
+def plan(
+    clock,
+    attrs,
+    *,
+    min_hours=DEFAULT_MIN_HOURS,
+    max_hours=DEFAULT_MAX_HOURS,
+    ceiling=DEFAULT_CEILING,
+    flex_pct=DEFAULT_FLEX_PCT,
+    flex_euro=DEFAULT_FLEX_EUR,
+    prev=None,
+    source_entity="",
+    blocked=None,
+    remaining_today=None,
+    tomorrow_kwh=None,
+):
+    min_hours, max_hours = clamp_hours(min_hours, max_hours)
+    flex_pct, flex_euro = clamp_flex(flex_pct, flex_euro)
+    ceiling = _to_price(ceiling)
+    if ceiling is None:
+        ceiling = DEFAULT_CEILING
+    now_dt = clock.now()
+    now_ts = float(clock.as_timestamp(now_dt))
+    empty = _empty_result(
+        min_hours, max_hours, ceiling, flex_pct, flex_euro, source_entity
+    )
     if attrs is None:
         return empty
     slots = collect_slots(clock, attrs, now_dt)
+    slots = clip_slots_to_forecast(clock, slots, remaining_today, tomorrow_kwh, now_dt)
     chosen = choose(
-        slots, min_hours, max_hours, ceiling, now_ts, prev, rank, blocked=blocked
+        slots,
+        min_hours,
+        max_hours,
+        ceiling,
+        now_ts,
+        prev,
+        blocked=blocked,
+        flex_pct=flex_pct,
+        flex_euro=flex_euro,
     )
     iso_ws = iso_windows(clock, chosen["windows"])
     active = current_or_next(chosen["windows"], now_ts)
+    blocked_ts = _norm_blocked(blocked)
     result = {
         "windows": iso_ws,
         "count": len(iso_ws),
         "min_hours": min_hours,
         "max_hours": max_hours,
         "ceiling": ceiling,
-        "rank": rank,
+        "flex_pct": flex_pct,
+        "flex_euro": flex_euro,
         "horizon": _iso(clock, chosen["horizon"]),
         "reason": chosen["reason"],
         "tomorrow_ok": tomorrow_ok(clock, attrs, slots),
@@ -700,10 +690,10 @@ def plan(
         "avg": None,
         "raw_windows": chosen["windows"],
         "horizon_ts": chosen["horizon"],
-        "blocked_ts": _norm_blocked(blocked) if rank == "offsun" else [],
+        "blocked_ts": blocked_ts,
         "blocked": [
             {"start": _iso(clock, start), "end": _iso(clock, end)}
-            for start, end in (_norm_blocked(blocked) if rank == "offsun" else [])
+            for start, end in blocked_ts
         ],
     }
     if active is not None:
@@ -732,6 +722,7 @@ def prev_from_result(clock, result):
     ceiling = _to_price(result.get("ceiling"))
     if min_hours is None or max_hours is None or ceiling is None:
         return None
+    flex_pct, flex_euro = clamp_flex(result.get("flex_pct"), result.get("flex_euro"))
     raw = result.get("raw_windows")
     windows = []
     if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "start" in raw[0]:
@@ -761,7 +752,8 @@ def prev_from_result(clock, result):
         "min_hours": min_hours,
         "max_hours": max_hours,
         "ceiling": ceiling,
-        "rank": norm_rank(result.get("rank")),
+        "flex_pct": flex_pct,
+        "flex_euro": flex_euro,
         "horizon": horizon,
         "blocked": _norm_blocked(blocked),
     }

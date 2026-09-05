@@ -1,4 +1,4 @@
-"""Tests for the charge-window planner (no Home Assistant)."""
+"""Tests for the SolarPriority charge-window planner (no Home Assistant)."""
 
 from __future__ import annotations
 
@@ -10,14 +10,21 @@ from harness import Clock, SLOT, assert_eq, assert_true, case_runner, load_mod, 
 planner = load_mod("planner")
 choose = planner.choose
 clamp_hours = planner.clamp_hours
-norm_rank = planner.norm_rank
-pick_all = planner.pick_all
+find_seed = planner.find_seed
+flex_headroom = planner.flex_headroom
+pick_windows = planner.pick_windows
 plan = planner.plan
 now_in_windows = planner.now_in_windows
 
 
-def run_plan(now, source_attrs, data=None, prev=None):
-    payload = {"min_hours": 2, "max_hours": 5, "ceiling": 0.1, "rank": "cheapest"}
+def run_plan(now, source_attrs, data=None, prev=None, **extra):
+    payload = {
+        "min_hours": 2,
+        "max_hours": 5,
+        "ceiling": 0.2,
+        "flex_pct": 20,
+        "flex_euro": 0.02,
+    }
     if data:
         payload.update(data)
     return plan(
@@ -26,9 +33,11 @@ def run_plan(now, source_attrs, data=None, prev=None):
         min_hours=payload["min_hours"],
         max_hours=payload["max_hours"],
         ceiling=payload["ceiling"],
-        rank=payload.get("rank", "cheapest"),
+        flex_pct=payload.get("flex_pct", 20),
+        flex_euro=payload.get("flex_euro", 0.02),
         prev=prev,
         source_entity="sensor.nordpool_kwh_fi",
+        **extra,
     )
 
 
@@ -45,87 +54,193 @@ def ts_slots(base, prices):
     return slots
 
 
+def _prev(windows, slots, min_hours=2.0, max_hours=5.0, ceiling=0.2, flex_pct=20, flex_euro=0.02, blocked=None):
+    return {
+        "windows": windows,
+        "min_hours": min_hours,
+        "max_hours": max_hours,
+        "ceiling": ceiling,
+        "flex_pct": flex_pct,
+        "flex_euro": flex_euro,
+        "horizon": slots[-1][1],
+        "blocked": blocked or [],
+    }
+
+
 def main():
     case, run = case_runner()
     now = datetime.datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc)
     base = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
 
-    def test_split_on_ceiling():
-        prices = [0.04] * 12 + [0.25] + [0.05] * 12
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 2, "two windows around spike")
-        assert_eq(round(dur_h(windows[0]), 2), 3.0, "first duration")
-        assert_eq(round(dur_h(windows[1]), 2), 3.0, "second duration")
-        assert_true(windows[0]["avg"] < windows[1]["avg"], "cheapest first")
-        assert_eq(windows[0]["start"], base, "cheap 0.04 block first")
-        spike_start = base + 12 * SLOT
-        for w in windows:
-            assert_true(not (w["start"] <= spike_start < w["end"]), "spike excluded")
+    def test_seed_is_cheapest_min_hours():
+        prices = [0.08] * 8 + [0.01] * 8 + [0.07] * 8
+        seed = find_seed(ts_slots(base, prices), 2 * 3600, base - 3600)
+        assert_eq(seed[1], base + 8 * SLOT, "seed starts at the 0.01 dip")
+        assert_eq(round((seed[2] - seed[1]) / 3600, 2), 2.0, "seed is min hours")
 
-    def test_exact_ceiling_allowed():
-        windows = pick_all(ts_slots(base, [0.1] * 8), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 1, "exactly 0.1 is allowed")
-        assert_eq(round(dur_h(windows[0]), 2), 2.0, "2h at cap")
+    def test_grow_cheaper_side_and_flex_or():
+        prices = [0.04] * 4 + [0.05] * 8 + [0.06] * 8
+        windows = pick_windows(
+            ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0.02
+        )
+        assert_eq(len(windows), 1, "one window")
+        assert_eq(windows[0]["start"], base, "grew left first (0.04 cheaper than 0.06)")
+        assert_true(dur_h(windows[0]) > 2.0, "grew past the seed")
+        assert_true(windows[0]["avg"] <= 0.07 + 1e-9, "avg under seed+0.02")
+        assert_eq(round(flex_headroom(0.05, 20, 0.02), 4), 0.02, "euro wins on a cheap seed")
+        assert_eq(round(flex_headroom(0.15, 20, 0.02), 4), 0.03, "percent wins on a dearer seed")
 
-    def test_uniform_6h_picks_max():
-        windows = pick_all(ts_slots(base, [0.05] * 24), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 1, "leftover 1h < min")
-        assert_eq(round(dur_h(windows[0]), 2), 5.0, "max length at same avg")
-        assert_eq(windows[0]["start"], base, "earliest 5h")
+    def test_flex_zero_and_min_equals_max_do_not_grow():
+        prices = [0.01] * 8 + [0.012] * 8
+        no_flex = pick_windows(
+            ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
+        )
+        assert_eq(round(dur_h(no_flex[0]), 2), 2.0, "both flex 0: stay at min")
+        fixed = pick_windows(
+            ts_slots(base, prices), 2 * 3600, 2 * 3600, 0.2, base - 3600, 50, 1
+        )
+        assert_eq(round(dur_h(fixed[0]), 2), 2.0, "min==max: no grow even with large flex")
+        quarter = pick_windows(
+            ts_slots(base, [0.01] * 8), 0.25 * 3600, 0.25 * 3600, 0.2, base - 3600, 50, 1
+        )
+        assert_eq(round(dur_h(quarter[0]), 2), 0.25, "0.25 h / 0.25 h is one slot")
+        mn, mx = clamp_hours(2.0, 2.0)
+        assert_eq((mn, mx), (2.0, 2.0), "clamp keeps equal min/max")
 
-    def test_uniform_8h_then_leftover():
-        windows = pick_all(ts_slots(base, [0.05] * 32), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 2, "5h + 3h leftover")
-        assert_eq(round(dur_h(windows[0]), 2), 5.0, "first is max")
-        assert_eq(round(dur_h(windows[1]), 2), 3.0, "leftover 3h")
-        assert_eq(windows[0]["end"], windows[1]["start"], "contiguous leftover")
+    def test_one_window_even_with_two_nights():
+        prices = [0.04] * 12 + [0.25] * 48 + [0.01] * 12
+        windows = pick_windows(
+            ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0.02
+        )
+        assert_eq(len(windows), 1, "list length 1")
+        assert_eq(windows[0]["start"], base + (12 + 48) * SLOT, "cheaper second night")
 
-    def test_dip_taken_first_flanks_kept():
-        prices = [0.09] * 8 + [0.01] * 8 + [0.09] * 8
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 3, "dip plus two flanks")
-        assert_true(abs(windows[0]["avg"] - 0.01) < 1e-9, "dip cheapest")
-        assert_eq(windows[0]["start"], base + 8 * SLOT, "dip start")
-        assert_eq(windows[1]["start"], base, "left flank second")
-        assert_eq(windows[2]["start"], base + 16 * SLOT, "right flank third")
+    def test_blocked_hours_not_filled():
+        prices = [0.05] * 32 + [0.01] * 32 + [0.05] * 32
+        blocked = [(base + 8 * 3600, base + 16 * 3600)]
+        chosen = choose(
+            ts_slots(base, prices),
+            2.0,
+            5.0,
+            0.2,
+            base - 3600,
+            None,
+            blocked=blocked,
+            flex_pct=20,
+            flex_euro=0.02,
+        )
+        assert_eq(len(chosen["windows"]), 1, "one island")
+        assert_eq(chosen["windows"][0]["start"], base, "night, not the blocked midday dip")
+        assert_true(
+            chosen["windows"][0]["end"] <= base + 8 * 3600 + 1,
+            "does not grow into the blocked hour",
+        )
 
-    def test_short_region_skipped():
-        prices = [0.20] * 4 + [0.05] * 7 + [0.20] * 4
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 0, "1.75h < min 2h")
+    def test_ceiling_aborts_cheapest_seed_no_runner_up():
+        none = pick_windows(
+            ts_slots(base, [0.25] * 8 + [0.22] * 8 + [0.30] * 8),
+            2 * 3600,
+            5 * 3600,
+            0.2,
+            base - 3600,
+            20,
+            0.02,
+        )
+        assert_eq(none, [], "cheapest seed avg > ceiling: no window")
+        spike = pick_windows(
+            ts_slots(base, [0.01] * 7 + [0.25] + [0.40] * 8),
+            2 * 3600,
+            5 * 3600,
+            0.2,
+            base - 3600,
+            0,
+            0,
+        )
+        assert_eq(len(spike), 1, "spike inside seed is allowed when avg ≤ ceiling")
+        assert_true(spike[0]["avg"] < 0.2, "avg still under ceiling")
+        grown = pick_windows(
+            ts_slots(base, [0.05] * 8 + [0.25] + [0.05] * 8),
+            2 * 3600,
+            5 * 3600,
+            0.2,
+            base - 3600,
+            50,
+            1,
+        )
+        assert_eq(grown[0]["end"], base + 8 * SLOT, "grow will not add a slot > ceiling")
+
+    def test_negative_seed_percent_uses_abs():
+        assert_eq(flex_headroom(-0.05, 20, 0), 0.01, "percent uses abs(seed)")
+        prices = [-0.05] * 8 + [-0.035] * 8
+        windows = pick_windows(
+            ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0
+        )
+        assert_true(windows[0]["avg"] <= -0.04 + 1e-9, "grow stops at seed+abs*20%")
+        assert_true(dur_h(windows[0]) > 2.0, "negative seed can still grow")
+
+    def test_horizon_clip_and_prices_only_fallback():
+        today = slots_from(base, [0.08] * 8 + [0.01] * 8)
+        tomorrow = slots_from(base + 86400, [0.001] * 16)
+        attrs = {"raw_today": today, "raw_tomorrow": tomorrow}
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        clipped = plan(
+            clock,
+            attrs,
+            remaining_today=10.0,
+            tomorrow_kwh=None,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(clipped["count"], 1, "today-only search")
+        assert_true(
+            clipped["raw_windows"][0]["end"] <= base + 86400 + 1,
+            "tomorrow prices ignored without tomorrow kWh",
+        )
+        fallback = plan(
+            clock, attrs, remaining_today=None, tomorrow_kwh=None, flex_pct=0, flex_euro=0
+        )
+        assert_eq(
+            fallback["raw_windows"][0]["start"],
+            base + 86400,
+            "no solar at all: search all prices, take cheapest tomorrow",
+        )
 
     def test_min_gt_max_swapped():
         mn, mx = clamp_hours(5, 2)
         assert_eq(mn, 2.0, "swapped min")
         assert_eq(mx, 5.0, "swapped max")
         now_dt = datetime.datetime.fromtimestamp(base - 3600, tz=timezone.utc)
-        out = run_plan(now_dt, {"raw_today": slots_from(base, [0.04] * 16)}, data={"min_hours": 5, "max_hours": 2})
+        out = run_plan(
+            now_dt,
+            {"raw_today": slots_from(base, [0.04] * 16)},
+            data={"min_hours": 5, "max_hours": 2, "flex_pct": 0, "flex_euro": 0},
+        )
         assert_eq(out["min_hours"], 2.0, "swapped min")
         assert_eq(out["max_hours"], 5.0, "swapped max")
         assert_eq(out["count"], 1, "one window")
         assert_eq(out["reason"], "planned", "planned")
 
-    def test_all_above_ceiling():
-        windows = pick_all(ts_slots(base, [0.2] * 16), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 0, "nothing under cap")
-
     def test_join_current_slot():
-        windows = pick_all(ts_slots(base, [0.04] * 16), 2 * 3600, 5 * 3600, 0.1, base + 600)
+        windows = pick_windows(
+            ts_slots(base, [0.04] * 16), 2 * 3600, 5 * 3600, 0.2, base + 600, 0, 0
+        )
         assert_eq(len(windows), 1, "can start this quarter")
         assert_eq(windows[0]["start"], base, "includes current slot")
+
+    def test_short_region_skipped():
+        windows = pick_windows(
+            ts_slots(base, [0.05] * 7), 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0
+        )
+        assert_eq(len(windows), 0, "1.75h curve has no min-length seed")
 
     def test_freeze_does_not_slide():
         prices = [0.08] * 20 + [0.03] * 16
         slots = ts_slots(base, prices)
-        first = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base)
-        prev = {
-            "windows": first,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "horizon": slots[-1][1],
-        }
-        chosen = choose(slots, 2.0, 5.0, 0.1, base + 900, prev)
+        first = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base, 0, 0)
+        chosen = choose(
+            slots, 2.0, 5.0, 0.2, base + 900, _prev(first, slots, flex_pct=0, flex_euro=0),
+            flex_pct=0, flex_euro=0,
+        )
         assert_eq(chosen["reason"], "frozen", "frozen after 15 min")
         assert_eq(chosen["windows"][0]["start"], first[0]["start"], "start did not slide")
 
@@ -134,171 +249,77 @@ def main():
         tomorrow_start = base + 24 * 3600
         tomorrow = ts_slots(tomorrow_start, [0.02] * 16)
         now_ts = base + 3600
-        prev_windows = pick_all(today, 2 * 3600, 5 * 3600, 0.1, now_ts)
-        prev = {
-            "windows": prev_windows,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "horizon": today[-1][1],
-        }
-        chosen = choose(today + tomorrow, 2.0, 5.0, 0.1, now_ts, prev)
+        prev_windows = pick_windows(today, 2 * 3600, 5 * 3600, 0.2, now_ts, 0, 0)
+        chosen = choose(
+            today + tomorrow,
+            2.0,
+            5.0,
+            0.2,
+            now_ts,
+            _prev(prev_windows, today, flex_pct=0, flex_euro=0),
+            flex_pct=0,
+            flex_euro=0,
+        )
         assert_eq(chosen["reason"], "switched", "cheaper tomorrow set")
         assert_true(chosen["windows"][0]["avg"] < prev_windows[0]["avg"], "new first is cheaper")
 
-    def test_min_drops_short_bottoms():
-        # Isolated 15-minute dip is under the cap but shorter than min.
-        prices = [0.2] * 4 + [0.01] + [0.2] * 4
-        windows = pick_all(
-            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
-        )
-        assert_eq(len(windows), 0, "15 min bottom is not a session when min is 1 h")
-        assert_true(
-            not now_in_windows(windows, base + 4 * SLOT),
-            "a simple ceiling would have taken 0.01",
-        )
-
-    def test_one_hour_min_joins_short_pauses():
-        prices = [0.02, 0.05, 0.05, 0.03, 0.03, 0.15, 0.04, 0.04, 0.04, 0.04]
-        slots = ts_slots(base, prices)
-        for rank in ("cheapest", "offsun"):
-            windows = pick_all(slots, 1 * 3600, 5 * 3600, 0.1, base - 3600, rank)
-            for w in windows:
-                assert_true(dur_h(w) + 0.01 >= 1.0, "%s session ≥ 1 h" % rank)
-            assert_true(now_in_windows(windows, base), "%s includes the 0.02 bottom" % rank)
-            assert_true(
-                now_in_windows(windows, base + SLOT),
-                "%s does not pause 15–30 min in the first bottom" % rank,
-            )
-            assert_true(
-                not now_in_windows(windows, base + 5 * SLOT),
-                "%s keeps the over-ceiling spike" % rank,
-            )
-            assert_true(
-                now_in_windows(windows, base + 6 * SLOT),
-                "%s second bottom after the spike" % rank,
-            )
-
-    def test_adjacent_bands_stay_split():
-        prices = [0.09] * 8 + [0.01] * 8 + [0.09] * 8
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 3, "touching bands are not merged")
-        assert_eq(windows[0]["start"], base + 8 * SLOT, "dip still first")
-
-    def test_over_ceiling_pause_not_joined():
-        prices = [0.02] * 4 + [0.2] * 4 + [0.03] * 4
-        windows = pick_all(
-            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
-        )
-        ordered = sorted(windows, key=lambda w: w["start"])
-        assert_eq(len(ordered), 2, "spike keeps two bottoms")
-        assert_true(
-            not now_in_windows(windows, base + 4 * SLOT),
-            "over-ceiling hour stays off",
-        )
-
-    def test_join_respects_max_hours():
-        prices = [0.04] * 12 + [0.06] + [0.04] * 12
-        windows = pick_all(
-            ts_slots(base, prices), 1 * 3600, 5 * 3600, 0.1, base - 3600
-        )
-        for w in windows:
-            assert_true(dur_h(w) <= 5.0 + 0.01, "each window still ≤ max")
-        assert_true(len(windows) >= 2, "6.25 h span does not become one window")
-
-    def test_frozen_short_pause_is_joined():
-        prices = [0.02] * 4 + [0.05] + [0.03] * 4 + [0.15] + [0.04] * 4
-        slots = ts_slots(base, prices)
-        cheesy = [
-            {"avg": 0.02, "start": base, "end": base + 4 * SLOT},
-            {"avg": 0.03, "start": base + 5 * SLOT, "end": base + 9 * SLOT},
-        ]
-        prev = {
-            "windows": cheesy,
-            "min_hours": 1.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "horizon": slots[-1][1],
-            "rank": "offsun",
-        }
-        chosen = choose(slots, 1.0, 5.0, 0.1, base + SLOT, prev, "offsun")
-        assert_eq(chosen["reason"], "planned", "join is a replan, not a slide")
-        assert_eq(len(chosen["windows"]), 1, "15 min pause joined")
-        assert_eq(chosen["windows"][0]["start"], base, "start of the first bottom held")
-        assert_eq(chosen["windows"][0]["end"], base + 9 * SLOT, "run now 2:15 h")
-
-    def test_offsun_does_not_fill_blocked_hour():
-        prices = [0.04] * 8 + [0.04] * 4 + [0.04] * 8
-        slots = ts_slots(base, prices)
-        blocked = [(base + 8 * SLOT, base + 12 * SLOT)]
-        chosen = choose(slots, 2.0, 5.0, 0.1, base - 3600, None, "offsun", blocked)
-        assert_eq(len(chosen["windows"]), 2, "dropped surplus hour stays a gap")
-        assert_eq(chosen["windows"][0]["end"], base + 8 * SLOT, "first window stops at block")
-        assert_eq(chosen["windows"][1]["start"], base + 12 * SLOT, "second window after block")
-
-    def test_nordpool_fi_2026_09_03_night():
-        # FI day-ahead 15-min, EUR/MWh / 1000, 2026-09-03 21:45Z–05:45Z.
-        # Min 1 h: take bottoms, join pauses shorter than 1 h, do not charge
-        # every quarter under 0.1 (that would be a simple ceiling).
-        prices = [
-            0.01999, 0.03891, 0.03487, 0.03168, 0.02920, 0.03982, 0.03554, 0.03020,
-            0.02783, 0.03842, 0.03785, 0.03270, 0.02800, 0.03042, 0.03563, 0.03299,
-            0.03468, 0.03304, 0.03277, 0.02960, 0.03803, 0.01622, 0.02492, 0.04428,
-            0.07148, 0.02800, 0.04044, 0.07237, 0.08670, 0.07874, 0.09451, 0.10181,
-            0.11292,
-        ]
-        slots = ts_slots(base, prices)
-        windows = pick_all(slots, 1 * 3600, 5 * 3600, 0.1, base - 3600, "offsun")
-        assert_true(windows, "at least one bottom")
-        for w in windows:
-            assert_true(dur_h(w) + 0.01 >= 1.0, "no session shorter than 1 h")
-            assert_true(dur_h(w) <= 5.0 + 0.01, "no session longer than max")
-        assert_true(now_in_windows(windows, base), "includes the 19.99 €/MWh bottom")
-        assert_true(
-            not now_in_windows(windows, base + 31 * SLOT),
-            "still off at 101.81 €/MWh",
-        )
-        assert_true(len(windows) >= 1, "at least one bottom")
-        # Contiguous 7.75 h under the cap becomes 5 h + leftover, not 15-min islands.
-
     def test_idle_after_window_same_horizon():
-        slots = ts_slots(base, [0.04] * 16)
-        planned = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        prev = {
-            "windows": planned,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "horizon": slots[-1][1],
-        }
-        chosen = choose(slots, 2.0, 5.0, 0.1, planned[0]["end"] + 60, prev)
+        slots = ts_slots(base, [0.04] * 8)
+        planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
+        chosen = choose(
+            slots,
+            2.0,
+            5.0,
+            0.2,
+            planned[0]["end"] + 60,
+            _prev(planned, slots, flex_pct=0, flex_euro=0),
+            flex_pct=0,
+            flex_euro=0,
+        )
         assert_eq(chosen["reason"], "idle_after_window", "no extra from same horizon")
 
-    def test_replan_when_ceiling_changes():
+    def test_replan_when_ceiling_or_flex_changes():
         slots = ts_slots(base, [0.08] * 16)
-        planned = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        prev = {
-            "windows": planned,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "horizon": slots[-1][1],
-        }
-        chosen = choose(slots, 2.0, 5.0, 0.05, base, prev)
+        planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
+        chosen = choose(
+            slots,
+            2.0,
+            5.0,
+            0.05,
+            base,
+            _prev(planned, slots, ceiling=0.2, flex_pct=0, flex_euro=0),
+            flex_pct=0,
+            flex_euro=0,
+        )
         assert_eq(chosen["reason"], "no_window", "stricter ceiling replans empty")
+        flexed = choose(
+            slots,
+            2.0,
+            5.0,
+            0.2,
+            base,
+            _prev(planned, slots, flex_pct=0, flex_euro=0),
+            flex_pct=50,
+            flex_euro=1,
+        )
+        assert_eq(flexed["reason"], "planned", "flex change is not frozen")
 
     def test_end_to_end_script():
         prices = [0.04] * 8 + [0.2] + [0.06] * 16
         now_dt = datetime.datetime.fromtimestamp(base - 1800, tz=timezone.utc)
-        out = run_plan(now_dt, {"raw_today": slots_from(base, prices), "tomorrow_valid": False})
+        out = run_plan(
+            now_dt,
+            {"raw_today": slots_from(base, prices), "tomorrow_valid": False},
+            data={"flex_pct": 0, "flex_euro": 0},
+        )
         assert_eq(out["reason"], "planned", "script planned")
-        assert_eq(out["count"], 2, "two windows")
+        assert_eq(out["count"], 1, "one window")
         assert_eq(out["min_hours"], 2.0, "min")
         assert_eq(out["max_hours"], 5.0, "max")
-        assert_eq(out["ceiling"], 0.1, "ceiling")
+        assert_eq(out["ceiling"], 0.2, "ceiling")
         assert_true(out["window_1_start"] is not None, "window 1")
-        assert_true(out["window_2_start"] is not None, "window 2")
-        assert_true(out["window_3_start"] is None, "no third")
+        assert_true(out["window_2_start"] is None, "no second")
+        assert_true("rank" not in out, "no policy rank on the result")
         assert_true(out["avg"] is not None, "active/next avg")
 
     def test_no_source():
@@ -308,113 +329,57 @@ def main():
     def test_script_freeze_no_slide():
         prices = [0.05] * 32
         now0 = datetime.datetime.fromtimestamp(base, tz=timezone.utc)
-        first = run_plan(now0, {"raw_today": slots_from(base, prices)})
+        first = run_plan(
+            now0, {"raw_today": slots_from(base, prices)}, data={"flex_pct": 0, "flex_euro": 0}
+        )
         assert_eq(first["reason"], "planned", "first plan")
         now1 = datetime.datetime.fromtimestamp(base + SLOT, tz=timezone.utc)
         second = run_plan(
             now1,
             {"raw_today": slots_from(base, prices)},
-            prev={
-                "windows": first["raw_windows"],
-                "min_hours": first["min_hours"],
-                "max_hours": first["max_hours"],
-                "ceiling": first["ceiling"],
-                "horizon": first["horizon_ts"],
-                "rank": "cheapest",
-            },
+            data={"flex_pct": 0, "flex_euro": 0},
+            prev=planner.prev_from_result(Clock(now1), first),
         )
         assert_eq(second["reason"], "frozen", "script frozen")
         assert_eq(second["window_1_start"], first["window_1_start"], "no slide")
-        assert_eq(second["window_2_start"], first["window_2_start"], "second frozen")
+        assert_eq(second["window_2_start"], None, "still one window")
 
     def test_string_params_from_templates():
         now_dt = datetime.datetime.fromtimestamp(base - 3600, tz=timezone.utc)
         out = run_plan(
             now_dt,
             {"raw_today": slots_from(base, [0.04] * 16)},
-            data={"min_hours": "2", "max_hours": "5", "ceiling": "0.1"},
+            data={"min_hours": "2", "max_hours": "5", "ceiling": "0.2", "flex_pct": "0", "flex_euro": "0"},
         )
         assert_eq(out["count"], 1, "string params parse")
         assert_eq(out["min_hours"], 2.0, "min from string")
-        assert_eq(out["ceiling"], 0.1, "ceiling from string")
+        assert_eq(out["ceiling"], 0.2, "ceiling from string")
 
-    def test_increasing_prices_prefer_min():
-        prices = [0.01] * 8 + [0.05] * 8 + [0.09] * 8
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 3, "three 2h bands")
-        assert_true(abs(windows[0]["avg"] - 0.01) < 1e-9, "cheapest 2h first")
-        assert_eq(round(dur_h(windows[0]), 2), 2.0, "min length on rising curve")
-        assert_eq(windows[0]["start"], base, "earliest cheap band")
-
-    def test_flanks_shorter_than_min_dropped():
-        prices = [0.09] * 6 + [0.01] * 8 + [0.09] * 6
-        windows = pick_all(ts_slots(base, prices), 2 * 3600, 5 * 3600, 0.1, base - 3600)
-        assert_eq(len(windows), 1, "1.5h flanks dropped")
-        assert_eq(windows[0]["start"], base + 6 * SLOT, "only the dip")
-
-    def test_longest_vs_cheapest():
-        prices = [0.01] * 8 + [0.08] * 20
-        slots = ts_slots(base, prices)
-        cheap_w = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600, "cheapest")
-        long_w = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600, "longest")
-        assert_eq(round(dur_h(cheap_w[0]), 2), 2.0, "cheapest takes the 2h dip")
-        assert_true(abs(cheap_w[0]["avg"] - 0.01) < 1e-9, "dip avg")
-        assert_eq(round(dur_h(long_w[0]), 2), 5.0, "longest takes 5h")
-        assert_eq(long_w[0]["start"], base, "longest 5h from start of run")
-
-    def test_earliest_vs_cheapest():
-        prices = [0.09] * 8 + [0.01] * 8
-        slots = ts_slots(base, prices)
-        cheap_w = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600, "cheapest")
-        early_w = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600, "earliest")
-        assert_eq(cheap_w[0]["start"], base + 8 * SLOT, "cheapest is the 0.01 dip")
-        assert_eq(early_w[0]["start"], base, "earliest starts now")
-        assert_eq(round(dur_h(early_w[0]), 2), 4.0, "earliest fills from the start")
-
-    def test_rank_change_replans():
-        prices = [0.01] * 8 + [0.08] * 20
-        slots = ts_slots(base, prices)
-        cheap_w = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base - 3600, "cheapest")
-        prev = {
-            "windows": cheap_w,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.1,
-            "rank": "cheapest",
-            "horizon": slots[-1][1],
-        }
-        chosen = choose(slots, 2.0, 5.0, 0.1, base, prev, "longest")
-        assert_eq(chosen["reason"], "planned", "rank change is not frozen")
-        assert_eq(round(dur_h(chosen["windows"][0]), 2), 5.0, "replanned longest")
-
-    def test_force_policy_ranks_as_cheapest():
-        assert_eq(norm_rank("Force on"), "cheapest", "force on")
-        assert_eq(norm_rank("Force off"), "cheapest", "force off")
-        assert_eq(norm_rank("Force on until unplug"), "cheapest", "legacy until unplug")
-        assert_eq(norm_rank("Supercheap"), "cheapest", "Supercheap is a policy, not a rank")
-        assert_eq(norm_rank("offsun"), "offsun", "offsun")
-        assert_eq(norm_rank("off-sun"), "offsun", "off-sun")
-        assert_eq(norm_rank("off sun"), "offsun", "off sun")
-        assert_eq(norm_rank("Longest"), "longest", "longest")
-        assert_eq(norm_rank("Earliest"), "earliest", "earliest")
+    def test_restore_policy_maps_legacy_names():
+        assert_eq(planner.restore_policy("Cheapest"), "SolarPriority", "Cheapest")
+        assert_eq(planner.restore_policy("Supercheap"), "SolarPriority", "Supercheap")
+        assert_eq(planner.restore_policy("Longest"), "SolarPriority", "Longest")
+        assert_eq(planner.restore_policy("Earliest"), "SolarPriority", "Earliest")
+        assert_eq(planner.restore_policy("SolarPriority"), "SolarPriority", "already new")
+        assert_eq(planner.restore_policy("Force on"), "Force on", "force on kept")
 
     def test_until_unplug_overrides_policy():
         step = planner.until_unplug_step
         full = planner.charger_full_power
-        results = {"cheapest": {"raw_windows": [{"start": 1000, "end": 2000}]}}
-        assert_eq(full("Force off", results, 1500), False, "force off")
+        result = {"raw_windows": [{"start": 1000, "end": 2000}]}
+        assert_eq(full("Force off", result, 1500), False, "force off")
         assert_eq(
-            full("Force off", results, 1500, until_unplug=True),
+            full("Force off", result, 1500, until_unplug=True),
             True,
             "until unplug overrides Force off",
         )
         assert_eq(
-            full("Cheapest", results, 1500, until_unplug=True),
+            full("SolarPriority", result, 1500, until_unplug=True),
             True,
-            "until unplug overrides Cheapest",
+            "until unplug overrides SolarPriority",
         )
         assert_eq(
-            full("Supercheap", results, 1500, enough_solar=True, until_unplug=True),
+            full("SolarPriority", result, 1500, enough_solar=True, until_unplug=True),
             True,
             "until unplug overrides enough solar",
         )
@@ -431,72 +396,140 @@ def main():
         other_on, other_seen = step(False, False, False)
         assert_eq((other_on, other_seen), (False, False), "other charger untouched")
 
-    def test_end_to_end_longest_rank():
-        prices = [0.01] * 8 + [0.08] * 20
-        now_dt = datetime.datetime.fromtimestamp(base - 1800, tz=timezone.utc)
-        out = run_plan(now_dt, {"raw_today": slots_from(base, prices)}, data={"rank": "Longest"})
-        assert_eq(out["rank"], "longest", "rank stored")
-        start = datetime.datetime.fromisoformat(out["window_1_start"]).timestamp()
-        end = datetime.datetime.fromisoformat(out["window_1_end"]).timestamp()
-        assert_eq(round((end - start) / 3600.0, 2), 5.0, "script longest 5h")
+    def test_collect_slots_hourly_and_half_hour():
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        hourly = [0.10] * 10 + [0.02] * 4 + [0.10] * 10
+        out = plan(clock, {"raw_today": hourly}, flex_pct=0, flex_euro=0)
+        assert_eq(out["slot_count"], 24, "24 hourly values")
+        assert_eq(round(dur_h(out["raw_windows"][0]), 2), 2.0, "hourly seed is 2 h")
+        assert_eq(out["raw_windows"][0]["start"], base + 10 * 3600, "hours 10–14")
+        grown = plan(clock, {"raw_today": hourly}, flex_pct=20, flex_euro=0.02)
+        step = grown["raw_windows"][0]["end"] - grown["raw_windows"][0]["start"]
+        assert_eq(step % 3600, 0, "hourly grow stays on 1 h boundaries")
+        half = [0.08] * 16 + [0.03] * 8 + [0.08] * 24
+        half_out = plan(clock, {"raw_today": half}, flex_pct=0, flex_euro=0)
+        assert_eq(half_out["slot_count"], 48, "48 half-hour values")
+        assert_eq(half_out["raw_windows"][0]["start"], base + 16 * 1800, "cheapest 2 h on 30-min curve")
+        empty = plan(clock, {})
+        assert_eq(empty["reason"], "no_slots", "empty attrs")
+        none_ceil = plan(clock, {"raw_today": hourly}, ceiling=None, flex_pct=0, flex_euro=0)
+        assert_eq(none_ceil["ceiling"], 0.2, "None ceiling uses default 0.2")
 
-    def test_same_horizon_falling_longest_stays_frozen():
-        prices = [0.09] * 8 + [0.04] * 24
-        slots = ts_slots(base, prices)
-        first = pick_all(slots, 2 * 3600, 5 * 3600, 0.1, base, "longest")
-        prev = {
-            "windows": first,
+    def test_prev_from_result_iso_and_flex():
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        first = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=20, flex_euro=0.02)
+        prev = planner.prev_from_result(clock, first)
+        assert_eq(prev["flex_pct"], 20.0, "flex percent stored on prev")
+        assert_eq(prev["flex_euro"], 0.02, "flex euro stored on prev")
+        iso_only = {
+            "windows": first["windows"],
             "min_hours": 2.0,
             "max_hours": 5.0,
-            "ceiling": 0.1,
-            "rank": "longest",
-            "horizon": slots[-1][1],
+            "ceiling": 0.2,
+            "horizon": first["horizon"],
         }
-        chosen = choose(slots, 2.0, 5.0, 0.1, base + SLOT, prev, "longest")
-        assert_eq(chosen["reason"], "frozen", "slide is not a switch")
-        assert_eq(chosen["windows"][0]["start"], first[0]["start"], "longest start held")
+        from_iso = planner.prev_from_result(clock, iso_only)
+        assert_eq(len(from_iso["windows"]), 1, "iso windows restore when raw_windows is missing")
+        assert_eq(from_iso["flex_pct"], 0.0, "missing flex clamps to unused")
+        assert_eq(planner.prev_from_result(clock, {}), None, "empty result")
+        assert_eq(planner.prev_from_result(clock, None), None, "missing result")
+        nxt = planner.current_or_next(first["raw_windows"], base - 60)
+        assert_eq(nxt["start"], first["raw_windows"][0]["start"], "before start: next window")
+        cur = planner.current_or_next(first["raw_windows"], first["raw_windows"][0]["start"] + 60)
+        assert_eq(cur["start"], first["raw_windows"][0]["start"], "inside: current window")
+        assert_eq(planner.now_in_windows([], base), False, "empty windows")
+        assert_eq(planner.clip_slots_to_forecast(clock, [], None, None, clock.now()), [], "empty clip")
+        flagged = plan(
+            clock,
+            {"raw_today": slots_from(base, [0.04] * 16), "tomorrow_valid": True},
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(flagged["tomorrow_ok"], True, "tomorrow_valid flag")
+        no_flag = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=0, flex_euro=0)
+        assert_eq(no_flag["tomorrow_ok"], False, "today-only prices are not tomorrow_ok")
 
-    case("split_on_ceiling", test_split_on_ceiling)
-    case("exact_ceiling_allowed", test_exact_ceiling_allowed)
-    case("uniform_6h_picks_max", test_uniform_6h_picks_max)
-    case("uniform_8h_then_leftover", test_uniform_8h_then_leftover)
-    case("dip_taken_first_flanks_kept", test_dip_taken_first_flanks_kept)
-    case("short_region_skipped", test_short_region_skipped)
+    def test_horizon_tomorrow_only_and_zero_remaining():
+        today = slots_from(base, [0.001] * 16)
+        tomorrow = slots_from(base + 86400, [0.08] * 16)
+        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
+        tom = plan(
+            clock,
+            {"raw_today": today, "raw_tomorrow": tomorrow},
+            remaining_today=None,
+            tomorrow_kwh=12.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(tom["raw_windows"][0]["start"] >= base + 86400 - 1, "tomorrow-only solar")
+        zero = plan(
+            clock,
+            {"raw_today": today, "raw_tomorrow": tomorrow},
+            remaining_today=0.0,
+            tomorrow_kwh=None,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(zero["raw_windows"][0]["end"] <= base + 86400 + 1, "0.0 remaining-today is present")
+        both = plan(
+            clock,
+            {
+                "raw_today": slots_from(base, [0.08] * 16),
+                "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
+            },
+            remaining_today=5.0,
+            tomorrow_kwh=5.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(
+            both["raw_windows"][0]["start"] >= base + 86400 - 1,
+            "both forecasts present: cheaper tomorrow wins",
+        )
+        tie = plan(
+            clock,
+            {"raw_today": slots_from(base, [0.08] * 16), "raw_tomorrow": tomorrow},
+            remaining_today=5.0,
+            tomorrow_kwh=5.0,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_true(
+            tie["raw_windows"][0]["end"] <= base + 86400 + 1,
+            "equal prices: earlier day wins",
+        )
+
+    case("seed_is_cheapest_min_hours", test_seed_is_cheapest_min_hours)
+    case("grow_cheaper_side_and_flex_or", test_grow_cheaper_side_and_flex_or)
+    case("flex_zero_and_min_equals_max_do_not_grow", test_flex_zero_and_min_equals_max_do_not_grow)
+    case("one_window_even_with_two_nights", test_one_window_even_with_two_nights)
+    case("blocked_hours_not_filled", test_blocked_hours_not_filled)
+    case("ceiling_aborts_cheapest_seed_no_runner_up", test_ceiling_aborts_cheapest_seed_no_runner_up)
+    case("negative_seed_percent_uses_abs", test_negative_seed_percent_uses_abs)
+    case("horizon_clip_and_prices_only_fallback", test_horizon_clip_and_prices_only_fallback)
     case("min_gt_max_swapped", test_min_gt_max_swapped)
-    case("all_above_ceiling", test_all_above_ceiling)
     case("join_current_slot", test_join_current_slot)
+    case("short_region_skipped", test_short_region_skipped)
     case("freeze_does_not_slide", test_freeze_does_not_slide)
     case("switch_when_tomorrow_cheaper", test_switch_when_tomorrow_cheaper)
-    case("min_drops_short_bottoms", test_min_drops_short_bottoms)
-    case("one_hour_min_joins_short_pauses", test_one_hour_min_joins_short_pauses)
-    case("adjacent_bands_stay_split", test_adjacent_bands_stay_split)
-    case("over_ceiling_pause_not_joined", test_over_ceiling_pause_not_joined)
-    case("join_respects_max_hours", test_join_respects_max_hours)
-    case("frozen_short_pause_is_joined", test_frozen_short_pause_is_joined)
-    case("offsun_does_not_fill_blocked_hour", test_offsun_does_not_fill_blocked_hour)
-    case("nordpool_fi_2026_09_03_night", test_nordpool_fi_2026_09_03_night)
     case("idle_after_window_same_horizon", test_idle_after_window_same_horizon)
-    case("replan_when_ceiling_changes", test_replan_when_ceiling_changes)
+    case("replan_when_ceiling_or_flex_changes", test_replan_when_ceiling_or_flex_changes)
     case("end_to_end_script", test_end_to_end_script)
     case("no_source", test_no_source)
     case("script_freeze_no_slide", test_script_freeze_no_slide)
     case("string_params_from_templates", test_string_params_from_templates)
-    case("increasing_prices_prefer_min", test_increasing_prices_prefer_min)
-    case("flanks_shorter_than_min_dropped", test_flanks_shorter_than_min_dropped)
-    case("longest_vs_cheapest", test_longest_vs_cheapest)
-    case("earliest_vs_cheapest", test_earliest_vs_cheapest)
-    case("rank_change_replans", test_rank_change_replans)
-    case("force_policy_ranks_as_cheapest", test_force_policy_ranks_as_cheapest)
+    case("restore_policy_maps_legacy_names", test_restore_policy_maps_legacy_names)
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
-    case("end_to_end_longest_rank", test_end_to_end_longest_rank)
-    case("same_horizon_falling_longest_stays_frozen", test_same_horizon_falling_longest_stays_frozen)
+    case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
+    case("prev_from_result_iso_and_flex", test_prev_from_result_iso_and_flex)
+    case("horizon_tomorrow_only_and_zero_remaining", test_horizon_tomorrow_only_and_zero_remaining)
 
     surplus = load_mod("surplus")
     leftover_w = surplus.leftover_w
     budget = surplus.budget
     car_plugged = surplus.car_plugged
 
-    def test_supercheap_forecast():
+    def test_solar_forecast_and_full_power():
         energy_kwh = surplus.energy_kwh
         upcoming = surplus.upcoming_solar_kwh
         enough = surplus.enough_solar
@@ -514,59 +547,59 @@ def main():
         assert_eq(enough(40.0, 40), True, "at the 40 kWh threshold")
         assert_eq(enough(50.0, 40), True, "50 kWh is enough")
         assert_eq(enough(50.0, 0), False, "threshold 0 is never enough")
-        results = {
-            "cheapest": {"raw_windows": [{"start": 1000, "end": 2000}]},
-            "offsun": {"raw_windows": [{"start": 3000, "end": 4000}]},
-        }
-        assert_eq(full("Cheapest", results, 1500), True, "Cheapest uses cheapest windows")
-        assert_eq(full("Supercheap", results, 1500), False, "Supercheap ignores cheapest")
-        assert_eq(full("Supercheap", results, 3500), True, "Supercheap uses offsun")
+        result = {"raw_windows": [{"start": 3000, "end": 4000}]}
+        assert_eq(full("SolarPriority", result, 3500), True, "in window")
         assert_eq(
-            full("Supercheap", results, 3500, enough_solar=True),
+            full("SolarPriority", result, 3500, enough_solar=True),
             False,
-            "enough solar skips Supercheap even in offsun",
+            "enough solar skips 22 kW",
         )
-        assert_eq(full("Cheapest", results, 3500, enough_solar=True), False, "Cheapest ignores offsun")
-        assert_eq(full("Cheapest", results, 1500, enough_solar=True), True, "Cheapest ignores enough solar")
-        assert_eq(full("Force off", results, 1500), False, "force off")
+        assert_eq(full("Supercheap", result, 3500), True, "legacy Supercheap maps")
+        assert_eq(
+            full("Cheapest", result, 3500, enough_solar=True),
+            False,
+            "legacy Cheapest now skips on enough solar",
+        )
+        assert_eq(full("Force off", result, 3500), False, "force off")
+        assert_eq(full("Force on", result, 0, enough_solar=True), True, "Force on ignores enough solar")
+        assert_eq(full("Longest", result, 3500, enough_solar=True), False, "legacy Longest skips")
+        assert_eq(full("SolarPriority", {}, 3500), False, "empty result")
+        assert_eq(full("SolarPriority", None, 0), False, "missing result")
 
-    def test_offsun_drops_surplus_hours():
+    def test_blocked_hours_pick_night_not_midday():
         night = [0.05] * 32
         midday = [0.01] * 32
         rest = [0.2] * 32
         attrs = {"raw_today": slots_from(base, night + midday + rest)}
         midday_block = [(base + 8 * 3600, base + 16 * 3600)]
         clock0 = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
-        cheap = plan(clock0, attrs, rank="cheapest", blocked=midday_block)
-        off = plan(clock0, attrs, rank="offsun", blocked=midday_block)
-        assert_eq(cheap["rank"], "cheapest", "cheapest rank")
-        assert_eq(off["rank"], "offsun", "offsun rank")
-        assert_eq(cheap["raw_windows"][0]["start"], base + 8 * 3600, "cheapest is midday")
-        assert_eq(off["raw_windows"][0]["start"], base, "offsun is the night")
-        assert_eq(cheap["blocked"], [], "cheapest ignores blocked")
-        assert_eq(len(off["blocked"]), 1, "offsun stores surplus hours")
+        off = plan(
+            clock0,
+            attrs,
+            blocked=midday_block,
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(off["raw_windows"][0]["start"], base, "blocked midday: night island")
+        assert_eq(len(off["blocked"]), 1, "stores surplus hours")
         full = planner.charger_full_power
-        results = {"cheapest": cheap, "offsun": off}
-        assert_eq(full("Cheapest", results, base + 10 * 3600), True, "Cheapest midday")
-        assert_eq(full("Supercheap", results, base + 10 * 3600), False, "Supercheap skips midday")
-        assert_eq(full("Supercheap", results, base + 3600), True, "Supercheap night")
-        none = plan(clock0, attrs, rank="offsun")
+        assert_eq(full("SolarPriority", off, base + 10 * 3600), False, "midday blocked")
+        assert_eq(full("SolarPriority", off, base + 3600), True, "night window")
+        none = plan(clock0, attrs, flex_pct=0, flex_euro=0)
         assert_eq(
             none["raw_windows"][0]["start"],
-            cheap["raw_windows"][0]["start"],
-            "unknown surplus hours: offsun matches cheapest",
+            base + 8 * 3600,
+            "without blocked hours the midday dip wins",
         )
         prev = planner.prev_from_result(clock0, off)
-        frozen = plan(
-            clock0, attrs, rank="offsun", prev=prev, blocked=midday_block
-        )
-        assert_eq(frozen["reason"], "frozen", "offsun freeze")
-        replanned = plan(clock0, attrs, rank="offsun", prev=prev, blocked=[])
+        frozen = plan(clock0, attrs, prev=prev, blocked=midday_block, flex_pct=0, flex_euro=0)
+        assert_eq(frozen["reason"], "frozen", "blocked window still freezes")
+        replanned = plan(clock0, attrs, prev=prev, blocked=[], flex_pct=0, flex_euro=0)
         assert_eq(replanned["reason"], "planned", "blocked change replans")
         assert_eq(
             replanned["raw_windows"][0]["start"],
-            cheap["raw_windows"][0]["start"],
-            "without surplus hours offsun becomes cheapest",
+            base + 8 * 3600,
+            "clearing the block takes the midday dip",
         )
 
     def test_surplus_hour_ranges():
@@ -727,8 +760,8 @@ def main():
             "mixed: keep eco_lot, leftover amp; app lop splits the group",
         )
 
-    case("supercheap_forecast", test_supercheap_forecast)
-    case("offsun_drops_surplus_hours", test_offsun_drops_surplus_hours)
+    case("solar_forecast_and_full_power", test_solar_forecast_and_full_power)
+    case("blocked_hours_pick_night_not_midday", test_blocked_hours_pick_night_not_midday)
     case("surplus_hour_ranges", test_surplus_hour_ranges)
     case("leftover_and_budget", test_leftover_and_budget)
     case("group_surplus_setpoint_keeps_app_priorities", test_group_surplus_setpoint_keeps_app_priorities)
@@ -769,6 +802,35 @@ def main():
             ),
             {a: 9000, b: 3000},
             "remainder 2 kW is below 3 kW and above 500 W: steal to 9+3",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=6000,
+                lops=lops,
+                plugged=plugged,
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 5499, b: 0},
+                states={a: "Charging", b: "Charging"},
+            ),
+            {a: 3000, b: 3000},
+            "6 kW leftover is the 3+3 minimum split",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=4500,
+                lops=lops,
+                plugged=plugged,
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 4400, b: 0},
+                states={a: "Charging", b: "Charging"},
+                split_hold=True,
+            ),
+            {a: 4400},
+            "4.5 kW leftover would be 1.5+3: no steal even during grace",
         )
         assert_eq(
             alloc(
@@ -1007,6 +1069,14 @@ def main():
         assert_eq(surplus.parse_lop("unknown"), None, "unknown lop")
         assert_eq(surplus.parse_lop("0"), None, "0 is out of app range")
         assert_eq(surplus.nrg_total_w([230, 230, 230, 0, 10, 10, 10, 0, 2300, 2300, 2300, 6900]), 6900, "nrg[11] watts")
+        assert_eq(surplus.nrg_total_w("[230,230,230,0,10,10,10,0,2300,2300,2300,6900]"), 6900, "nrg JSON list")
+        assert_eq(surplus.nrg_total_w("1500"), 1500, "nrg numeric sensor")
+        assert_eq(surplus.nrg_total_w([1, 2, 3]), None, "short nrg list")
+        lot_u, psm_u, amp_u = surplus.budget(4139, 6, 32, 50, 230, 4140)
+        assert_eq((psm_u, amp_u), (1, 17), "4139 W is still 1-phase")
+        assert_eq(surplus.surplus_want_w(12000, 50), 50, "take under 100 W is not accepting")
+        assert_eq(surplus.parse_lop("99"), 99, "lop 99")
+        assert_eq(surplus.parse_lop("100"), None, "lop 100")
         assert_eq(surplus.car_finished("Complete"), True, "complete finished")
         assert_eq(surplus.car_charging("Charging"), True, "charging")
         assert_eq(surplus.charger_take_w("Complete", 8000, 8000, 22080), 0, "finished takes 0")
