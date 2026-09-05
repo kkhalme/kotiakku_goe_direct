@@ -123,8 +123,7 @@ def window_ends(result):
 
 
 def plan_once(planner, clock, attrs, result, **plan_kw):
-    prev = planner.prev_from_result(clock, result)
-    return planner.plan(clock, attrs, prev=prev, **plan_kw)
+    return planner.plan(clock, attrs, **plan_kw)
 
 
 def case_runner():

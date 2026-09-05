@@ -218,13 +218,13 @@ def kwh_between(ts_list, prefix, t0, t1):
 
 
 def solar_forecast(now, ts_list, prefix):
-    """Forecast.Solar-style remaining-today and tomorrow kWh from the PV model."""
+    """Forecast.Solar-style full-day today and tomorrow kWh from the PV model."""
     day0 = local_midnight(now)
     day1 = day0 + datetime.timedelta(days=1)
     day2 = day0 + datetime.timedelta(days=2)
-    remaining = kwh_between(ts_list, prefix, now, day1)
+    today = kwh_between(ts_list, prefix, day0, day1)
     tomorrow = kwh_between(ts_list, prefix, day1, day2)
-    return remaining, tomorrow
+    return today, tomorrow
 
 
 def cloud_at(dt, weather):
@@ -276,8 +276,9 @@ def simulate(
     same as ``surplus_allocation_plan``. Charger B may be omitted.
 
     SolarPriority searches one cheap window after dropping hours with at
-    least 1 kWh of expected solar, then skips 22 kW when remaining-today
-    or tomorrow PV energy is at least ``solar_enough_kwh``. Surplus can
+    least 1 kWh of expected solar (full-day today spread midnight–midnight),
+    then skips 22 kW when the gating day's kWh is at least
+    ``solar_enough_kwh`` (today until sunset, tomorrow after). Surplus can
     still write charger A.
     """
     start = start.astimezone(HEL).replace(second=0, microsecond=0)
@@ -344,7 +345,10 @@ def simulate(
         )
         ts = clock.as_timestamp(now)
         upcoming = surplus.upcoming_solar_kwh(remaining, tomorrow)
-        enough = surplus.enough_solar(upcoming, solar_enough_kwh)
+        enough = surplus.enough_solar_now(
+            clock, remaining, tomorrow, solar_enough_kwh, 60.17, 24.94
+        )
+        gating_day = surplus.gating_solar_day(clock, 60.17, 24.94)
         in_window = window_on(result, ts)
         cheap_window = in_window
         offsun_window = in_window
@@ -425,6 +429,7 @@ def simulate(
                 "offsun_window": offsun_window,
                 "cheap_full": cheap_full,
                 "enough": enough,
+                "gating_day": gating_day,
                 "remaining_kwh": remaining,
                 "tomorrow_kwh": tomorrow,
                 "upcoming_kwh": upcoming,
@@ -489,13 +494,12 @@ def assert_48h_nordpool(sim):
         % (day0_morning[-1]["slot_count"], first_pub["slot_count"]),
     )
     assert_true(
-        first_pub["reason"]
-        in ("switched", "planned_new_horizon", "planned", "frozen", "no_window"),
+        first_pub["reason"] in ("planned", "no_window"),
         "14:00 reason is a planner outcome, not a crash: %s" % first_pub["reason"],
     )
-    if first_pub["count"] and first_pub["reason"] in ("switched", "planned_new_horizon", "planned"):
+    if first_pub["count"] and first_pub["reason"] == "planned":
         held = [t for t in ticks if t["now"] > first_pub["now"] and t["starts"] == first_pub["starts"]]
-        assert_true(len(held) >= 4, "switched/planned set is held at least an hour")
+        assert_true(len(held) >= 4, "planned set is held at least an hour")
 
     second_pub = fourteens[1]
     assert_eq(second_pub["tomorrow_ok"], True, "second afternoon also has tomorrow")
@@ -508,15 +512,17 @@ def assert_48h_nordpool(sim):
     for t in day1_morning:
         assert_eq(t["tomorrow_ok"], False, "tomorrow gone after midnight until 14:00 @ %s" % t["now"])
 
-    # A frozen stretch keeps ISO starts. A later planned/switched window may
-    # freeze again on the same horizon with a new start.
-    prev_reason = None
-    prev_starts = None
+    # Same Nordpool curve and local date: starts do not slide with the clock.
+    prev = None
     for t in ticks:
-        if t["reason"] == "frozen" and prev_reason == "frozen":
-            assert_eq(t["starts"], prev_starts, "frozen starts do not slide @ %s" % t["now"])
-        prev_reason = t["reason"]
-        prev_starts = t["starts"]
+        if (
+            prev is not None
+            and t["tomorrow_ok"] == prev["tomorrow_ok"]
+            and t["slot_count"] == prev["slot_count"]
+            and t["now"].date() == prev["now"].date()
+        ):
+            assert_eq(t["starts"], prev["starts"], "same curve starts do not slide @ %s" % t["now"])
+        prev = t
 
     # Spot windows ignore leftover.
     for t in ticks:
@@ -872,7 +878,7 @@ def plot_compare(sims, path):
     ax.set_title("charger A SolarPriority pri 1  ·  charger B Force off pri 2 waits unless A is 22 kW")
 
     ax = axes[1]
-    ax.bar(x - 0.2, upcoming, 0.4, color="#9467bd", label="Max upcoming kWh (max remaining, tomorrow)")
+    ax.bar(x - 0.2, upcoming, 0.4, color="#9467bd", label="Max forecast kWh (max today, tomorrow)")
     ax.bar(x + 0.2, enough_h, 0.4, color="#bcbd22", label="Hours enough solar is on")
     ax.axhline(SOLAR_ENOUGH_KWH, color="#d62728", ls="--", lw=1.2, label="40 kWh threshold")
     ax.set_ylabel("kWh  /  hours")
@@ -894,9 +900,10 @@ def write_report(sims, out_dir):
         "# SolarPriority 48 h Helsinki year-round",
         "",
         "**Charger A SolarPriority**, **charger B Force off**. One cheap window after",
-        "dropping hours with at least 1 kWh of expected solar (remaining-today /",
-        "tomorrow shaped by elevation). SolarPriority then skips 22 kW whenever",
-        "`max(remaining-today, tomorrow) ≥ 40 kWh`, including night hours.",
+        "dropping hours with at least 1 kWh of expected solar (full-day today /",
+        "tomorrow shaped by elevation). SolarPriority then skips 22 kW when the",
+        "gating day's kWh ≥ 40 (today until sunset, tomorrow after). A finished",
+        "cheapest window stays the plan and is not used for 22 kW.",
         "Surplus leftover uses HA leftover priority (A=1, B=2 by default). B is Force off",
         "and only gets leftover when A is full-power, or when priorities are equal.",
         "",
@@ -922,9 +929,9 @@ def write_report(sims, out_dir):
     lines.extend(
         [
             "",
-            "- **Midwinter / February / October / DST**: upcoming solar stays well under 40 kWh, and night hours are under 1 kWh, so SolarPriority 22 kW runs in the night window.",
-            "- **April mixed**: tomorrow just crosses 40 kWh, so SolarPriority skips 22 kW even in night windows. Surplus still starts in the brief midday sun.",
-            "- **Midsummer clear**: ~87 kWh, SolarPriority never force-on. Midday leftover still runs surplus (not 22 kW).",
+            "- **Midwinter / February / October / DST**: today's kWh stays well under 40, and night hours are under 1 kWh, so SolarPriority 22 kW runs in the night window. After that window ends it stays the plan (idle) until prices or the date change.",
+            "- **April mixed**: after sunset, tomorrow just crossing 40 kWh skips night 22 kW. Before sunset, today's full-day kWh gates. Surplus still starts in the brief midday sun.",
+            "- **Midsummer clear**: ~87 kWh tomorrow, SolarPriority never force-on after sunset. Polar-day-long sun keeps today's gate on before sunset. Midday leftover still runs surplus (not 22 kW).",
             "- **Midsummer overcast**: ~16 kWh is not enough solar; Off-sun still drops hours with ≥ 1 kWh expected energy.",
             "",
             "![Season comparison](summary.png)",
@@ -984,8 +991,7 @@ def main():
         assert_gt(cheap_h, 3, "night windows still force-on")
         first_pub = at_hour(sim["ticks"], 14)[0]
         assert_true(
-            first_pub["reason"]
-            in ("planned_new_horizon", "switched", "planned", "frozen"),
+            first_pub["reason"] in ("planned", "no_window"),
             "14:00 is a planner outcome, not a crash: %s" % first_pub["reason"],
         )
         assert_true(first_pub["count"] >= 1, "tomorrow night is a valid window")
@@ -1021,11 +1027,17 @@ def main():
         assert_48h_nordpool(sim)
         assert_gt(max_leftover(sim["ticks"]), 2000, "April sun can start surplus")
         assert_gt(hours_where(sim["ticks"], lambda t: t["cheap_window"]), 2, "April still has a night window")
-        assert_eq(
-            hours_where(sim["ticks"], lambda t: t["cheap_full"]),
-            0,
-            "enough solar skips 22 kW even in night hours",
-        )
+        night_after_sun = [
+            t
+            for t in sim["ticks"]
+            if t["gating_day"] == "tomorrow" and t["tomorrow_kwh"] >= SOLAR_ENOUGH_KWH
+        ]
+        assert_true(night_after_sun, "April has post-sunset ticks with tomorrow ≥ 40 kWh")
+        for t in night_after_sun:
+            assert_eq(t["cheap_full"], False, "after sunset tomorrow ≥ 40 skips 22 kW @ %s" % t["now"])
+        for t in sim["ticks"]:
+            if t["gating_day"] == "today" and t["remaining_kwh"] >= SOLAR_ENOUGH_KWH:
+                assert_eq(t["cheap_full"], False, "before sunset today ≥ 40 skips 22 kW @ %s" % t["now"])
         assert_true(
             any(t["tomorrow_kwh"] >= SOLAR_ENOUGH_KWH for t in sim["ticks"]),
             "April tomorrow crosses the 40 kWh gate",
@@ -1081,8 +1093,7 @@ def main():
             assert_true(t["upcoming_kwh"] >= SOLAR_ENOUGH_KWH, "upcoming %s" % t["upcoming_kwh"])
         first_pub = at_hour(sim["ticks"], 14)[0]
         assert_true(
-            first_pub["reason"]
-            in ("switched", "frozen", "planned", "planned_new_horizon", "no_window"),
+            first_pub["reason"] in ("planned", "no_window"),
             "14:00 is a planner outcome: %s" % first_pub["reason"],
         )
 

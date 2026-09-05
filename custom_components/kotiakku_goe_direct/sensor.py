@@ -25,7 +25,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class WindowSensor(HubEntity, SensorEntity):
-    """Current or next window. State is the start; end and the plan are attributes."""
+    """Planned window (past is fine). State is the start; end and the plan are attributes."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:ev-station"
@@ -76,6 +76,8 @@ class ForecastSolarSensor(HubEntity, SensorEntity):
         return {
             "remaining_today_kwh": self._controller.remaining_today_kwh,
             "tomorrow_kwh": self._controller.tomorrow_kwh,
+            "gating_kwh": self._controller.gating_solar_kwh,
+            "gating_day": self._controller.gating_solar_day,
             "enough_kwh": self._controller.solar_enough_kwh,
             "enough_solar": self._controller.enough_solar,
             "offsun_hour_kwh": self._controller.offsun_hour_kwh,
