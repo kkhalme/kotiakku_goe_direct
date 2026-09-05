@@ -74,6 +74,8 @@ from .const import (
     EID_VOLTS,
     POLICY_FORCE_OFF,
     POLICIES,
+    charger_off_mqtt,
+    charger_on_mqtt,
     restore_policy,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -1088,24 +1090,14 @@ class KotiakkuGoeDirectController:
         )
 
     async def _publish_on(self, serial, psm, lot, amp):
-        await self._mqtt_many(
-            serial,
-            (("fup", "false"), ("psm", psm), ("lot", lot), ("amp", amp), ("frc", "2")),
-        )
+        await self._mqtt_many(serial, charger_on_mqtt(psm, lot, amp))
         if serial:
             self._surplus_psm[serial] = int(psm)
             self._surplus_amp[serial] = int(amp)
 
     async def _publish_off(self, serial):
         await self._mqtt_many(
-            serial,
-            (
-                ("frc", "0"),
-                ("fup", "false"),
-                ("psm", self.eco_psm),
-                ("lot", self.eco_lot),
-                ("amp", self.max_amp),
-            ),
+            serial, charger_off_mqtt(self.eco_psm, self.eco_lot, self.max_amp)
         )
         if serial:
             self._arm_phase(serial, False)

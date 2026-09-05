@@ -6,7 +6,7 @@ Deploy from this GitHub repo: [§3](#3-deploy-in-home-assistant) (HACS custom re
 
 This is the only drop. Do not also run the old YAML surplus or charge automations — they would fight this.
 
-The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `frc=1`, `ama`, `loe`, `loty`, `lop`.
+The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `ama`, `loe`, `loty`, `lop`. Idle is **`frc=1`** (force off); start is **`frc=2`**. Neutral (`frc=0`) is not used: in Basic/default charging mode it keeps charging.
 
 ## 1. App and MQTT
 
@@ -53,7 +53,7 @@ If HA leftover priorities **differ**, the higher-priority plugged surplus charge
 
 When one charger is full-power (`lot` 50 / `amp` 32), surplus does **not** write a smaller leftover `lot` to the other charger — last writer would shrink the group to leftover amps and both cars would be stuck at that cap, so app priorities could not give 32 A to the cheap-hour session. Surplus keeps group `lot` at 50 and sets leftover `amp` / `psm` / `frc` on the surplus charger only. That leftover `amp` is the surplus energy cap, not an HA ranking. Combined demand may exceed 50 A (`32` + leftover `amp`); **app priorities then split the 50 A group.** HA does not reserve 32 A for the cheap-hour charger by capping surplus `amp`.
 
-`amp` cannot be 0 (official range 6–32). Stopping surplus-style charging is **`frc=0`** (neutral / ECO), not `amp=0` and not **`frc=1`** (force off would block cheap-hour ECO). `amp`/`psm` alone do not start a session in ECO on expensive hours; **`frc=2`** does.
+`amp` cannot be 0 (official range 6–32). Stopping surplus-style or full-power charging is **`frc=1`** (force off), not `amp=0` and not **`frc=0`** (Neutral). In Basic/default charging mode Neutral keeps charging (`ChargingBecauseFallbackDefault`). Cheap-hour and surplus start still use **`frc=2`**. `amp`/`psm` alone do not start a session.
 
 Budget from leftover watts (floored amps, Finnish 230 V):
 
@@ -68,10 +68,10 @@ Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ star
 - Leftover below 1000 W, **or** SoC below 90%, **or** Kotiakku SoC / solar / house unknown or unusable → keep **6 A** for up to the low hold minutes (default 15). If the last surplus `psm` was 3-phase, stay 3-phase 6 A for that window so Tesla is not interrupted twice (phase switch, then stop). Chatter around 1000 W does not reset that timer: leftover must reach the start leftover (2000 W) to cancel the hold
 - Leftover wants the other phase → keep the current `psm` for those same 15 min, then switch. Leftover returning to the current phase cancels the timer
 - Second surplus charger already on, leftover then shrinks so the high-priority car would use it all → keep the 3 kW second-car floor for those same 15 min, then drop it. That steal needs two plugged cars that are actually taking leftover; an unplugged or finished first charger does not keep 3 kW on the next one. Steal is not applied when leftover itself is below **6 kW** (3 kW per car)
-- That low hold for the whole duration → `frc=0` and restore ECO (`psm` Auto, `amp` 32, `lot` 50)
+- That low hold for the whole duration → `frc=1` and restore ECO (`psm` Auto, `amp` 32, `lot` 50)
 - Recovered leftover (at least the start leftover, 2000 W), SoC, or sensors cancel the hold timer. A warning is logged when Kotiakku values are unusable. Surplus cannot **start** while those sensors are unusable. Restart loses remaining hold minutes (same as the other holds).
 
-MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=0` first.
+MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=1` first.
 
 ## 3. Deploy in Home Assistant
 
@@ -195,7 +195,7 @@ While a charger’s full-power policy **or until-unplug switch** is on, surplus 
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`), clipped to days that also have solar kWh when any forecast exists. The search finds the cheapest contiguous min-hours seed (ceiling is ignored while scoring), aborts if that seed’s average is above the ceiling (default **0.2**), then grows by one native slot at a time. Flex is the looser of percent-of-|seed| and a fixed €/kWh. Max hours is a cap, not a target. Off-sun hours still split islands; only one window is filled. The window is a function of prices, solar clip, the off-sun mask, and knobs — not of the clock — so 15-minute ticks do not slide it. Tomorrow’s curve typically appears sometime after 14:00 local and is a new environment (the plan may jump). Helsinki midnight may change the window when Nordpool `raw_today` and the calendar day roll. The plan also replans when today’s or tomorrow’s kWh, flex, or the Off-sun hour knob change.
 
-Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. After: `frc=0` first, then `psm` Auto, `amp=32`, `lot=50`.
+Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. After: `frc=1` first, then `psm` Auto, `amp=32`, `lot=50`.
 
 | Entity | Default | Role |
 | --- | --- | --- |
@@ -245,11 +245,11 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Higher-priority car Complete / WaitCar, leftover 8 kW | Lower-priority charger gets leftover if it still meets 6 A. WaitCar still gets an offer so it can start; no steal |
 | Higher-priority car taking 10 kW of 18 kW leftover | Lower-priority charger gets the remaining 8 kW (already ≥ 3 kW, no steal) |
 | Leftover 4 kW, unequal HA leftover priority, both wanting surplus | Only the higher-priority charger: it wants all 4 kW |
-| Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 0, `psm` Auto, `amp` 32, `lot` 50 |
+| Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 1, `psm` Auto, `amp` 32, `lot` 50 |
 | Surplus on 1-phase, leftover rises to 8 kW | Stay `psm` 1, `amp` 32 for 15 min, then `psm` 2 / 11 A. Amp still tracks leftover while held |
 | Surplus on 3-phase, leftover drops to 3 kW | Stay `psm` 2, `amp` 6 for 15 min, then `psm` 1 / 13 A |
 | SoC 90–91% during a session | Keep tracking leftover. Not a hold, not a stop |
-| SoC &lt; 90% | Same 6 A low hold as leftover &lt; 1000 W. Not `frc=1`, not an immediate cut |
+| SoC &lt; 90% | Same 6 A low hold as leftover &lt; 1000 W. Not an immediate cut; `frc=1` only after the hold expires |
 | Kotiakku SoC / solar / house unknown or unusable | Warning in the log; same 6 A low hold on **Force off** chargers. Stop surplus only if still unusable after 15 min |
 | SolarPriority + window binary on, gating day's solar under 40 kWh | **That** charger `psm` 2, `amp` 32, `lot` 50, `frc` 2 even if Kotiakku is unknown. Surplus skips **that** serial only; it does not lower group `lot`. Leftover `amp` on the other charger is not cut to leave 32 A; app `lop` splits the 50 A group |
 | SolarPriority, window on, today's kWh ≥ 40 kWh before sunset | No full-power (wait for today's PV). Surplus may still write that charger. `binary_sensor.kotiakku_goe_direct_solar_enough` on |

@@ -14,6 +14,7 @@ from harness import Clock, assert_eq, assert_true, case_runner, load_mod
 
 surplus = load_mod("surplus", "_spec_sur")
 planner = load_mod("planner", "_spec_sur_p")
+const = load_mod("const", "_spec_sur_c")
 
 A, B, C = "111111", "222222", "333333"
 VOLTS = 230
@@ -576,6 +577,26 @@ def main():
         dec, cmds = mqtt_for(8000, True, last_psm={A: 1}, serials=[A], plugged={A: True})
         assert_eq((cmds[A]["psm"], cmds[A]["amp"]), (1, 32), "MQTT path holds 1-phase at 32 A")
 
+    def test_idle_mqtt_is_force_off():
+        off = const.charger_off_mqtt(0, 50, 32)
+        on = const.charger_on_mqtt(2, 50, 32)
+        assert_eq(off[0], ("frc", const.FRC_OFF), "stop publishes force off first")
+        assert_eq(const.FRC_OFF, "1", "force off is frc=1")
+        assert_true(("frc", const.FRC_NEUTRAL) not in off, "Neutral is not in the stop payload")
+        assert_eq(
+            off,
+            (
+                ("frc", "1"),
+                ("fup", "false"),
+                ("psm", 0),
+                ("lot", 50),
+                ("amp", 32),
+            ),
+            "restore ECO after force off",
+        )
+        assert_eq(on[-1], ("frc", const.FRC_ON), "start publishes force on last")
+        assert_true(("frc", const.FRC_NEUTRAL) not in on, "Neutral is not in the start payload")
+
     def test_offsun_hour_spread_tomorrow_and_evening():
         hel = ZoneInfo("Europe/Helsinki")
         noon = Clock(datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel), tz=hel)
@@ -700,6 +721,7 @@ def main():
     case("want_w_and_group_lot_edges", test_want_w_and_group_lot_edges)
     case("tiny_leftover_and_steal_below_floor", test_tiny_leftover_and_steal_below_floor)
     case("mqtt_start_floor_and_steal_amps", test_mqtt_start_floor_and_steal_amps)
+    case("idle_mqtt_is_force_off", test_idle_mqtt_is_force_off)
     case("offsun_hour_spread_tomorrow_and_evening", test_offsun_hour_spread_tomorrow_and_evening)
     case("enough_solar_sunset_gate", test_enough_solar_sunset_gate)
     run()

@@ -13,6 +13,7 @@ from datetime import timezone
 from harness import Clock, SLOT, assert_eq, assert_true, case_runner, load_mod, slots_from
 
 planner = load_mod("planner", "_spec_win")
+const = load_mod("const", "_spec_win_c")
 choose = planner.choose
 clamp_hours = planner.clamp_hours
 now_in_windows = planner.now_in_windows
@@ -267,6 +268,9 @@ def main():
         assert_eq(charger_full_power("unknown", result, 3500), False, "unknown policy")
         ov, seen = until_unplug_step(True, False, True)
         assert_eq((ov, seen), (False, False), "clears on unplug after seen")
+        off = const.charger_off_mqtt(0, 50, 32)
+        assert_eq(off[0], ("frc", "1"), "leaving a window publishes force off, not Neutral")
+        assert_true(("frc", "0") not in off, "Neutral would keep charging in Basic/default")
 
     def test_plan_result_is_a_window_list():
         out = plan(

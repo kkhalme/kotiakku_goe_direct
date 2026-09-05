@@ -342,6 +342,28 @@ def psm_int(option):
     return DEFAULT_ECO_PSM
 
 
+# go-e forceState: Neutral=0 charges in Basic/default; Off=1 stops; On=2 starts.
+FRC_NEUTRAL = "0"
+FRC_OFF = "1"
+FRC_ON = "2"
+
+
+def charger_on_mqtt(psm, lot, amp):
+    """Start MQTT: amp/psm/lot then force on. Neutral is not used."""
+    return (("fup", "false"), ("psm", psm), ("lot", lot), ("amp", amp), ("frc", FRC_ON))
+
+
+def charger_off_mqtt(psm, lot, amp):
+    """Stop MQTT: force off first, then restore ECO amp/psm/lot."""
+    return (
+        ("frc", FRC_OFF),
+        ("fup", "false"),
+        ("psm", psm),
+        ("lot", lot),
+        ("amp", amp),
+    )
+
+
 def priority_entity_id(serial) -> str:
     return f"number.kotiakku_goe_direct_priority_{serial}"
 
