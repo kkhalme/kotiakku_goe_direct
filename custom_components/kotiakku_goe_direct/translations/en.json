@@ -34,7 +34,7 @@
       },
       "house": {
         "title": "Controller and Kotiakku",
-          "description": "Pick the sensors in this Home Assistant. Controller is the go-e Controller Car-power 5-min mean used to add EV watts back into leftover. Never written to. Kotiakku sensors are read-only. SolarPriority uses remaining-today and tomorrow solar energy (kWh) to shape expected kWh per hour, not Kotiakku PV power.",
+          "description": "Pick the sensors in this Home Assistant. Controller is the go-e Controller Car-power 5-min mean used to add EV watts back into leftover. Never written to. Kotiakku sensors are read-only. SolarPriority uses today's full-day solar energy and tomorrow solar energy (kWh) to shape expected kWh per hour, not Kotiakku PV power.",
         "data": {
           "controller_entity": "Controller Car-power 5-min mean",
           "controller_in_kw": "Controller sensor is in kW (off = watts)",
@@ -42,7 +42,7 @@
           "solar_entity": "Kotiakku solar power",
           "house_entity": "Kotiakku house power (includes EV)",
           "kotiakku_in_kw": "Kotiakku power sensors are in kW",
-          "solar_remaining_entity": "Solar remaining today",
+          "solar_remaining_entity": "Solar today",
           "solar_tomorrow_entity": "Solar tomorrow"
         }
       }
@@ -82,7 +82,7 @@
           "solar_entity": "Kotiakku solar power",
           "house_entity": "Kotiakku house power (includes EV)",
           "kotiakku_in_kw": "Kotiakku power sensors are in kW",
-          "solar_remaining_entity": "Solar remaining today",
+          "solar_remaining_entity": "Solar today",
           "solar_tomorrow_entity": "Solar tomorrow"
         }
       }

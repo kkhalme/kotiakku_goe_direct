@@ -85,7 +85,6 @@ from .planner import (
     charger_full_power as policy_full_power,
     now_in_windows,
     plan,
-    prev_from_result,
     until_unplug_step,
 )
 from .serial import resolve_car_entity_id, resolve_power_entity_id
@@ -98,11 +97,13 @@ from .surplus import (
     charger_take_w,
     effective_ev_w,
     energy_kwh,
-    enough_solar as solar_enough,
+    enough_solar_now as solar_enough_now,
+    gating_solar_day,
+    gating_solar_kwh as forecast_gating_kwh,
+    leftover_w,
     group_lot_for_allocations,
     group_lot_for_amps,
     group_surplus_setpoint,
-    leftover_w,
     nrg_total_w,
     parse_lop,
     sensor_usable,
@@ -368,6 +369,7 @@ class KotiakkuGoeDirectController:
 
     @property
     def remaining_today_kwh(self):
+        """Full-day solar production estimate (config key solar_remaining_entity)."""
         return self._forecast_kwh(self.solar_remaining_entity)
 
     @property
@@ -388,7 +390,31 @@ class KotiakkuGoeDirectController:
 
     @property
     def enough_solar(self):
-        return solar_enough(self.upcoming_solar_kwh, self.solar_enough_kwh)
+        lat, lon = self._site_lat_lon()
+        return solar_enough_now(
+            self.clock,
+            self.remaining_today_kwh,
+            self.tomorrow_kwh,
+            self.solar_enough_kwh,
+            lat,
+            lon,
+        )
+
+    @property
+    def gating_solar_kwh(self):
+        lat, lon = self._site_lat_lon()
+        return forecast_gating_kwh(
+            self.clock,
+            self.remaining_today_kwh,
+            self.tomorrow_kwh,
+            lat,
+            lon,
+        )
+
+    @property
+    def gating_solar_day(self):
+        lat, lon = self._site_lat_lon()
+        return gating_solar_day(self.clock, lat, lon)
 
     def _site_lat_lon(self):
         try:
@@ -633,7 +659,6 @@ class KotiakkuGoeDirectController:
             lat,
             lon,
         )
-        prev = prev_from_result(self.clock, self.window_result)
         self.window_result = plan(
             self.clock,
             attrs,
@@ -642,7 +667,6 @@ class KotiakkuGoeDirectController:
             ceiling=ceiling,
             flex_pct=flex_pct,
             flex_euro=flex_euro,
-            prev=prev,
             source_entity=price_entity,
             blocked=blocked,
             remaining_today=self.remaining_today_kwh,

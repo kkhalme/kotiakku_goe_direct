@@ -17,7 +17,7 @@ plan = planner.plan
 now_in_windows = planner.now_in_windows
 
 
-def run_plan(now, source_attrs, data=None, prev=None, **extra):
+def run_plan(now, source_attrs, data=None, **extra):
     payload = {
         "min_hours": 2,
         "max_hours": 5,
@@ -35,7 +35,6 @@ def run_plan(now, source_attrs, data=None, prev=None, **extra):
         ceiling=payload["ceiling"],
         flex_pct=payload.get("flex_pct", 20),
         flex_euro=payload.get("flex_euro", 0.02),
-        prev=prev,
         source_entity="sensor.nordpool_kwh_fi",
         **extra,
     )
@@ -52,19 +51,6 @@ def ts_slots(base, prices):
         slots.append([t, t + SLOT, p])
         t = t + SLOT
     return slots
-
-
-def _prev(windows, slots, min_hours=2.0, max_hours=5.0, ceiling=0.2, flex_pct=20, flex_euro=0.02, blocked=None):
-    return {
-        "windows": windows,
-        "min_hours": min_hours,
-        "max_hours": max_hours,
-        "ceiling": ceiling,
-        "flex_pct": flex_pct,
-        "flex_euro": flex_euro,
-        "horizon": slots[-1][1],
-        "blocked": blocked or [],
-    }
 
 
 def main():
@@ -233,15 +219,12 @@ def main():
         )
         assert_eq(len(windows), 0, "1.75h curve has no min-length seed")
 
-    def test_freeze_does_not_slide():
+    def test_ticks_do_not_slide():
         prices = [0.08] * 20 + [0.03] * 16
         slots = ts_slots(base, prices)
         first = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base, 0, 0)
-        chosen = choose(
-            slots, 2.0, 5.0, 0.2, base + 900, _prev(first, slots, flex_pct=0, flex_euro=0),
-            flex_pct=0, flex_euro=0,
-        )
-        assert_eq(chosen["reason"], "frozen", "frozen after 15 min")
+        chosen = choose(slots, 2.0, 5.0, 0.2, base + 900, flex_pct=0, flex_euro=0)
+        assert_eq(chosen["reason"], "planned", "same curve still planned")
         assert_eq(chosen["windows"][0]["start"], first[0]["start"], "start did not slide")
 
     def test_switch_when_tomorrow_cheaper():
@@ -250,59 +233,26 @@ def main():
         tomorrow = ts_slots(tomorrow_start, [0.02] * 16)
         now_ts = base + 3600
         prev_windows = pick_windows(today, 2 * 3600, 5 * 3600, 0.2, now_ts, 0, 0)
-        chosen = choose(
-            today + tomorrow,
-            2.0,
-            5.0,
-            0.2,
-            now_ts,
-            _prev(prev_windows, today, flex_pct=0, flex_euro=0),
-            flex_pct=0,
-            flex_euro=0,
-        )
-        assert_eq(chosen["reason"], "switched", "cheaper tomorrow set")
+        chosen = choose(today + tomorrow, 2.0, 5.0, 0.2, now_ts, flex_pct=0, flex_euro=0)
+        assert_eq(chosen["reason"], "planned", "cheaper tomorrow is a new environment")
         assert_true(chosen["windows"][0]["avg"] < prev_windows[0]["avg"], "new first is cheaper")
 
-    def test_idle_after_window_same_horizon():
+    def test_finished_window_stays_the_plan():
         slots = ts_slots(base, [0.04] * 8)
         planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
-        chosen = choose(
-            slots,
-            2.0,
-            5.0,
-            0.2,
-            planned[0]["end"] + 60,
-            _prev(planned, slots, flex_pct=0, flex_euro=0),
-            flex_pct=0,
-            flex_euro=0,
-        )
-        assert_eq(chosen["reason"], "idle_after_window", "no extra from same horizon")
+        after = planned[0]["end"] + 60
+        chosen = choose(slots, 2.0, 5.0, 0.2, after, flex_pct=0, flex_euro=0)
+        assert_eq(chosen["reason"], "planned", "finished cheapest window stays the plan")
+        assert_eq(chosen["windows"][0]["start"], planned[0]["start"], "same start")
+        assert_eq(now_in_windows(chosen["windows"], after), False, "not usable for 22 kW")
 
     def test_replan_when_ceiling_or_flex_changes():
         slots = ts_slots(base, [0.08] * 16)
-        planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
-        chosen = choose(
-            slots,
-            2.0,
-            5.0,
-            0.05,
-            base,
-            _prev(planned, slots, ceiling=0.2, flex_pct=0, flex_euro=0),
-            flex_pct=0,
-            flex_euro=0,
-        )
+        chosen = choose(slots, 2.0, 5.0, 0.05, base, flex_pct=0, flex_euro=0)
         assert_eq(chosen["reason"], "no_window", "stricter ceiling replans empty")
-        flexed = choose(
-            slots,
-            2.0,
-            5.0,
-            0.2,
-            base,
-            _prev(planned, slots, flex_pct=0, flex_euro=0),
-            flex_pct=50,
-            flex_euro=1,
-        )
-        assert_eq(flexed["reason"], "planned", "flex change is not frozen")
+        flexed = choose(slots, 2.0, 5.0, 0.2, base, flex_pct=50, flex_euro=1)
+        assert_eq(flexed["reason"], "planned", "flex change replans")
+        assert_true(dur_h(flexed["windows"][0]) > 2.0, "flex grows")
 
     def test_end_to_end_script():
         prices = [0.04] * 8 + [0.2] + [0.06] * 16
@@ -326,7 +276,7 @@ def main():
         out = plan(Clock(now), None)
         assert_eq(out["reason"], "no_source", "missing entity")
 
-    def test_script_freeze_no_slide():
+    def test_script_ticks_do_not_slide():
         prices = [0.05] * 32
         now0 = datetime.datetime.fromtimestamp(base, tz=timezone.utc)
         first = run_plan(
@@ -338,9 +288,8 @@ def main():
             now1,
             {"raw_today": slots_from(base, prices)},
             data={"flex_pct": 0, "flex_euro": 0},
-            prev=planner.prev_from_result(Clock(now1), first),
         )
-        assert_eq(second["reason"], "frozen", "script frozen")
+        assert_eq(second["reason"], "planned", "same curve still planned")
         assert_eq(second["window_1_start"], first["window_1_start"], "no slide")
         assert_eq(second["window_2_start"], None, "still one window")
 
@@ -415,28 +364,17 @@ def main():
         none_ceil = plan(clock, {"raw_today": hourly}, ceiling=None, flex_pct=0, flex_euro=0)
         assert_eq(none_ceil["ceiling"], 0.2, "None ceiling uses default 0.2")
 
-    def test_prev_from_result_iso_and_flex():
+    def test_current_or_next_and_flex_attrs():
         clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
         first = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=20, flex_euro=0.02)
-        prev = planner.prev_from_result(clock, first)
-        assert_eq(prev["flex_pct"], 20.0, "flex percent stored on prev")
-        assert_eq(prev["flex_euro"], 0.02, "flex euro stored on prev")
-        iso_only = {
-            "windows": first["windows"],
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.2,
-            "horizon": first["horizon"],
-        }
-        from_iso = planner.prev_from_result(clock, iso_only)
-        assert_eq(len(from_iso["windows"]), 1, "iso windows restore when raw_windows is missing")
-        assert_eq(from_iso["flex_pct"], 0.0, "missing flex clamps to unused")
-        assert_eq(planner.prev_from_result(clock, {}), None, "empty result")
-        assert_eq(planner.prev_from_result(clock, None), None, "missing result")
+        assert_eq(first["flex_pct"], 20.0, "flex percent stored")
+        assert_eq(first["flex_euro"], 0.02, "flex euro stored")
         nxt = planner.current_or_next(first["raw_windows"], base - 60)
         assert_eq(nxt["start"], first["raw_windows"][0]["start"], "before start: next window")
         cur = planner.current_or_next(first["raw_windows"], first["raw_windows"][0]["start"] + 60)
         assert_eq(cur["start"], first["raw_windows"][0]["start"], "inside: current window")
+        past = planner.current_or_next(first["raw_windows"], first["raw_windows"][0]["end"] + 60)
+        assert_eq(past, None, "after end: no later window")
         assert_eq(planner.now_in_windows([], base), False, "empty windows")
         assert_eq(planner.clip_slots_to_forecast(clock, [], None, None, clock.now()), [], "empty clip")
         flagged = plan(
@@ -470,7 +408,7 @@ def main():
             flex_pct=0,
             flex_euro=0,
         )
-        assert_true(zero["raw_windows"][0]["end"] <= base + 86400 + 1, "0.0 remaining-today is present")
+        assert_true(zero["raw_windows"][0]["end"] <= base + 86400 + 1, "today kWh=0 is present")
         both = plan(
             clock,
             {
@@ -510,18 +448,18 @@ def main():
     case("min_gt_max_swapped", test_min_gt_max_swapped)
     case("join_current_slot", test_join_current_slot)
     case("short_region_skipped", test_short_region_skipped)
-    case("freeze_does_not_slide", test_freeze_does_not_slide)
+    case("ticks_do_not_slide", test_ticks_do_not_slide)
     case("switch_when_tomorrow_cheaper", test_switch_when_tomorrow_cheaper)
-    case("idle_after_window_same_horizon", test_idle_after_window_same_horizon)
+    case("finished_window_stays_the_plan", test_finished_window_stays_the_plan)
     case("replan_when_ceiling_or_flex_changes", test_replan_when_ceiling_or_flex_changes)
     case("end_to_end_script", test_end_to_end_script)
     case("no_source", test_no_source)
-    case("script_freeze_no_slide", test_script_freeze_no_slide)
+    case("script_ticks_do_not_slide", test_script_ticks_do_not_slide)
     case("string_params_from_templates", test_string_params_from_templates)
     case("restore_policy_maps_legacy_names", test_restore_policy_maps_legacy_names)
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
     case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
-    case("prev_from_result_iso_and_flex", test_prev_from_result_iso_and_flex)
+    case("current_or_next_and_flex_attrs", test_current_or_next_and_flex_attrs)
     case("horizon_tomorrow_only_and_zero_remaining", test_horizon_tomorrow_only_and_zero_remaining)
 
     surplus = load_mod("surplus")
@@ -539,9 +477,9 @@ def main():
         assert_eq(energy_kwh("50000", "Wh"), 50.0, "Wh to kWh")
         assert_eq(energy_kwh("5000", "W"), None, "power is not energy")
         assert_eq(upcoming(None, None), None, "no sensors")
-        assert_eq(upcoming(8.0, 6.0), 8.0, "max remaining vs tomorrow")
+        assert_eq(upcoming(8.0, 6.0), 8.0, "max today vs tomorrow")
         assert_eq(upcoming(None, 50.0), 50.0, "tomorrow only")
-        assert_eq(upcoming(0.0, 50.0), 50.0, "evening remaining 0, use tomorrow")
+        assert_eq(upcoming(0.0, 50.0), 50.0, "today 0, use tomorrow")
         assert_eq(enough(None, 40), False, "unknown is not enough")
         assert_eq(enough(8.0, 40), False, "winter 8 kWh is not enough")
         assert_eq(enough(40.0, 40), True, "at the 40 kWh threshold")
@@ -591,10 +529,10 @@ def main():
             base + 8 * 3600,
             "without blocked hours the midday dip wins",
         )
-        prev = planner.prev_from_result(clock0, off)
-        frozen = plan(clock0, attrs, prev=prev, blocked=midday_block, flex_pct=0, flex_euro=0)
-        assert_eq(frozen["reason"], "frozen", "blocked window still freezes")
-        replanned = plan(clock0, attrs, prev=prev, blocked=[], flex_pct=0, flex_euro=0)
+        held = plan(clock0, attrs, blocked=midday_block, flex_pct=0, flex_euro=0)
+        assert_eq(held["reason"], "planned", "blocked window is still planned")
+        assert_eq(held["raw_windows"][0]["start"], off["raw_windows"][0]["start"], "same night start")
+        replanned = plan(clock0, attrs, blocked=[], flex_pct=0, flex_euro=0)
         assert_eq(replanned["reason"], "planned", "blocked change replans")
         assert_eq(
             replanned["raw_windows"][0]["start"],
@@ -607,10 +545,11 @@ def main():
 
         hel = ZoneInfo("Europe/Helsinki")
         clock = Clock(datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel), tz=hel)
+        today_start = clock.start_of_local_day(clock.now())
         hours = surplus.expected_hour_kwh(
             clock,
-            clock.now(),
-            clock.start_of_local_day(clock.now()) + datetime.timedelta(days=1),
+            today_start,
+            today_start + datetime.timedelta(days=1),
             50.0,
             60.17,
             24.94,
@@ -619,14 +558,20 @@ def main():
             datetime.datetime.fromtimestamp(start, tz=hel).hour: kwh
             for start, _end, kwh in hours
         }
-        assert_true(by_hour.get(12, 0) >= 1.0, "noon 50 kWh remaining is ≥ 1 kWh")
+        assert_true(by_hour.get(8, 0) > 0, "full-day spread includes morning")
+        assert_true(by_hour.get(12, 0) >= 1.0, "noon 50 kWh today is ≥ 1 kWh")
         assert_true(by_hour.get(23, 1) < 1.0, "night hour is under 1 kWh")
         ranges = surplus.surplus_hour_ranges(clock, 50.0, None, 1.0, 60.17, 24.94)
-        assert_true(len(ranges) >= 1, "50 kWh remaining excludes productive hours")
+        assert_true(len(ranges) >= 1, "50 kWh today excludes productive hours")
         noon = datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel).timestamp()
+        morning = datetime.datetime(2026, 3, 15, 8, 0, tzinfo=hel).timestamp()
         assert_true(
             any(start <= noon < end for start, end in ranges),
             "noon is excluded from Off-sun",
+        )
+        assert_true(
+            any(start <= morning < end for start, end in ranges),
+            "morning is still excluded when planning at noon",
         )
         night = datetime.datetime(2026, 3, 15, 23, 0, tzinfo=hel).timestamp()
         assert_true(

@@ -122,21 +122,19 @@ def energy_kwh(state, unit=None):
     return value
 
 
-def upcoming_solar_kwh(remaining_today, tomorrow):
-    """kWh of free solar still expected: max of remaining-today and tomorrow.
+def upcoming_solar_kwh(today_kwh, tomorrow):
+    """Headline forecast kWh: max of today's full-day estimate and tomorrow.
 
-    Remaining-today is the coming daylight (and leftover afternoon).
-    Tomorrow is the next local day. Missing values are ignored; both
-    missing → None.
+    Missing values are ignored; both missing → None.
     """
-    values = [v for v in (remaining_today, tomorrow) if v is not None]
+    values = [v for v in (today_kwh, tomorrow) if v is not None]
     if not values:
         return None
     return max(values)
 
 
 def enough_solar(upcoming_kwh, threshold_kwh):
-    """True when remaining-today or tomorrow energy is at least the threshold.
+    """True when ``upcoming_kwh`` is at least the threshold.
 
     Unknown energy or a non-positive threshold is not enough.
     """
@@ -153,6 +151,94 @@ def enough_solar(upcoming_kwh, threshold_kwh):
 # Finland (Helsinki) when the HA instance has no site location.
 DEFAULT_LAT = 60.17
 DEFAULT_LON = 24.94
+
+
+def last_sun_end_ts(
+    clock,
+    day_start,
+    day_end,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+    step_s=900,
+):
+    """Exclusive end of the last local sample today with sun above the horizon.
+
+    None if the sun never rises (polar night). Polar day: last sample before
+    ``day_end``. Uses the same elevation model as off-sun hour weights.
+    """
+    try:
+        t = day_start
+        end_ts = float(clock.as_timestamp(day_end))
+    except Exception:
+        return None
+    step = datetime.timedelta(seconds=int(step_s))
+    last = None
+    while True:
+        try:
+            ts = float(clock.as_timestamp(t))
+        except Exception:
+            break
+        if ts >= end_ts - 1:
+            break
+        if _solar_weight(t, lat, lon) > 0:
+            last = min(ts + float(step_s), end_ts)
+        t = t + step
+    return last
+
+
+def gating_solar_kwh(
+    clock,
+    today_kwh,
+    tomorrow_kwh,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+):
+    """kWh that gates 22 kW: today's full-day estimate until sunset, then tomorrow.
+
+    Before today's last sun (including pre-dawn): ``today_kwh``. After sunset,
+    polar night, or if sunset cannot be computed: ``tomorrow_kwh``.
+    """
+    now = clock.now()
+    try:
+        today_start = clock.start_of_local_day(now)
+        today_end = today_start + datetime.timedelta(days=1)
+        now_ts = float(clock.as_timestamp(now))
+    except Exception:
+        return tomorrow_kwh
+    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
+    if sunset is None or now_ts >= sunset:
+        return tomorrow_kwh
+    return today_kwh
+
+
+def gating_solar_day(clock, lat=DEFAULT_LAT, lon=DEFAULT_LON):
+    """``today`` until sunset; ``tomorrow`` after sunset or polar night."""
+    now = clock.now()
+    try:
+        today_start = clock.start_of_local_day(now)
+        today_end = today_start + datetime.timedelta(days=1)
+        now_ts = float(clock.as_timestamp(now))
+    except Exception:
+        return "tomorrow"
+    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
+    if sunset is None or now_ts >= sunset:
+        return "tomorrow"
+    return "today"
+
+
+def enough_solar_now(
+    clock,
+    today_kwh,
+    tomorrow_kwh,
+    threshold_kwh,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+):
+    """Skip 22 kW when the gating day's full-day kWh is at least the threshold."""
+    return enough_solar(
+        gating_solar_kwh(clock, today_kwh, tomorrow_kwh, lat, lon),
+        threshold_kwh,
+    )
 
 
 def solar_elevation_deg(when, lat=DEFAULT_LAT, lon=DEFAULT_LON):
@@ -261,10 +347,10 @@ def surplus_hour_ranges(
 ):
     """Hours whose expected forecast energy is at least ``hour_kwh``.
 
-    Remaining-today is spread over the rest of the local day; tomorrow kWh
-    over the next local day. Spot windows stay independent of Kotiakku
-    leftover. Unknown energy or a non-positive hour threshold excludes
-    nothing (SolarPriority then searches every remaining price slot).
+    Today's full-day kWh is spread over the local day (midnight–midnight);
+    tomorrow kWh over the next local day. Spot windows stay independent of
+    Kotiakku leftover. Unknown energy or a non-positive hour threshold
+    excludes nothing (SolarPriority then searches every price slot).
     """
     try:
         threshold = float(hour_kwh)
@@ -274,13 +360,14 @@ def surplus_hour_ranges(
         return []
     now = clock.now()
     try:
-        today_end = clock.start_of_local_day(now) + datetime.timedelta(days=1)
+        today_start = clock.start_of_local_day(now)
+        today_end = today_start + datetime.timedelta(days=1)
         tomorrow_end = today_end + datetime.timedelta(days=1)
     except Exception:
         return []
     hours = []
     hours.extend(
-        expected_hour_kwh(clock, now, today_end, remaining_today, lat, lon)
+        expected_hour_kwh(clock, today_start, today_end, remaining_today, lat, lon)
     )
     hours.extend(
         expected_hour_kwh(clock, today_end, tomorrow_end, tomorrow_kwh, lat, lon)

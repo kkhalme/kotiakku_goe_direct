@@ -206,27 +206,25 @@ def main():
             "no solar at all: search all prices, take cheapest tomorrow",
         )
 
-    def test_freeze_and_switch():
+    def test_ticks_do_not_slide_prices_do():
         today = [0.04] * 16
         clock = Clock(datetime.datetime.fromtimestamp(base + 3600, tz=timezone.utc))
         first = plan(clock, {"raw_today": slots_from(base, today)}, flex_pct=0, flex_euro=0)
         assert_eq(first["reason"], "planned", "morning plan")
-        prev = planner.prev_from_result(clock, first)
+        start0 = first["raw_windows"][0]["start"]
         clock.set(datetime.datetime.fromtimestamp(base + 3600 + SLOT, tz=timezone.utc))
-        held = plan(
-            clock, {"raw_today": slots_from(base, today)}, prev=prev, flex_pct=0, flex_euro=0
-        )
-        assert_eq(held["reason"], "frozen", "same horizon does not slide")
-        assert_eq(held["raw_windows"][0]["start"], first["raw_windows"][0]["start"], "start held")
+        later = plan(clock, {"raw_today": slots_from(base, today)}, flex_pct=0, flex_euro=0)
+        assert_eq(later["reason"], "planned", "same curve still planned")
+        assert_eq(later["raw_windows"][0]["start"], start0, "clock tick does not slide")
         both = {
             "raw_today": slots_from(base, today),
             "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
         }
-        switched = plan(clock, both, prev=prev, flex_pct=0, flex_euro=0)
-        assert_eq(switched["reason"], "switched", "cheaper tomorrow wins")
+        switched = plan(clock, both, flex_pct=0, flex_euro=0)
+        assert_eq(switched["reason"], "planned", "cheaper tomorrow is a new environment")
         assert_true(
             switched["raw_windows"][0]["start"] >= base + 86400 - 1,
-            "switched onto tomorrow",
+            "cheaper tomorrow wins",
         )
 
     def test_full_power_solarpriority():
@@ -293,9 +291,9 @@ def main():
         assert_eq(later[1], base + 16 * SLOT, "later valley wins when it is cheaper")
         now_past = base + 3 * 3600
         elapsed = find_seed(ts_slots(base, [0.01] * 8 + [0.08] * 16), 2 * 3600, now_past)
-        assert_true(elapsed[1] >= now_past - SLOT, "elapsed cheap valley is not a seed")
+        assert_eq(elapsed[1], base, "elapsed cheap valley is still the seed")
         mid = find_seed(ts_slots(base, [0.01] * 8 + [0.08] * 8), 2 * 3600, base + SLOT + 450)
-        assert_eq(mid[1], base + SLOT, "current quarter is included; the elapsed slot is not")
+        assert_eq(mid[1], base, "elapsed first slot is still in the cheapest seed")
         gap_slots = ts_slots(base, [0.02] * 8) + ts_slots(base + 8 * SLOT + 3600, [0.01] * 8)
         gapped = find_seed(gap_slots, 2 * 3600, base - 3600)
         assert_eq(gapped[1], base + 8 * SLOT + 3600, "cannot seed across a gap")
@@ -341,8 +339,8 @@ def main():
             20,
             0.02,
         )
-        assert_eq(elapsed_left[0]["start"], now_mid, "elapsed left neighbor is not added")
-        assert_true(elapsed_left[0]["end"] > now_mid + 8 * SLOT, "grows right instead")
+        assert_eq(elapsed_left[0]["start"], base, "left neighbor is part of the env-optimal window")
+        assert_true(elapsed_left[0]["end"] > now_mid + 8 * SLOT, "grows right as well")
         plateau = ts_slots(base, [0.10] * 8 + [0.11] * 8)
         pct_only = pick_windows(plateau, 2 * 3600, 5 * 3600, 0.2, base - 3600, 20, 0)
         euro_only = pick_windows(plateau, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0.02)
@@ -519,18 +517,17 @@ def main():
         assert_eq(no_tom_prices["count"], 0, "tomorrow kWh without tomorrow prices: nothing to search")
         assert_eq(no_tom_prices["reason"], "no_slots", "clipped empty is no_slots")
 
-    def test_freeze_switch_and_replan_combinations():
+    def test_price_change_replans_without_prev():
         today = [0.04] * 16
         clock = Clock(datetime.datetime.fromtimestamp(base + 3600, tz=timezone.utc))
         first = plan(clock, {"raw_today": slots_from(base, today)}, flex_pct=0, flex_euro=0)
-        prev = planner.prev_from_result(clock, first)
         expensive_tom = {
             "raw_today": slots_from(base, today),
             "raw_tomorrow": slots_from(base + 86400, [0.10] * 16),
         }
-        held = plan(clock, expensive_tom, prev=prev, flex_pct=0, flex_euro=0)
-        assert_eq(held["reason"], "frozen", "horizon grew but the new set is not cheaper")
-        assert_eq(held["raw_windows"][0]["start"], first["raw_windows"][0]["start"], "keep the started set")
+        held = plan(clock, expensive_tom, flex_pct=0, flex_euro=0)
+        assert_eq(held["reason"], "planned", "dearer tomorrow does not beat today")
+        assert_eq(held["raw_windows"][0]["start"], first["raw_windows"][0]["start"], "keep today's cheaper set")
         started = plan(
             clock, {"raw_today": slots_from(base, [0.09] * 16)}, flex_pct=0, flex_euro=0
         )
@@ -544,76 +541,41 @@ def main():
                 "raw_today": slots_from(base, [0.09] * 16),
                 "raw_tomorrow": slots_from(base + 86400, [0.01] * 16),
             },
-            prev=planner.prev_from_result(clock, started),
             flex_pct=0,
             flex_euro=0,
         )
-        assert_eq(switched["reason"], "switched", "started window can still be replaced")
+        assert_eq(switched["reason"], "planned", "cheaper tomorrow replaces today's window")
         slots = ts_slots(base, [0.04] * 16)
-        planned = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
-        prev_w = {
-            "windows": planned,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.2,
-            "flex_pct": 0,
-            "flex_euro": 0,
-            "horizon": slots[-1][1],
-            "blocked": [],
-        }
-        longer = choose(slots, 3.0, 5.0, 0.2, base, prev_w, flex_pct=0, flex_euro=0)
+        longer = choose(slots, 3.0, 5.0, 0.2, flex_pct=0, flex_euro=0)
         assert_eq(longer["reason"], "planned", "min hours change replans")
         assert_true(dur_h(longer["windows"][0]) >= 3.0 - 0.01, "new min is 3 h")
-        shorter_max = choose(slots, 2.0, 2.0, 0.2, base, prev_w, flex_pct=0, flex_euro=0)
+        shorter_max = choose(slots, 2.0, 2.0, 0.2, flex_pct=0, flex_euro=0)
         assert_eq(shorter_max["reason"], "planned", "max hours change replans")
         assert_eq(round(dur_h(shorter_max["windows"][0]), 2), 2.0, "fixed 2 h after max shrinks")
 
-    def test_after_window_later_island_and_new_horizon():
+    def test_finished_window_stays_the_plan():
         early = [0.02] * 8
         gap = [0.20] * 16
         late = [0.04] * 8
         slots = ts_slots(base, early + gap + late)
         first = pick_windows(slots, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
         assert_eq(first[0]["start"], base, "first night is cheaper")
-        prev = {
-            "windows": first,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.2,
-            "flex_pct": 0,
-            "flex_euro": 0,
-            "horizon": slots[-1][1],
-            "blocked": [],
-        }
         after = first[0]["end"] + 60
-        next_island = choose(slots, 2.0, 5.0, 0.2, after, prev, flex_pct=0, flex_euro=0)
-        assert_eq(next_island["reason"], "planned", "same horizon: later island after the first ends")
-        assert_eq(next_island["windows"][0]["start"], base + 24 * SLOT, "second island")
+        still = choose(slots, 2.0, 5.0, 0.2, after, flex_pct=0, flex_euro=0)
+        assert_eq(still["reason"], "planned", "clock does not pick a later island")
+        assert_eq(still["windows"][0]["start"], base, "finished cheapest window stays the plan")
+        assert_eq(now_in_windows(still["windows"], after), False, "not usable for 22 kW")
         today_only = ts_slots(base, [0.04] * 8)
         done = pick_windows(today_only, 2 * 3600, 5 * 3600, 0.2, base - 3600, 0, 0)
-        prev_done = {
-            "windows": done,
-            "min_hours": 2.0,
-            "max_hours": 5.0,
-            "ceiling": 0.2,
-            "flex_pct": 0,
-            "flex_euro": 0,
-            "horizon": today_only[-1][1],
-            "blocked": [],
-        }
         grown = today_only + ts_slots(base + 86400, [0.03] * 8)
-        new_h = choose(
-            grown, 2.0, 5.0, 0.2, done[0]["end"] + 60, prev_done, flex_pct=0, flex_euro=0
-        )
-        assert_eq(new_h["reason"], "planned_new_horizon", "ended window + cheaper new day")
+        new_h = choose(grown, 2.0, 5.0, 0.2, flex_pct=0, flex_euro=0)
+        assert_eq(new_h["reason"], "planned", "cheaper new day is a new environment")
         assert_true(new_h["windows"][0]["start"] >= base + 86400 - 1, "new window is tomorrow")
         dear = today_only + ts_slots(base + 86400, [0.40] * 8)
-        empty_h = choose(
-            dear, 2.0, 5.0, 0.2, done[0]["end"] + 60, prev_done, flex_pct=0, flex_euro=0
-        )
-        assert_eq(empty_h["reason"], "no_window", "ended window + new horizon with no legal seed")
-        assert_eq(empty_h["windows"][0]["start"], done[0]["start"], "keeps the old set")
-        empty = choose([], 2.0, 5.0, 0.2, base, None, flex_pct=0, flex_euro=0)
+        empty_h = choose(dear, 2.0, 5.0, 0.2, flex_pct=0, flex_euro=0)
+        assert_eq(empty_h["reason"], "planned", "today's legal seed still wins vs dear tomorrow")
+        assert_eq(empty_h["windows"][0]["start"], done[0]["start"], "keep today's window")
+        empty = choose([], 2.0, 5.0, 0.2, flex_pct=0, flex_euro=0)
         assert_eq(empty["reason"], "no_slots", "no price slots")
 
     case("clamp_and_flex_defaults", test_clamp_and_flex_defaults)
@@ -627,7 +589,7 @@ def main():
     case("grow_refuses_over_ceiling_slot", test_grow_refuses_over_ceiling_slot)
     case("seed_may_contain_ceiling_spike", test_seed_may_contain_ceiling_spike)
     case("horizon_clip_and_prices_only_fallback", test_horizon_clip_and_prices_only_fallback)
-    case("freeze_and_switch", test_freeze_and_switch)
+    case("ticks_do_not_slide_prices_do", test_ticks_do_not_slide_prices_do)
     case("full_power_solarpriority", test_full_power_solarpriority)
     case("plan_result_is_a_window_list", test_plan_result_is_a_window_list)
     case("seed_tie_elapsed_gap_and_weighted_avg", test_seed_tie_elapsed_gap_and_weighted_avg)
@@ -636,8 +598,8 @@ def main():
     case("hourly_and_half_hour_native_steps", test_hourly_and_half_hour_native_steps)
     case("blocked_splits_islands_and_dict_ranges", test_blocked_splits_islands_and_dict_ranges)
     case("horizon_clip_combinations", test_horizon_clip_combinations)
-    case("freeze_switch_and_replan_combinations", test_freeze_switch_and_replan_combinations)
-    case("after_window_later_island_and_new_horizon", test_after_window_later_island_and_new_horizon)
+    case("price_change_replans_without_prev", test_price_change_replans_without_prev)
+    case("finished_window_stays_the_plan", test_finished_window_stays_the_plan)
     run()
 
 

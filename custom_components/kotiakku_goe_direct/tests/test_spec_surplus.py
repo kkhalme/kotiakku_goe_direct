@@ -369,7 +369,7 @@ def main():
         assert_eq(surplus.enough_solar(None, 40), False, "unknown is not enough")
         assert_eq(surplus.enough_solar(40, 40), True, "at threshold")
         assert_eq(surplus.enough_solar(50, 0), False, "threshold 0 disables")
-        assert_eq(surplus.upcoming_solar_kwh(8, 50), 50, "max remaining vs tomorrow")
+        assert_eq(surplus.upcoming_solar_kwh(8, 50), 50, "max today vs tomorrow")
         assert_eq(surplus.energy_kwh("50000", "Wh"), 50.0, "Wh → kWh")
         assert_eq(surplus.energy_kwh("4000", "W"), None, "power is not energy")
         result = {"raw_windows": [{"start": 3000, "end": 4000}]}
@@ -380,7 +380,7 @@ def main():
         assert_eq(surplus.enough_solar(39.9, 40), False, "just under threshold")
         assert_eq(surplus.enough_solar(0, 40), False, "0 kWh is not enough")
         assert_eq(surplus.enough_solar(50, "x"), False, "bad threshold")
-        assert_eq(surplus.upcoming_solar_kwh(10, None), 10, "remaining only")
+        assert_eq(surplus.upcoming_solar_kwh(10, None), 10, "today only")
         assert_eq(surplus.upcoming_solar_kwh(0, 0), 0, "both zero")
         assert_eq(surplus.energy_kwh("10"), 10.0, "unitless is kWh")
         assert_eq(surplus.energy_kwh("2", "MWh"), 2000.0, "MWh → kWh")
@@ -587,18 +587,24 @@ def main():
         )
         assert_true(len(both) >= 1, "today + tomorrow productive hours merge into ranges")
         evening = Clock(datetime.datetime(2026, 3, 15, 20, 0, tzinfo=hel), tz=hel)
+        today_start = evening.start_of_local_day(evening.now())
         hours = surplus.expected_hour_kwh(
             evening,
-            evening.now(),
-            evening.start_of_local_day(evening.now()) + datetime.timedelta(days=1),
+            today_start,
+            today_start + datetime.timedelta(days=1),
             50.0,
             60.17,
             24.94,
         )
         morning = datetime.datetime(2026, 3, 15, 8, 0, tzinfo=hel).timestamp()
         assert_true(
-            all(abs(start - morning) > 1 for start, _end, _kwh in hours),
-            "remaining-today starts at now: morning hours are already gone",
+            any(abs(start - morning) <= 1 for start, _end, _kwh in hours),
+            "full-day today is spread from midnight: morning hours are still in the profile",
+        )
+        evening_ranges = surplus.surplus_hour_ranges(evening, 50.0, None, 1.0, 60.17, 24.94)
+        assert_true(
+            any(start <= morning < end for start, end in evening_ranges),
+            "planning at 20:00 still blocks this morning's sun hours",
         )
         assert_eq(
             surplus.surplus_hour_ranges(noon, -5, None, 1.0, 60.17, 24.94),
@@ -618,6 +624,68 @@ def main():
             "unknown energy: no hour profile",
         )
 
+    def test_enough_solar_sunset_gate():
+        hel = ZoneInfo("Europe/Helsinki")
+        lat, lon = 60.17, 24.94
+        predawn = Clock(datetime.datetime(2026, 3, 15, 2, 0, tzinfo=hel), tz=hel)
+        today_start = predawn.start_of_local_day(predawn.now())
+        today_end = today_start + datetime.timedelta(days=1)
+        sunset = surplus.last_sun_end_ts(predawn, today_start, today_end, lat, lon)
+        assert_true(sunset is not None, "Helsinki 15 Mar has a sunset")
+        assert_eq(surplus.gating_solar_day(predawn, lat, lon), "today", "02:00 is before sunset")
+        assert_eq(
+            surplus.enough_solar_now(predawn, 80, 10, 40, lat, lon),
+            True,
+            "sunny today skips 22 kW before sunset even if tomorrow is cloudy",
+        )
+        assert_eq(
+            surplus.enough_solar_now(predawn, 20, 80, 40, lat, lon),
+            False,
+            "cloudy today does not skip before sunset",
+        )
+        after = Clock(datetime.datetime.fromtimestamp(sunset, tz=hel), tz=hel)
+        assert_eq(surplus.gating_solar_day(after, lat, lon), "tomorrow", "at sunset exclusive")
+        assert_eq(
+            surplus.enough_solar_now(after, 80, 10, 40, lat, lon),
+            False,
+            "after sunset cloudy tomorrow allows night 22 kW",
+        )
+        assert_eq(
+            surplus.enough_solar_now(after, 80, 80, 40, lat, lon),
+            True,
+            "after sunset sunny tomorrow still skips",
+        )
+        assert_eq(
+            surplus.enough_solar_now(after, 80, None, 40, lat, lon),
+            False,
+            "missing tomorrow after sunset is not enough",
+        )
+        polar_night = Clock(datetime.datetime(2026, 12, 21, 12, 0, tzinfo=hel), tz=hel)
+        assert_eq(
+            surplus.last_sun_end_ts(
+                polar_night,
+                polar_night.start_of_local_day(polar_night.now()),
+                polar_night.start_of_local_day(polar_night.now()) + datetime.timedelta(days=1),
+                78.0,
+                16.0,
+            ),
+            None,
+            "78N midwinter never rises",
+        )
+        assert_eq(surplus.gating_solar_day(polar_night, 78.0, 16.0), "tomorrow", "polar night uses tomorrow")
+        assert_eq(
+            surplus.enough_solar_now(polar_night, 80, 10, 40, 78.0, 16.0),
+            False,
+            "polar night: tomorrow 10 kWh allows 22 kW",
+        )
+        polar_day = Clock(datetime.datetime(2026, 6, 21, 2, 0, tzinfo=hel), tz=hel)
+        assert_eq(surplus.gating_solar_day(polar_day, 78.0, 16.0), "today", "polar day stays on today")
+        assert_eq(
+            surplus.enough_solar_now(polar_day, 80, 10, 40, 78.0, 16.0),
+            True,
+            "polar day 02:00 still gates on today's 80 kWh",
+        )
+
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
@@ -633,6 +701,7 @@ def main():
     case("tiny_leftover_and_steal_below_floor", test_tiny_leftover_and_steal_below_floor)
     case("mqtt_start_floor_and_steal_amps", test_mqtt_start_floor_and_steal_amps)
     case("offsun_hour_spread_tomorrow_and_evening", test_offsun_hour_spread_tomorrow_and_evening)
+    case("enough_solar_sunset_gate", test_enough_solar_sunset_gate)
     run()
 
 
