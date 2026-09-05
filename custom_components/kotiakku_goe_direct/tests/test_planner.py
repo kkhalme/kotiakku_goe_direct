@@ -682,27 +682,27 @@ def main():
 
     def test_group_surplus_setpoint_keeps_app_priorities():
         setp = surplus.group_surplus_setpoint
-        leftover = setp(10, 1, 10, n_full=0, eco_lot=50)
+        leftover = setp(10, 1, 10, n_full=0, group_lot=50)
         assert_eq(leftover, (10, 1, 10), "pure surplus uses leftover lot")
         assert_eq(
-            setp(10, 1, 10, n_full=1, eco_lot=50),
+            setp(10, 1, 10, n_full=1, group_lot=50),
             (50, 1, 10),
             "mixed: keep group lot 50, leftover amp",
         )
         assert_eq(
-            setp(25, 2, 25, n_full=1, eco_lot=50),
+            setp(25, 2, 25, n_full=1, group_lot=50),
             (50, 2, 25),
             "mixed: do not cap leftover amp to reserve 32 A",
         )
         assert_eq(
-            setp(6, 1, 6, n_full=1, eco_lot=50),
+            setp(6, 1, 6, n_full=1, group_lot=50),
             (50, 1, 6),
             "mixed: 6 A leftover amp beside full-power",
         )
         assert_eq(
-            setp(10, 1, 10, n_full=1, eco_lot=32),
+            setp(10, 1, 10, n_full=1, group_lot=32),
             (32, 1, 10),
-            "mixed: keep eco_lot, leftover amp; app lop splits the group",
+            "mixed: keep group_lot, leftover amp; app lop splits the group",
         )
 
     case("solar_forecast_and_full_power", test_solar_forecast_and_full_power)
@@ -997,14 +997,14 @@ def main():
         assert_eq((low_psm, low_amp), (1, 13), "low 3 kW is 1-phase 13 A")
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, eco_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
             ),
             26,
             "9+3 kW: raise group lot to 13 A + 13 A so both amp caps fit",
         )
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, eco_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
             ),
             17,
             "same leftover on both: keep leftover lot",

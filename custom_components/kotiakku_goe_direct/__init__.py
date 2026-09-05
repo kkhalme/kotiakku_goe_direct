@@ -10,6 +10,7 @@ from homeassistant.helpers import config_validation as cv
 from .config import persistable, BOOL_KEYS, INT_KEYS, STRING_KEYS
 from .const import (
     CONF_CHARGERS,
+    CONF_ECO_LOT,
     CONF_PRICE_ENTITY,
     CONF_PRIORITY,
     DOMAIN,
@@ -53,6 +54,7 @@ CONFIG_SCHEMA = vol.Schema(
                     vol.Optional(key, default=default): vol.Coerce(int)
                     for key, default in INT_KEYS.items()
                 },
+                vol.Optional(CONF_ECO_LOT): vol.Coerce(int),
                 **{
                     vol.Optional(key, default=default): cv.boolean
                     for key, default in BOOL_KEYS.items()

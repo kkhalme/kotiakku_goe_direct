@@ -10,13 +10,16 @@ from .const import (
     DOMAIN,
     EID_WINDOW_ACTIVE,
     WINDOW_ACTIVE_UNIQUE_ID,
+    migrate_group_lot_entities,
     migrate_window_entities,
 )
 from .device import HubEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    migrate_window_entities(er.async_get(hass))
+    registry = er.async_get(hass)
+    migrate_window_entities(registry)
+    migrate_group_lot_entities(registry)
     controller = hass.data[DOMAIN][entry.entry_id]
     entities = [WindowActiveBinary(controller), EnoughSolarBinary(controller)]
     entities.extend(ChargerBinary(controller, serial) for serial in controller.chargers)

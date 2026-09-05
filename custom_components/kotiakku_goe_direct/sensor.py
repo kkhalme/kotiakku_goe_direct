@@ -19,13 +19,16 @@ from .const import (
     SOLAR_TODAY_UNIQUE_ID,
     SOLAR_TOMORROW_UNIQUE_ID,
     WINDOW_SENSOR_UNIQUE_ID,
+    migrate_group_lot_entities,
     migrate_window_entities,
 )
 from .device import HubEntity
 
 
 def _migrate_window_entities(hass):
-    migrate_window_entities(er.async_get(hass))
+    registry = er.async_get(hass)
+    migrate_window_entities(registry)
+    migrate_group_lot_entities(registry)
 
 
 def _kwh(value):

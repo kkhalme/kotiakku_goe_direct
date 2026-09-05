@@ -6,7 +6,7 @@ Deploy from this GitHub repo: [§3](#3-deploy-in-home-assistant) (HACS custom re
 
 This is the only drop. Do not also run the old YAML surplus or charge automations — they would fight this.
 
-The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `ama`, `loe`, `loty`, `lop`. Idle is **`frc=1`** (force off); start is **`frc=2`**. Neutral (`frc=0`) is not used: in Basic/default charging mode it keeps charging.
+The go-e Controller is **read-only**. Never publish to `go-eController/…`. Never `ama`, `loe`, `loty`, `lop`. Leave chargers in **Basic/default** charging mode; HA starts with **`frc=2`** and stops with **`frc=1`** (force off). Neutral (`frc=0`) is not used: in Basic/default it keeps charging. Do not use go-e Eco logic mode.
 
 ## 1. App and MQTT
 
@@ -68,10 +68,10 @@ Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ star
 - Leftover below 1000 W, **or** SoC below 90%, **or** Kotiakku SoC / solar / house unknown or unusable → keep **6 A** for up to the low hold minutes (default 15). If the last surplus `psm` was 3-phase, stay 3-phase 6 A for that window so Tesla is not interrupted twice (phase switch, then stop). Chatter around 1000 W does not reset that timer: leftover must reach the start leftover (2000 W) to cancel the hold
 - Leftover wants the other phase → keep the current `psm` for those same 15 min, then switch. Leftover returning to the current phase cancels the timer
 - Second surplus charger already on, leftover then shrinks so the high-priority car would use it all → keep the 3 kW second-car floor for those same 15 min, then drop it. That steal needs two plugged cars that are actually taking leftover; an unplugged or finished first charger does not keep 3 kW on the next one. Steal is not applied when leftover itself is below **6 kW** (3 kW per car)
-- That low hold for the whole duration → `frc=1` and restore ECO (`psm` Auto, `amp` 32, `lot` 50)
+- That low hold for the whole duration → `frc=1` (force off)
 - Recovered leftover (at least the start leftover, 2000 W), SoC, or sensors cancel the hold timer. A warning is logged when Kotiakku values are unusable. Surplus cannot **start** while those sensors are unusable. Restart loses remaining hold minutes (same as the other holds).
 
-MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=1` first.
+MQTT order: start is `fup` / `psm` / `lot` / `amp` then `frc=2`; stop is `frc=1` then `fup` false.
 
 ## 3. Deploy in Home Assistant
 
@@ -131,7 +131,7 @@ Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge unt
 
 On load — and again when Home Assistant has finished starting — the integration asks every wired sensor (Kotiakku, Forecast.Solar, Nordpool, charger car/power) to update before it plans, so restored leftover values are not used.
 
-After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
+After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, group lot, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
 
@@ -187,7 +187,7 @@ Per charger, `select.kotiakku_goe_direct_policy_<serial>`:
 
 - **SolarPriority** — one cheap window on the hours that have both spot prices and solar forecast (prices-only if forecast is missing). High-solar hours (≥ `number.kotiakku_goe_direct_offsun_hour_kwh`, default **1 kWh**, elevation-weighted from local midnight) are dropped. The search takes the cheapest `window min` seed, then grows toward the cheaper neighbor while the average stays under flex (20% **or** 0.02 €/kWh, whichever is looser) and at most `window max`. Clock ticks do not move that window: a cheapest stretch that has already ended stays the plan (visible in the past) and is not used for 22 kW. No 22 kW when **today's** full-day solar is at least `number.kotiakku_goe_direct_solar_enough_kwh` (default **40 kWh**) until local sunset; after sunset the same knob gates on **tomorrow**. Cloudy tomorrow allows night 22 kW. Surplus can still write that charger. A previous Cheapest / Supercheap / Longest / Earliest select is restored as SolarPriority.
 - **Force on** — that charger full power now
-- **Force off** — surplus / ECO only
+- **Force off** — leftover surplus only
 
 `switch.kotiakku_goe_direct_until_unplug_<serial>` is a one-shot override, not a policy. Turn it on to force that charger to 22 kW regardless of the select. It stays on through charging and a full battery (go-e Complete). It turns itself off when **that** car **unplugs**. The policy select is unchanged, so SolarPriority / Force off / … continues afterwards. Turn the switch off to cancel. Surplus skips that serial while the switch is on. A previous install that had **Force on until unplug** selected is migrated onto this switch and the stored previous policy.
 
@@ -195,7 +195,7 @@ While a charger’s full-power policy **or until-unplug switch** is on, surplus 
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`), clipped to days that also have solar kWh when any forecast exists. The search finds the cheapest contiguous min-hours seed (ceiling is ignored while scoring), aborts if that seed’s average is above the ceiling (default **0.2**), then grows by one native slot at a time. Flex is the looser of percent-of-|seed| and a fixed €/kWh. Max hours is a cap, not a target. Off-sun hours still split islands; only one window is filled. The window is a function of prices, solar clip, the off-sun mask, and knobs — not of the clock — so 15-minute ticks do not slide it. Tomorrow’s curve typically appears sometime after 14:00 local and is a new environment (the plan may jump). Helsinki midnight may change the window when Nordpool `raw_today` and the calendar day roll. The plan also replans when today’s or tomorrow’s kWh, flex, or the Off-sun hour knob change.
 
-Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. After: `frc=1` first, then `psm` Auto, `amp=32`, `lot=50`.
+Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. After: `frc=1` then `fup` false.
 
 | Entity | Default | Role |
 | --- | --- | --- |
@@ -216,8 +216,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_hold_minutes` | 15 min | Hold duration (leftover, SoC, second-car leftover gone, or 1↔3 `psm`) |
 | `number.kotiakku_goe_direct_voltage_v` / `kotiakku_goe_direct_min_a` / `kotiakku_goe_direct_max_a` | 230 / 6 / 32 | Budget math |
 | `number.kotiakku_goe_direct_phase3_min_w` | 4140 W | Switch leftover to 3-phase (after the 15 min `psm` hold) |
-| `number.kotiakku_goe_direct_eco_lot_a` | 50 A | Group lot when restoring ECO |
-| `select.kotiakku_goe_direct_eco_phase` | Auto | Restore `psm` (Auto / Force 1-phase / Force 3-phase) |
+| `number.kotiakku_goe_direct_group_lot_a` | 50 A | Load-balancing group current cap. YAML `eco_lot` still seeds this |
 | `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until sunset, then when tomorrow ≥ this. Missing tomorrow after sunset is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition |
 | `sensor.kotiakku_goe_direct_solar_today_kwh` | from Configure | Today's full-day kWh. Attribute `source` is the picker entity |
 | `sensor.kotiakku_goe_direct_solar_tomorrow_kwh` | from Configure | Tomorrow kWh. Attribute `source` is the picker entity |
@@ -226,7 +225,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `sensor.kotiakku_goe_direct_solar_kwh` | max(today, tomorrow) | Headline forecast. Attributes: `source_today`, `source_tomorrow`, `enough_solar`, `offsun_hour_kwh` |
 | `number.kotiakku_goe_direct_offsun_hour_kwh` | 1 kWh | Drop a local hour from the search when its expected forecast energy ≥ this. 0 disables. Dawn/dusk/night under 1 kWh stay searchable |
 
-YAML `soc_on`, `eco_lot`, charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
+YAML `soc_on`, `group_lot` (legacy `eco_lot`), charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
 
 ## 6. Smoke checks
 
@@ -245,7 +244,7 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Higher-priority car Complete / WaitCar, leftover 8 kW | Lower-priority charger gets leftover if it still meets 6 A. WaitCar still gets an offer so it can start; no steal |
 | Higher-priority car taking 10 kW of 18 kW leftover | Lower-priority charger gets the remaining 8 kW (already ≥ 3 kW, no steal) |
 | Leftover 4 kW, unequal HA leftover priority, both wanting surplus | Only the higher-priority charger: it wants all 4 kW |
-| Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 1, `psm` Auto, `amp` 32, `lot` 50 |
+| Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 1 |
 | Surplus on 1-phase, leftover rises to 8 kW | Stay `psm` 1, `amp` 32 for 15 min, then `psm` 2 / 11 A. Amp still tracks leftover while held |
 | Surplus on 3-phase, leftover drops to 3 kW | Stay `psm` 2, `amp` 6 for 15 min, then `psm` 1 / 13 A |
 | SoC 90–91% during a session | Keep tracking leftover. Not a hold, not a stop |

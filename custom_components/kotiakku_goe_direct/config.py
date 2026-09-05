@@ -6,7 +6,8 @@ from .const import (
     CONF_CHARGERS,
     CONF_CONTROLLER_ENTITY,
     CONF_CONTROLLER_IN_KW,
-    CONF_ECO_PSM,
+    CONF_ECO_LOT,
+    CONF_GROUP_LOT,
     CONF_HOUSE_ENTITY,
     CONF_KOTIAKKU_IN_KW,
     CONF_PRICE_ENTITY,
@@ -17,7 +18,6 @@ from .const import (
     CONF_SOLAR_TODAY_ENTITY,
     CONF_SOLAR_TOMORROW_ENTITY,
     DEFAULT_CONTROLLER_IN_KW,
-    DEFAULT_ECO_PSM,
     DEFAULT_KOTIAKKU_IN_KW,
     PRIORITY_MAX,
     PRIORITY_MIN,
@@ -38,7 +38,6 @@ _LEGACY_SOLAR_ENOUGH = "supercheap_min_kwh"
 
 INT_KEYS = {
     **{spec["conf"]: spec["default"] for spec in SURPLUS_NUMBER_SPECS},
-    CONF_ECO_PSM: DEFAULT_ECO_PSM,
 }
 
 STRING_KEYS = (
@@ -190,6 +189,8 @@ def _with_legacy(raw: dict) -> dict:
         src[CONF_SOLAR_TOMORROW_ENTITY] = src[_LEGACY_SOLAR_TOMORROW]
     if CONF_SOLAR_ENOUGH_KWH not in src and _LEGACY_SOLAR_ENOUGH in src:
         src[CONF_SOLAR_ENOUGH_KWH] = src[_LEGACY_SOLAR_ENOUGH]
+    if CONF_GROUP_LOT not in src and src.get(CONF_ECO_LOT) is not None:
+        src[CONF_GROUP_LOT] = src[CONF_ECO_LOT]
     return src
 
 

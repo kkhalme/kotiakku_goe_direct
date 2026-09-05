@@ -425,7 +425,7 @@ def surplus_decision(
     }
 
 
-def budget(available_w, min_amp, max_amp, eco_lot, volts, phase3_min_w, force_psm=None):
+def budget(available_w, min_amp, max_amp, group_lot, volts, phase3_min_w, force_psm=None):
     min_amp = int(min_amp)
     volts = int(volts)
     min_hold_w = min_amp * volts
@@ -442,7 +442,7 @@ def budget(available_w, min_amp, max_amp, eco_lot, volts, phase3_min_w, force_ps
     else:
         phases = 3 if target_w >= int(phase3_min_w) else 1
     psm = 2 if phases == 3 else 1
-    lot = min(int(eco_lot), max(min_amp, target_w // (volts * phases)))
+    lot = min(int(group_lot), max(min_amp, target_w // (volts * phases)))
     amp = min(int(max_amp), lot)
     return lot, psm, amp
 
@@ -476,7 +476,7 @@ def surplus_phase_budget(
     available_w,
     min_amp,
     max_amp,
-    eco_lot,
+    group_lot,
     volts,
     phase3_min_w,
     *,
@@ -491,14 +491,14 @@ def surplus_phase_budget(
     3→1: 3-phase min amp. Holding ``psm`` must not freeze amp.
     """
     _lot, wanted_psm, _wanted_amp = budget(
-        available_w, min_amp, max_amp, eco_lot, volts, phase3_min_w
+        available_w, min_amp, max_amp, group_lot, volts, phase3_min_w
     )
     hold = phase_hold_psm(wanted_psm, last_psm, hold_expired)
     lot, psm, amp = budget(
         available_w,
         min_amp,
         max_amp,
-        eco_lot,
+        group_lot,
         volts,
         phase3_min_w,
         force_psm=hold["psm"],
@@ -512,24 +512,24 @@ def surplus_phase_budget(
     }
 
 
-def group_lot_for_amps(group_lot, amps, eco_lot):
+def group_lot_for_amps(lot, amps, group_lot):
     """Raise leftover ``lot`` so a held 1-phase ``amp`` still fits.
 
     Equal leftover already shares one group ``lot``; do not sum identical
     amps or two 17 A cars would raise 12 kW leftover to 34 A. Differing
     amps (priority split or mixed 1-phase / 3-phase hold) still need the
-    sum so both caps fit, at most ``eco_lot``.
+    sum so both caps fit, at most ``group_lot``.
     """
-    group_lot = int(group_lot)
+    lot = int(lot)
     amps = [int(amp) for amp in amps]
     if not amps:
-        return group_lot
+        return lot
     if len(set(amps)) <= 1:
-        return min(int(eco_lot), max(group_lot, amps[0]))
-    return min(int(eco_lot), max(group_lot, sum(amps)))
+        return min(int(group_lot), max(lot, amps[0]))
+    return min(int(group_lot), max(lot, sum(amps)))
 
 
-def group_surplus_setpoint(lot, psm, amp, *, n_full, eco_lot):
+def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     """MQTT lot/psm/amp for surplus chargers in a load-balancing group.
 
     Pure surplus: leftover ``lot`` is the group total when every surplus
@@ -540,7 +540,7 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, eco_lot):
     not write ``lop``.
 
     Mixed (another charger is full-power): do not write leftover ``lot`` —
-    last writer would shrink the shared group. Keep ``lot`` at eco_lot
+    last writer would shrink the shared group. Keep ``lot`` at group_lot
     and keep leftover ``amp`` / ``psm`` as that charger's leftover cap.
     Combined demand may exceed the group; app priorities split it. Do not
     reserve current for the full-power charger by capping surplus ``amp``.
@@ -550,16 +550,16 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, eco_lot):
     amp = int(amp)
     if int(n_full) <= 0:
         return lot, psm, amp
-    return int(eco_lot), psm, amp
+    return int(group_lot), psm, amp
 
 
 def group_lot_for_allocations(
-    group_lot,
+    lot,
     allocations,
     *,
     min_amp,
     max_amp,
-    eco_lot,
+    group_lot,
     volts,
     phase3_min_w,
 ):
@@ -567,19 +567,19 @@ def group_lot_for_allocations(
 
     Differing shares (priority split / steal) use 1-phase and 3-phase
     ``amp`` together. Raise group ``lot`` to the sum of those amps so
-    load balancing can actually deliver both, still at most ``eco_lot``.
+    load balancing can actually deliver both, still at most ``group_lot``.
     """
-    group_lot = int(group_lot)
+    lot = int(lot)
     if not isinstance(allocations, dict) or len(allocations) < 2:
-        return group_lot
+        return lot
     watts_values = [max(int(watts_i), 0) for watts_i in allocations.values()]
     if len(set(watts_values)) <= 1:
-        return group_lot
+        return lot
     amp_sum = sum(
-        int(budget(watts_i, min_amp, max_amp, eco_lot, volts, phase3_min_w)[2])
+        int(budget(watts_i, min_amp, max_amp, group_lot, volts, phase3_min_w)[2])
         for watts_i in watts_values
     )
-    return min(int(eco_lot), max(group_lot, amp_sum))
+    return min(int(group_lot), max(lot, amp_sum))
 
 
 def parse_lop(state):
@@ -683,7 +683,7 @@ def surplus_want_w(
     volts=230,
     min_amp=6,
     max_amp=32,
-    eco_lot=50,
+    group_lot=50,
     phase3_min_w=4140,
 ):
     """Watts the car should be treated as wanting from leftover.
@@ -705,7 +705,7 @@ def surplus_want_w(
         return take_w
     take_w = min(take_w, leftover_w)
     _lot, offer_psm, offer_amp = budget(
-        leftover_w, min_amp, max_amp, eco_lot, volts, phase3_min_w
+        leftover_w, min_amp, max_amp, group_lot, volts, phase3_min_w
     )
     if last_amp is None or last_psm is None:
         return leftover_w

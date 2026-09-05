@@ -45,8 +45,8 @@ CONF_VOLTS = "volts"
 CONF_MIN_AMP = "min_amp"
 CONF_MAX_AMP = "max_amp"
 CONF_PHASE3_MIN_W = "phase3_min_w"
-CONF_ECO_PSM = "eco_psm"
-CONF_ECO_LOT = "eco_lot"
+CONF_GROUP_LOT = "group_lot"
+CONF_ECO_LOT = "eco_lot"  # legacy YAML / options alias for group_lot
 CONF_KOTIAKKU_IN_KW = "kotiakku_in_kw"
 CONF_CONTROLLER_IN_KW = "controller_in_kw"
 CONF_SOLAR_ENOUGH_KWH = "solar_enough_kwh"
@@ -64,8 +64,7 @@ DEFAULT_VOLTS = 230
 DEFAULT_MIN_AMP = 6
 DEFAULT_MAX_AMP = 32
 DEFAULT_PHASE3_MIN_W = 4140
-DEFAULT_ECO_PSM = 0
-DEFAULT_ECO_LOT = 50
+DEFAULT_GROUP_LOT = 50
 DEFAULT_MIN_HOURS = 2.0
 DEFAULT_MAX_HOURS = 5.0
 DEFAULT_CEILING = 0.2
@@ -116,8 +115,8 @@ EID_VOLTS = "number.kotiakku_goe_direct_voltage_v"
 EID_MIN_AMP = "number.kotiakku_goe_direct_min_a"
 EID_MAX_AMP = "number.kotiakku_goe_direct_max_a"
 EID_PHASE3_MIN_W = "number.kotiakku_goe_direct_phase3_min_w"
-EID_ECO_LOT = "number.kotiakku_goe_direct_eco_lot_a"
-EID_ECO_PSM = "select.kotiakku_goe_direct_eco_phase"
+EID_GROUP_LOT = "number.kotiakku_goe_direct_group_lot_a"
+GROUP_LOT_UNIQUE_ID = "kotiakku_goe_direct_group_lot_a"
 EID_SOLAR_ENOUGH_KWH = "number.kotiakku_goe_direct_solar_enough_kwh"
 EID_OFFSUN_HOUR_KWH = "number.kotiakku_goe_direct_offsun_hour_kwh"
 
@@ -135,8 +134,7 @@ SURPLUS_EIDS = (
     EID_MIN_AMP,
     EID_MAX_AMP,
     EID_PHASE3_MIN_W,
-    EID_ECO_LOT,
-    EID_ECO_PSM,
+    EID_GROUP_LOT,
     EID_SOLAR_ENOUGH_KWH,
     EID_OFFSUN_HOUR_KWH,
 )
@@ -288,11 +286,11 @@ SURPLUS_NUMBER_SPECS = (
         "icon": "mdi:numeric-3-circle-outline",
     },
     {
-        "entity_id": EID_ECO_LOT,
-        "unique_id": "kotiakku_goe_direct_eco_lot_a",
-        "name": "ECO lot",
-        "conf": CONF_ECO_LOT,
-        "default": DEFAULT_ECO_LOT,
+        "entity_id": EID_GROUP_LOT,
+        "unique_id": GROUP_LOT_UNIQUE_ID,
+        "name": "Group lot",
+        "conf": CONF_GROUP_LOT,
+        "default": DEFAULT_GROUP_LOT,
         "min": 6,
         "max": 64,
         "step": 1,
@@ -339,7 +337,7 @@ def psm_option(value):
 def psm_int(option):
     if option in PSM_TO_INT:
         return PSM_TO_INT[option]
-    return DEFAULT_ECO_PSM
+    return PSM_TO_INT[PSM_AUTO]
 
 
 # go-e forceState: Neutral=0 charges in Basic/default; Off=1 stops; On=2 starts.
@@ -353,15 +351,9 @@ def charger_on_mqtt(psm, lot, amp):
     return (("fup", "false"), ("psm", psm), ("lot", lot), ("amp", amp), ("frc", FRC_ON))
 
 
-def charger_off_mqtt(psm, lot, amp):
-    """Stop MQTT: force off first, then restore ECO amp/psm/lot."""
-    return (
-        ("frc", FRC_OFF),
-        ("fup", "false"),
-        ("psm", psm),
-        ("lot", lot),
-        ("amp", amp),
-    )
+def charger_off_mqtt():
+    """Stop MQTT: force off first. Neutral is not used."""
+    return (("frc", FRC_OFF), ("fup", "false"))
 
 
 def priority_entity_id(serial) -> str:
@@ -444,6 +436,20 @@ def migrate_window_entities(registry) -> None:
         _registry_remove(
             registry, "binary_sensor", f"kotiakku_goe_direct_{rank}_window_active"
         )
+
+
+_ECO_LOT_UID = "kotiakku_goe_direct_eco_lot_a"
+_ECO_PSM_UID = "kotiakku_goe_direct_eco_phase"
+
+
+def migrate_group_lot_entities(registry) -> None:
+    """Rename ECO lot to Group lot; delete the ECO phase select."""
+    renamed = _registry_rename(
+        registry, "number", _ECO_LOT_UID, GROUP_LOT_UNIQUE_ID, EID_GROUP_LOT
+    )
+    if not renamed:
+        _registry_remove(registry, "number", _ECO_LOT_UID)
+    _registry_remove(registry, "select", _ECO_PSM_UID)
 
 
 def default_charger_priority(slot) -> int:

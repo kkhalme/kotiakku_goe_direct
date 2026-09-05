@@ -268,8 +268,9 @@ def main():
         assert_eq(charger_full_power("unknown", result, 3500), False, "unknown policy")
         ov, seen = until_unplug_step(True, False, True)
         assert_eq((ov, seen), (False, False), "clears on unplug after seen")
-        off = const.charger_off_mqtt(0, 50, 32)
+        off = const.charger_off_mqtt()
         assert_eq(off[0], ("frc", "1"), "leaving a window publishes force off, not Neutral")
+        assert_eq(off, (("frc", "1"), ("fup", "false")), "idle MQTT is force off only")
         assert_true(("frc", "0") not in off, "Neutral would keep charging in Basic/default")
 
     def test_plan_result_is_a_window_list():

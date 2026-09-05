@@ -3,18 +3,12 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .config import entry_config
 from .const import (
-    CONF_ECO_PSM,
-    DEFAULT_ECO_PSM,
     DOMAIN,
-    EID_ECO_PSM,
     POLICIES,
     POLICY_FORCE_OFF,
     POLICY_UNTIL_UNPLUG,
     restore_policy,
-    PSM_OPTIONS,
-    psm_option,
 )
 from .device import hub_device_info
 
@@ -22,7 +16,6 @@ from .device import hub_device_info
 async def async_setup_entry(hass, entry, async_add_entities):
     controller = hass.data[DOMAIN][entry.entry_id]
     entities = [PolicySelect(controller, serial) for serial in controller.chargers]
-    entities.append(EcoPsmSelect(controller, entry))
     async_add_entities(entities)
 
 
@@ -84,20 +77,3 @@ class PolicySelect(_HubSelect):
     async def _on_changed(self):
         await self._controller.async_charge()
         self._controller._schedule_surplus()
-
-
-class EcoPsmSelect(_HubSelect):
-    def __init__(self, controller, entry):
-        cfg = entry_config(entry)
-        super().__init__(
-            controller,
-            options=PSM_OPTIONS,
-            default=psm_option(cfg.get(CONF_ECO_PSM, DEFAULT_ECO_PSM)),
-            entity_id=EID_ECO_PSM,
-            unique_id="kotiakku_goe_direct_eco_phase",
-            name="ECO phase",
-            icon="mdi:sine-wave",
-        )
-
-    async def _on_changed(self):
-        await self._controller.async_knobs_changed()
