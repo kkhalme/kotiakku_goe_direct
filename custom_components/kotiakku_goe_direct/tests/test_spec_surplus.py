@@ -375,7 +375,15 @@ def main():
         assert_eq(surplus.energy_kwh("4000", "W"), None, "power is not energy")
         result = {"raw_windows": [{"start": 3000, "end": 4000}]}
         full = planner.charger_full_power
+        leftover = planner.charger_surplus
         assert_eq(full("SolarPriority", result, 3500, enough_solar=True), False, "skip 22 kW")
+        assert_eq(leftover("Force off", result, 3500), False, "Force off never leftover")
+        assert_eq(leftover("Force off", result, 0), False, "Force off never leftover outside a window")
+        assert_eq(
+            leftover("SolarPriority", result, 3500, enough_solar=True),
+            True,
+            "enough solar leaves SolarPriority leftover",
+        )
         assert_eq(full("Supercheap", result, 3500), True, "legacy Supercheap maps")
         assert_eq(full("Cheapest", result, 3500, enough_solar=True), False, "legacy Cheapest now skips")
         assert_eq(surplus.enough_solar(39.9, 40), False, "just under threshold")

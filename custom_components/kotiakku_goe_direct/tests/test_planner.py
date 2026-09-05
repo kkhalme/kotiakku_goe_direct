@@ -318,6 +318,21 @@ def main():
         result = {"raw_windows": [{"start": 1000, "end": 2000}]}
         assert_eq(full("Force off", result, 1500), False, "force off")
         assert_eq(
+            planner.charger_surplus("Force off", result, 1500),
+            False,
+            "Force off never leftover",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarPriority", result, 0),
+            True,
+            "SolarPriority leftover outside a window",
+        )
+        assert_eq(
+            planner.charger_surplus("Force off", result, 1500, until_unplug=True),
+            False,
+            "until unplug is full-power, not leftover",
+        )
+        assert_eq(
             full("Force off", result, 1500, until_unplug=True),
             True,
             "until unplug overrides Force off",

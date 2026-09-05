@@ -520,6 +520,23 @@ def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unpl
     return now_in_windows(windows, now_ts)
 
 
+def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
+    """Whether leftover surplus may write this charger.
+
+    Force off never charges. Full-power (Force on, until-unplug, or a
+    SolarPriority window) is skipped so surplus does not shrink group lot.
+    """
+    if charger_full_power(
+        policy,
+        result,
+        now_ts,
+        enough_solar=enough_solar,
+        until_unplug=until_unplug,
+    ):
+        return False
+    return restore_policy(policy) == POLICY_SOLAR_PRIORITY
+
+
 def _empty_result(
     min_hours,
     max_hours,

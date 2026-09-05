@@ -47,11 +47,11 @@ Unknown SoC, solar, or house → treat as a blocked window. Decisions wait `sett
 
 The official Controller API has no combined-power key. Combined current is the charger key **`lot`**. **Who actually charges** is go-e load balancing (app `lop` still applies to the 50 A group). **Which surplus charger is offered leftover watts** is the HA leftover priority on each charger (`number.kotiakku_goe_direct_priority_<serial>`; 1 is highest, 99 is lowest). HA does not write `lop`, `loe`, or `loty`. It does not read MQTT `lop`.
 
-A single charger always gets the leftover. When every listed charger is surplus **and HA leftover priorities are equal**, the same leftover `lot` / `psm` / `amp` / `frc` is written to all of them. That leftover `lot` is the group total. go-e load balancing splits it.
+Leftover MQTT is **SolarPriority** only. **Force off** never charges (`frc=1`), including leftover. A single SolarPriority charger always gets the leftover. When every listed SolarPriority charger is surplus **and HA leftover priorities are equal**, the same leftover `lot` / `psm` / `amp` / `frc` is written to all of them. That leftover `lot` is the group total. go-e load balancing splits it.
 
 If HA leftover priorities **differ**, the higher-priority plugged surplus charger is offered what it is taking. Unplugged or finished chargers are skipped: the next plugged car gets leftover as the first, not a 3 kW steal. Unused leftover above 500 W (`number.kotiakku_goe_direct_remainder_floor_w`) goes to the next car. If that remainder is **below 3 kW** (`number.kotiakku_goe_direct_next_surplus_min_w`), HA cuts the high-priority share so the next car still gets 3 kW — only if leftover itself is at least **6 kW** (3 kW per car), the first is actually taking power, and both shares still meet 6 A. Example: leftover 12 kW, high taking 10 kW → **9 kW + 3 kW**. Leftover 6 kW → **3 kW + 3 kW**. Leftover 4.5 kW → no steal (would be 1.5+3). Remainder at or below 500 W is a dead zone: do not *start* the next car. If the next car was already on and leftover then shrinks so the first would use it all, keep that 3 kW steal for the same 15 min hold (`number.kotiakku_goe_direct_hold_minutes`) while leftover stays at least 6 kW, then drop it. Group `lot` starts from the **total** leftover and is raised if needed so both per-charger `amp` caps fit (still at most group lot 50). Each charger’s `psm` / `amp` comes from **its** allocation. HA reads per-charger `nrg` (MQTT or `sensor.go_echarger_<serial>_nrg`) and never writes `lop`. Slot defaults are charger 1 → 1, charger 2 → 2, and so on (charger 1 highest). Set equal numbers to share leftover the way load balancing does.
 
-When one charger is full-power (`lot` 50 / `amp` 32), surplus does **not** write a smaller leftover `lot` to the other charger — last writer would shrink the group to leftover amps and both cars would be stuck at that cap, so app priorities could not give 32 A to the cheap-hour session. Surplus keeps group `lot` at 50 and sets leftover `amp` / `psm` / `frc` on the surplus charger only. That leftover `amp` is the surplus energy cap, not an HA ranking. Combined demand may exceed 50 A (`32` + leftover `amp`); **app priorities then split the 50 A group.** HA does not reserve 32 A for the cheap-hour charger by capping surplus `amp`.
+When one charger is full-power (`lot` 50 / `amp` 32), surplus does **not** write a smaller leftover `lot` to another SolarPriority charger — last writer would shrink the group to leftover amps and both cars would be stuck at that cap, so app priorities could not give 32 A to the cheap-hour session. Surplus keeps group `lot` at 50 and sets leftover `amp` / `psm` / `frc` on the surplus charger only. That leftover `amp` is the surplus energy cap, not an HA ranking. Combined demand may exceed 50 A (`32` + leftover `amp`); **app priorities then split the 50 A group.** HA does not reserve 32 A for the cheap-hour charger by capping surplus `amp`.
 
 `amp` cannot be 0 (official range 6–32). Stopping surplus-style or full-power charging is **`frc=1`** (force off), not `amp=0` and not **`frc=0`** (Neutral). In Basic/default charging mode Neutral keeps charging (`ChargingBecauseFallbackDefault`). Cheap-hour and surplus start still use **`frc=2`**. `amp`/`psm` alone do not start a session.
 
@@ -127,7 +127,7 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 ### After it is installed
 
-Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
+Policy pickers start at **Force off**. That charger does not charge until you pick SolarPriority or Force on (or turn on until-unplug).
 
 On load — and again when Home Assistant has finished starting — the integration asks every wired sensor (Kotiakku, Forecast.Solar, Nordpool, charger car/power) to update before it plans, so restored leftover values are not used.
 
@@ -187,11 +187,11 @@ Per charger, `select.kotiakku_goe_direct_policy_<serial>`:
 
 - **SolarPriority** — one cheap window on the hours that have both spot prices and solar forecast (prices-only if forecast is missing). High-solar hours (≥ `number.kotiakku_goe_direct_offsun_hour_kwh`, default **1 kWh**, elevation-weighted from local midnight) are dropped. The search takes the cheapest `window min` seed, then grows toward the cheaper neighbor while the average stays under flex (20% **or** 0.02 €/kWh, whichever is looser) and at most `window max`. Clock ticks do not move that window: a cheapest stretch that has already ended stays the plan (visible in the past) and is not used for 22 kW. No 22 kW when **today's** full-day solar is at least `number.kotiakku_goe_direct_solar_enough_kwh` (default **40 kWh**) until local sunset; after sunset the same knob gates on **tomorrow**. Cloudy tomorrow allows night 22 kW. Surplus can still write that charger. A previous Cheapest / Supercheap / Longest / Earliest select is restored as SolarPriority.
 - **Force on** — that charger full power now
-- **Force off** — leftover surplus only
+- **Force off** — never charges (`frc=1`)
 
 `switch.kotiakku_goe_direct_until_unplug_<serial>` is a one-shot override, not a policy. Turn it on to force that charger to 22 kW regardless of the select. It stays on through charging and a full battery (go-e Complete). It turns itself off when **that** car **unplugs**. The policy select is unchanged, so SolarPriority / Force off / … continues afterwards. Turn the switch off to cancel. Surplus skips that serial while the switch is on. A previous install that had **Force on until unplug** selected is migrated onto this switch and the stored previous policy.
 
-While a charger’s full-power policy **or until-unplug switch** is on, surplus skips **that** serial only. Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
+Leftover surplus writes **SolarPriority** chargers only. Surplus skips **Force off**, and also skips a charger that is already full-power (**Force on**, a SolarPriority window, or until-unplug). Spot-price windows and force-on do **not** read Kotiakku SoC / solar / house. Gridle going unknown only affects leftover surplus. HA still does not write app charger priorities (`lop`).
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`), clipped to days that also have solar kWh when any forecast exists. The search finds the cheapest contiguous min-hours seed (ceiling is ignored while scoring), aborts if that seed’s average is above the ceiling (default **0.2**), then grows by one native slot at a time. Flex is the looser of percent-of-|seed| and a fixed €/kWh. Max hours is a cap, not a target. Off-sun hours still split islands; only one window is filled. The window is a function of prices, solar clip, the off-sun mask, and knobs — not of the clock — so 15-minute ticks do not slide it. Tomorrow’s curve typically appears sometime after 14:00 local and is a new environment (the plan may jump). Helsinki midnight may change the window when Nordpool `raw_today` and the calendar day roll. The plan also replans when today’s or tomorrow’s kWh, flex, or the Off-sun hour knob change.
 
@@ -199,7 +199,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 
 | Entity | Default | Role |
 | --- | --- | --- |
-| `select.kotiakku_goe_direct_policy_<serial>` | Force off | SolarPriority / Force on / Force off |
+| `select.kotiakku_goe_direct_policy_<serial>` | Force off | SolarPriority / Force on / Force off. Force off never charges |
 | `switch.kotiakku_goe_direct_until_unplug_<serial>` | off | 22 kW until that car unplugs. Stays on at a full battery (Complete). Does not change the policy select |
 | `number.kotiakku_goe_direct_window_min_h` / `kotiakku_goe_direct_window_max_h` | 2–5 h | Seed length and grow cap. Equal min/max is a fixed-length window. Min 0.25 h is one 15-minute slot |
 | `number.kotiakku_goe_direct_window_flex_pct` / `kotiakku_goe_direct_window_flex_eur` | 20 / 0.02 | Grow may raise the window average by the looser of these above the seed. Both 0: no grow |
@@ -233,9 +233,9 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 
 | Expect | What you should see |
 | --- | --- |
-| SoC ≥ 92% and leftover ≥ 2000 W, both policies Force off, **equal** HA leftover priority | Same leftover `lot`/`psm`/`amp`/`frc` on both chargers. go-e shares |
-| Only charger 1 configured | Leftover MQTT on that charger only. No second-car steal |
-| SoC ≥ 92% and leftover 8 kW, **unequal** HA leftover priority, high at 6 A 3-phase | High is offered leftover (11 A), not locked at 6 A. Second car waits until high leaves unused leftover |
+| SoC ≥ 92% and leftover ≥ 2000 W, both policies Force off, **equal** HA leftover priority | No leftover MQTT. Both chargers stay `frc` 1 |
+| Only charger 1 configured, SolarPriority | Leftover MQTT on that charger only. No second-car steal |
+| SoC ≥ 92% and leftover 8 kW, **SolarPriority**, **unequal** HA leftover priority, high at 6 A 3-phase | High is offered leftover (11 A), not locked at 6 A. Second car waits until high leaves unused leftover |
 | SoC ≥ 92% and leftover 12 kW, high taking 10 kW | **9 kW + 3 kW**. Remainder 2 kW is above 500 W, so steal up to the 3 kW floor |
 | Leftover 6 kW, high taking it all, second car already on | **3 kW + 3 kW**. Minimum split; grace still holds |
 | Leftover 4.5 kW, high taking it all, second car already on | No steal (would be 1.5+3). High keeps 4.5 kW; drop the second car |
@@ -249,15 +249,15 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Surplus on 3-phase, leftover drops to 3 kW | Stay `psm` 2, `amp` 6 for 15 min, then `psm` 1 / 13 A |
 | SoC 90–91% during a session | Keep tracking leftover. Not a hold, not a stop |
 | SoC &lt; 90% | Same 6 A low hold as leftover &lt; 1000 W. Not an immediate cut; `frc=1` only after the hold expires |
-| Kotiakku SoC / solar / house unknown or unusable | Warning in the log; same 6 A low hold on **Force off** chargers. Stop surplus only if still unusable after 15 min |
-| SolarPriority + window binary on, gating day's solar under 40 kWh | **That** charger `psm` 2, `amp` 32, `lot` 50, `frc` 2 even if Kotiakku is unknown. Surplus skips **that** serial only; it does not lower group `lot`. Leftover `amp` on the other charger is not cut to leave 32 A; app `lop` splits the 50 A group |
+| Kotiakku SoC / solar / house unknown or unusable | Warning in the log; same 6 A low hold on **SolarPriority** surplus chargers. Stop surplus only if still unusable after 15 min |
+| SolarPriority + window binary on, gating day's solar under 40 kWh | **That** charger `psm` 2, `amp` 32, `lot` 50, `frc` 2 even if Kotiakku is unknown. Surplus skips **that** serial only; it does not lower group `lot`. Leftover `amp` on another **SolarPriority** charger is not cut to leave 32 A; app `lop` splits the 50 A group |
 | SolarPriority, window on, today's kWh ≥ 40 kWh before sunset | No full-power (wait for today's PV). Surplus may still write that charger. `binary_sensor.kotiakku_goe_direct_solar_enough` on |
 | SolarPriority, after sunset, tomorrow ≥ 40 kWh | No night 22 kW. Surplus may still write that charger |
 | SolarPriority, after sunset, today 80 kWh and tomorrow 10 kWh | Night cheap hours **are** 22 kW (day2 is not enough) |
 | SolarPriority, hour with ≥ 1 kWh expected solar | Dropped from the window search; no SolarPriority 22 kW in that hour |
 | SolarPriority, today 8 kWh and tomorrow 6 kWh | Night cheap hours still 22 kW (hours under 1 kWh stay searchable) |
 | SolarPriority, forecast unknown or unset | Search all available spot slots (nothing excluded, not enough solar) |
-| Force off during a price window | That charger’s full-power binary stays off; surplus may still write that charger |
+| Force off during a price window | That charger stays off (`frc` 1). Surplus does not write that charger |
 | Until-unplug switch on | That charger 22 kW until **its** car unplugs. Full battery (Complete) keeps it on. Policy select stays put |
 
 ## 7. Graphs

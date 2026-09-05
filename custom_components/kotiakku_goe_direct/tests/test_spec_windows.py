@@ -22,6 +22,7 @@ pick_windows = planner.pick_windows
 find_seed = planner.find_seed
 flex_headroom = planner.flex_headroom
 charger_full_power = planner.charger_full_power
+charger_surplus = planner.charger_surplus
 until_unplug_step = planner.until_unplug_step
 
 
@@ -239,6 +240,29 @@ def main():
         assert_eq(charger_full_power("Supercheap", result, 3500), True, "legacy Supercheap maps")
         assert_eq(charger_full_power("Cheapest", result, 3500), True, "legacy Cheapest maps")
         assert_eq(charger_full_power("Force off", result, 3500), False, "force off")
+        assert_eq(charger_surplus("Force off", result, 3500), False, "Force off never surplus")
+        assert_eq(charger_surplus("Force off", result, 0), False, "Force off never leftover either")
+        assert_eq(
+            charger_surplus("SolarPriority", result, 3500),
+            False,
+            "in-window SolarPriority is full-power, not surplus",
+        )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 0),
+            True,
+            "SolarPriority outside a window may take leftover",
+        )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 3500, enough_solar=True),
+            True,
+            "enough solar skips 22 kW and leaves leftover",
+        )
+        assert_eq(charger_surplus("Force on", result, 0), False, "Force on is not surplus")
+        assert_eq(
+            charger_surplus("Force off", result, 0, until_unplug=True),
+            False,
+            "until-unplug is full-power, not surplus",
+        )
         assert_eq(charger_full_power("Force on", result, 0), True, "force on")
         assert_eq(
             charger_full_power("SolarPriority", result, 0, until_unplug=True),

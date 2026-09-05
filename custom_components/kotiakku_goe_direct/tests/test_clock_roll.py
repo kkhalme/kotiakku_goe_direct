@@ -30,6 +30,7 @@ surplus = load_mod("surplus", "_clock")
 const = load_mod("const", "_clock")
 now_in_windows = planner.now_in_windows
 charger_full_power = planner.charger_full_power
+charger_surplus = planner.charger_surplus
 until_unplug_step = planner.until_unplug_step
 SLOT = planner.SLOT_SECONDS
 POLICY_SOLAR_PRIORITY = const.POLICY_SOLAR_PRIORITY
@@ -109,9 +110,24 @@ def main():
                 "Force off never full power",
             )
             assert_eq(
+                charger_surplus(POLICY_FORCE_OFF, result, ts),
+                False,
+                "Force off never leftover",
+            )
+            assert_eq(
+                charger_surplus(POLICY_SOLAR_PRIORITY, result, ts),
+                not full,
+                "SolarPriority leftover outside the window",
+            )
+            assert_eq(
                 charger_full_power(POLICY_FORCE_ON, result, ts),
                 True,
                 "Force on always full power",
+            )
+            assert_eq(
+                charger_surplus(POLICY_FORCE_ON, result, ts),
+                False,
+                "Force on is not leftover",
             )
 
         in_first = now_in_windows(result["raw_windows"], base + 60)
@@ -263,7 +279,12 @@ def main():
         assert_eq(
             charger_full_power(POLICY_FORCE_OFF, result, midday),
             False,
-            "Force off stays surplus-only",
+            "Force off never full power",
+        )
+        assert_eq(
+            charger_surplus(POLICY_FORCE_OFF, result, midday),
+            False,
+            "Force off never leftover",
         )
         assert_eq(
             charger_full_power(POLICY_FORCE_ON, result, midday),

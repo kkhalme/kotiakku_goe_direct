@@ -87,6 +87,7 @@ from .const import (
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import (
     charger_full_power as policy_full_power,
+    charger_surplus as policy_surplus,
     now_in_windows,
     plan,
     until_unplug_step,
@@ -348,6 +349,15 @@ class KotiakkuGoeDirectController:
 
     def charger_full_power(self, serial):
         return policy_full_power(
+            self.policy(serial),
+            self.window_result,
+            self._now_ts(),
+            enough_solar=self.enough_solar,
+            until_unplug=self.until_unplug(serial),
+        )
+
+    def surplus_allowed(self, serial):
+        return policy_surplus(
             self.policy(serial),
             self.window_result,
             self._now_ts(),
@@ -896,6 +906,10 @@ class KotiakkuGoeDirectController:
                 await self._stop_surplus()
             return
         if dec["write_on"]:
+            surplus = [serial for serial in self.chargers if self.surplus_allowed(serial)]
+            if not surplus:
+                await self._stop_surplus()
+                return
             target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
             lot, psm, amp = budget(
                 target_w,
@@ -915,7 +929,10 @@ class KotiakkuGoeDirectController:
             )
             self.session = True
             await self._save()
-            surplus = [serial for serial in self.chargers if not self.charger_full_power(serial)]
+            for serial in self.chargers:
+                if serial in surplus or self.charger_full_power(serial):
+                    continue
+                await self._publish_off(serial)
             lops = {serial: self.charger_priority(serial) for serial in surplus}
             plugged = {}
             states = {}
@@ -1036,16 +1053,23 @@ class KotiakkuGoeDirectController:
                 until_unplug=new_on,
             )
             want_off = self._charge_session.get(serial) and not want_on
+            force_idle = (
+                self.policy(serial) == POLICY_FORCE_OFF and not new_on and not want_on
+            )
             if want_on:
                 if not self._charge_session.get(serial):
                     changed = True
                 self._charge_session[serial] = True
                 self._arm_phase(serial, False)
                 await self._publish_on(serial, 2, self.group_lot, self.max_amp)
-            elif want_off:
+            elif force_idle or want_off:
+                was_charging = bool(
+                    self._charge_session.get(serial) or serial in self._surplus_amp
+                )
                 await self._publish_off(serial)
                 self._charge_session[serial] = False
-                changed = True
+                if was_charging:
+                    changed = True
             self._last_policy[serial] = self.policy(serial)
         if changed:
             await self._save()
