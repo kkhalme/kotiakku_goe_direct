@@ -462,7 +462,7 @@ def main():
         assert_eq(
             alloc([A, B], leftover_w=300, **both),
             {},
-            "300 W + two unequal plugged cars: first cannot meet 6 A, no MQTT",
+            "300 W raw leftover + two unequal plugged cars: allocator offers nobody (below 6 A)",
         )
         assert_eq(
             alloc([A], leftover_w=300, **both),
@@ -527,6 +527,14 @@ def main():
         )
 
     def test_mqtt_start_floor_and_steal_amps():
+        hold, hold_cmds = mqtt_for(300, True, serials=[A, B])
+        assert_true(hold["write_on"] and hold["use_floor_budget"], "300 W session is the 6 A hold")
+        assert_eq(hold_cmds[A]["amp"], 6, "high car still gets the 6 A floor MQTT")
+        assert_eq(hold_cmds[A]["psm"], 1, "6 A floor is 1-phase")
+        assert_true(B not in hold_cmds, "low car is not offered leftover during the floor")
+        idle, idle_cmds = mqtt_for(300, False, serials=[A, B])
+        assert_true(not idle["write_on"], "300 W does not start a new session")
+        assert_eq(idle_cmds, {}, "no leftover on publish when still idle")
         dec, cmds = mqtt_for(2000, False, serials=[A], plugged={A: True})
         assert_true(dec["write_on"] and not dec["use_floor_budget"], "start at 2000 W tracks leftover")
         assert_eq(cmds[A]["amp"], 8, "2000 W publishes 8 A, not the 6 A floor")
