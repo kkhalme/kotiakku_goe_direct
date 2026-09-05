@@ -257,6 +257,31 @@ def main():
             True,
             "enough solar skips 22 kW and leaves leftover",
         )
+        assert_eq(
+            charger_full_power("SolarAndGrid", result, 3500),
+            True,
+            "SolarAndGrid in window",
+        )
+        assert_eq(
+            charger_full_power("SolarAndGrid", result, 3500, enough_solar=True),
+            True,
+            "SolarAndGrid still 22 kW when enough solar",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 3500, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is full-power, not leftover",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
+        assert_eq(
+            charger_surplus("SolarAndGrid", result, 0, enough_solar=True),
+            True,
+            "SolarAndGrid leftover outside a window even if enough solar",
+        )
         assert_eq(charger_surplus("Force on", result, 0), False, "Force on is not surplus")
         assert_eq(
             charger_surplus("Force off", result, 0, until_unplug=True),

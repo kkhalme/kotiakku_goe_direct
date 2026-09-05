@@ -30,7 +30,9 @@ DEFAULT_FLEX_PCT = 20.0
 DEFAULT_FLEX_EUR = 0.02
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
+POLICY_SOLAR_AND_GRID = "SolarAndGrid"
 POLICY_FORCE_ON = "Force on"
+_WINDOW_SURPLUS_POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID)
 _LEGACY_POLICIES = {
     "Cheapest": POLICY_SOLAR_PRIORITY,
     "Supercheap": POLICY_SOLAR_PRIORITY,
@@ -510,21 +512,25 @@ def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unpl
     policy = restore_policy(policy)
     if policy == POLICY_FORCE_ON:
         return True
+    windows = []
+    if isinstance(result, dict):
+        windows = result.get("raw_windows") or []
+    in_window = now_in_windows(windows, now_ts)
+    if policy == POLICY_SOLAR_AND_GRID:
+        return in_window
     if policy != POLICY_SOLAR_PRIORITY:
         return False
     if enough_solar:
         return False
-    windows = []
-    if isinstance(result, dict):
-        windows = result.get("raw_windows") or []
-    return now_in_windows(windows, now_ts)
+    return in_window
 
 
 def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
     """Whether leftover surplus may write this charger.
 
     Force off never charges. Full-power (Force on, until-unplug, or a
-    SolarPriority window) is skipped so surplus does not shrink group lot.
+    cheap window) is skipped so surplus does not shrink group lot.
+    SolarPriority and SolarAndGrid take leftover when not full-power.
     """
     if charger_full_power(
         policy,
@@ -534,7 +540,7 @@ def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=
         until_unplug=until_unplug,
     ):
         return False
-    return restore_policy(policy) == POLICY_SOLAR_PRIORITY
+    return restore_policy(policy) in _WINDOW_SURPLUS_POLICIES
 
 
 def _empty_result(

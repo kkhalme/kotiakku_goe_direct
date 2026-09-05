@@ -364,6 +364,7 @@ views:
                   const serial = entity.entity_id.split('_').pop();
                   const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
                   const solar = ['SolarPriority', 'Cheapest', 'Supercheap', 'Longest', 'Earliest'].indexOf(policy) >= 0;
+                  const solarAndGrid = policy === 'SolarAndGrid';
                   const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
                   const force = policy === 'Force on' || until;
                   const windows = windowsFrom(((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {});
@@ -378,6 +379,7 @@ views:
                     let on = 0;
                     if (!live) on = 0;
                     else if (force) on = full;
+                    else if (solarAndGrid && inWin(windows, t)) on = full;
                     else if (solar && !enoughAt(t) && inWin(windows, t)) on = full;
                     pts.push([t, on]);
                   }

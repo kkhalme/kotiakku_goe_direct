@@ -328,6 +328,21 @@ def main():
             "SolarPriority leftover outside a window",
         )
         assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
+        assert_eq(
+            full("SolarAndGrid", result, 1500, enough_solar=True),
+            True,
+            "SolarAndGrid 22 kW ignores enough solar",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 1500, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is not leftover",
+        )
+        assert_eq(
             planner.charger_surplus("Force off", result, 1500, until_unplug=True),
             False,
             "until unplug is full-power, not leftover",
@@ -515,6 +530,16 @@ def main():
         )
         assert_eq(full("Force off", result, 3500), False, "force off")
         assert_eq(full("Force on", result, 0, enough_solar=True), True, "Force on ignores enough solar")
+        assert_eq(
+            full("SolarAndGrid", result, 3500, enough_solar=True),
+            True,
+            "SolarAndGrid ignores enough solar",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
         assert_eq(full("Longest", result, 3500, enough_solar=True), False, "legacy Longest skips")
         assert_eq(full("SolarPriority", {}, 3500), False, "empty result")
         assert_eq(full("SolarPriority", None, 0), False, "missing result")

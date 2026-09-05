@@ -42,6 +42,7 @@ now_in_windows = planner.now_in_windows
 SOLAR_ENOUGH_KWH = const.DEFAULT_SOLAR_ENOUGH_KWH
 OFFSUN_HOUR_KWH = const.DEFAULT_OFFSUN_HOUR_KWH
 POLICY_SOLAR_PRIORITY = const.POLICY_SOLAR_PRIORITY
+POLICY_SOLAR_AND_GRID = const.POLICY_SOLAR_AND_GRID
 POLICY_FORCE_ON = const.POLICY_FORCE_ON
 POLICY_FORCE_OFF = const.POLICY_FORCE_OFF
 
@@ -1227,6 +1228,29 @@ def main():
             assert_eq(t["a"]["amp"], 32, "A full power @ %s" % t["now"])
             assert_true(t["b"]["amp"], "B leftover beside full-power A @ %s" % t["now"])
 
+    def test_solarandgrid_midsummer_still_22kw():
+        sim = sim_from_spec("midsummer-clear", policy=POLICY_SOLAR_AND_GRID)
+        summary(sim)
+        assert_true(
+            hours_where(sim["ticks"], lambda t: t["enough"]) > 0,
+            "midsummer enough solar",
+        )
+        full = [t for t in sim["ticks"] if t["cheap_full"]]
+        assert_true(full, "SolarAndGrid 22 kW despite enough solar")
+        for t in full:
+            assert_true(t["enough"], "22 kW during enough solar @ %s" % t["now"])
+            assert_eq(t["cheap_window"], True, "22 kW is in the window @ %s" % t["now"])
+            assert_eq(t["a"]["amp"], 32, "A 22 kW @ %s" % t["now"])
+        leftover = [
+            t
+            for t in sim["ticks"]
+            if t["write_on"] and not t["cheap_full"] and t["leftover"] >= 6 * 230
+        ]
+        assert_true(leftover, "SolarAndGrid leftover outside the window")
+        for t in leftover:
+            assert_true(t["a"]["amp"], "A leftover @ %s" % t["now"])
+            assert_eq(t["b"]["w"], 0, "Force off B still off @ %s" % t["now"])
+
     case("helsinki_sun_sanity", test_helsinki_sun_sanity)
     case("midwinter_clear_48h", test_midwinter_clear_48h)
     case("midwinter_overcast_48h", test_midwinter_overcast_48h)
@@ -1238,6 +1262,7 @@ def main():
     case("dst_spring_forward_48h", test_dst_spring_forward_48h)
     case("dst_autumn_48h", test_dst_autumn_48h)
     case("leftover_priority_and_optional_charger", test_leftover_priority_and_optional_charger)
+    case("solarandgrid_midsummer_still_22kw", test_solarandgrid_midsummer_still_22kw)
 
     run()
 

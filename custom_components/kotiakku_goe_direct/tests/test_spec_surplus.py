@@ -384,6 +384,21 @@ def main():
             True,
             "enough solar leaves SolarPriority leftover",
         )
+        assert_eq(
+            full("SolarAndGrid", result, 3500, enough_solar=True),
+            True,
+            "SolarAndGrid still 22 kW when enough solar",
+        )
+        assert_eq(
+            leftover("SolarAndGrid", result, 3500, enough_solar=True),
+            False,
+            "SolarAndGrid in-window is not leftover",
+        )
+        assert_eq(
+            leftover("SolarAndGrid", result, 0),
+            True,
+            "SolarAndGrid leftover outside a window",
+        )
         assert_eq(full("Supercheap", result, 3500), True, "legacy Supercheap maps")
         assert_eq(full("Cheapest", result, 3500, enough_solar=True), False, "legacy Cheapest now skips")
         assert_eq(surplus.enough_solar(39.9, 40), False, "just under threshold")

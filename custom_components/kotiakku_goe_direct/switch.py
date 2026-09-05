@@ -27,7 +27,7 @@ class UntilUnplugSwitch(SwitchEntity, RestoreEntity):
         self._attr_is_on = False
         self.entity_id = until_unplug_entity_id(serial)
         self._attr_unique_id = f"kotiakku_goe_direct_until_unplug_{serial}"
-        self._attr_name = f"{serial} until unplug"
+        self._attr_name = f"{serial} Force On Until Unplug"
         self._attr_device_info = hub_device_info()
 
     async def async_added_to_hass(self):

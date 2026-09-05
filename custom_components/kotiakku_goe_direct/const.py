@@ -1,11 +1,13 @@
 DOMAIN = "kotiakku_goe_direct"
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
+POLICY_SOLAR_AND_GRID = "SolarAndGrid"
 POLICY_FORCE_ON = "Force on"
 POLICY_FORCE_OFF = "Force off"
 POLICY_UNTIL_UNPLUG = "Force on until unplug"  # legacy select option; now a switch
 POLICIES = (
     POLICY_SOLAR_PRIORITY,
+    POLICY_SOLAR_AND_GRID,
     POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
 )
