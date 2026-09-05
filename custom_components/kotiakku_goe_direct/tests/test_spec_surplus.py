@@ -482,19 +482,43 @@ def main():
         )
         assert_eq(
             alloc(
+                [A, B], leftover_w=5000,
+                take_w={A: 4000, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 4000},
+            "leftover 5 kW is under 6 kW: remainder is not a steal",
+        )
+        assert_eq(
+            alloc(
                 [A, B], leftover_w=4000, split_hold=True,
                 take_w={A: 3900, B: 0}, states={A: "Charging", B: "Charging"}, **both,
             ),
             {A: 3900},
-            "steal would leave high at 1000 W < 6 A: no steal",
+            "steal would leave high under 3 kW: no steal",
         )
         assert_eq(
             alloc(
                 [A, B], leftover_w=4500, split_hold=True,
                 take_w={A: 4400, B: 0}, states={A: "Charging", B: "Charging"}, **both,
             ),
-            {A: 1500, B: 3000},
-            "steal that still leaves 6 A 1-phase on high: 1.5+3",
+            {A: 4400},
+            "1.5+3 is not a legal split; leftover 4.5 kW keeps high only",
+        )
+        assert_eq(
+            alloc(
+                [A, B], leftover_w=5999, split_hold=True,
+                take_w={A: 5900, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 5900},
+            "1 W under 6 kW leftover: still no steal",
+        )
+        assert_eq(
+            alloc(
+                [A, B], leftover_w=6000, split_hold=True,
+                take_w={A: 5900, B: 0}, states={A: "Charging", B: "Charging"}, **both,
+            ),
+            {A: 3000, B: 3000},
+            "6 kW leftover is the 3+3 minimum split",
         )
         assert_eq(
             alloc(

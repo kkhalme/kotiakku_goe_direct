@@ -806,6 +806,35 @@ def main():
         assert_eq(
             alloc(
                 [a, b],
+                leftover_w=6000,
+                lops=lops,
+                plugged=plugged,
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 5499, b: 0},
+                states={a: "Charging", b: "Charging"},
+            ),
+            {a: 3000, b: 3000},
+            "6 kW leftover is the 3+3 minimum split",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
+                leftover_w=4500,
+                lops=lops,
+                plugged=plugged,
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 4400, b: 0},
+                states={a: "Charging", b: "Charging"},
+                split_hold=True,
+            ),
+            {a: 4400},
+            "4.5 kW leftover would be 1.5+3: no steal even during grace",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
                 leftover_w=8000,
                 lops=lops,
                 plugged=plugged,

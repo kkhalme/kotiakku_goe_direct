@@ -387,13 +387,22 @@ def main():
         assert_eq(dropped, {a: 10000}, "drop the second car after 15 min")
         too_small = alloc(
             [a, b],
-            leftover_w=4000,
-            take_w={a: 3900, b: 0},
+            leftover_w=4500,
+            take_w={a: 4400, b: 0},
             states={a: "Charging", b: "Charging"},
             split_hold=True,
             **kwargs,
         )
-        assert_eq(too_small, {a: 3900}, "grace does not steal if high would drop below 6 A")
+        assert_eq(too_small, {a: 4400}, "grace does not steal below 3 kW per car")
+        min_split = alloc(
+            [a, b],
+            leftover_w=6000,
+            take_w={a: 5900, b: 0},
+            states={a: "Charging", b: "Charging"},
+            split_hold=True,
+            **kwargs,
+        )
+        assert_eq(min_split, {a: 3000, b: 3000}, "grace at 6 kW leftover is 3+3")
         tiny = alloc([a, b], leftover_w=300, **kwargs)
         assert_eq(tiny, {}, "300 W two unequal cars: first cannot meet 6 A")
 
