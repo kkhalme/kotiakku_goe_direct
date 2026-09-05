@@ -104,6 +104,7 @@ from .surplus import (
     enough_solar_now as solar_enough_now,
     gating_solar_day,
     gating_solar_kwh as forecast_gating_kwh,
+    last_sun_end_ts as forecast_last_sun_end,
     leftover_w,
     group_lot_for_allocations,
     group_lot_for_amps,
@@ -420,6 +421,24 @@ class KotiakkuGoeDirectController:
     def gating_solar_day(self):
         lat, lon = self._site_lat_lon()
         return gating_solar_day(self.clock, lat, lon)
+
+    @property
+    def sunset_iso(self):
+        """Exclusive end of today's last sun, ISO UTC, or None on polar night."""
+        lat, lon = self._site_lat_lon()
+        now = self.clock.now()
+        try:
+            today_start = self.clock.start_of_local_day(now)
+            today_end = today_start + timedelta(days=1)
+            ts = forecast_last_sun_end(self.clock, today_start, today_end, lat, lon)
+        except Exception:
+            return None
+        if ts is None:
+            return None
+        try:
+            return self.clock.utc_from_timestamp(ts).isoformat()
+        except Exception:
+            return None
 
     def _site_lat_lon(self):
         try:

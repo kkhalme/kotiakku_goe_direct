@@ -38,7 +38,7 @@ views:
               {% set house_kw = house | float(0) | abs %}
               {% set ev_kw = (ev_s | float(0) | abs / 1000) if ev_s | is_number else 0 %}
               {% set leftover = (solar_kw - house_kw + ev_kw) if (solar | is_number and house | is_number) else none %}
-              **48 h from local midnight** · green = SolarPriority window · red = price ceiling.
+              **48 h from local midnight** · green = SolarPriority window · orange = off-sun · red = price ceiling.
 
               Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
               · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
@@ -84,7 +84,7 @@ views:
           - type: custom:apexcharts-card
             header:
               show: true
-              title: Spot · SolarPriority window (today + tomorrow)
+              title: Spot · SolarPriority window · off-sun
               show_states: false
             graph_span: 2d
             span:
@@ -168,6 +168,60 @@ views:
                     pts.push([t, on ? slotVal(entry) : 0]);
                   }
                   return pts;
+              - entity: sensor.kotiakku_goe_direct_window
+                name: Off-sun
+                yaxis_id: price
+                type: area
+                curve: stepline
+                color: "#ff7f0e"
+                opacity: 0.22
+                stroke_width: 0
+                extend_to: false
+                unit: €/kWh
+                show:
+                  in_header: false
+                  legend_value: false
+                data_generator: |
+                  function parseTs(v) {
+                    if (v == null || v === '') return NaN;
+                    if (typeof v === 'number' && Number.isFinite(v))
+                      return v < 1e12 ? v * 1000 : v;
+                    return Date.parse(v);
+                  }
+                  function rangesFrom(list) {
+                    const out = [];
+                    if (!Array.isArray(list)) return out;
+                    for (const w of list) {
+                      if (!w) continue;
+                      const s = parseTs(w.start);
+                      const e = parseTs(w.end);
+                      if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
+                    }
+                    return out;
+                  }
+                  function priceSlots() {
+                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const id = raw || 'sensor.nordpool_kwh_fi';
+                    const a = ((hass.states[id] || {}).attributes) || {};
+                    return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
+                  }
+                  function slotVal(entry) {
+                    const v = entry.value != null ? entry.value : entry.price;
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n : 0;
+                  }
+                  const blocked = rangesFrom((entity.attributes || {}).blocked);
+                  const pts = [];
+                  for (const entry of priceSlots()) {
+                    const t = parseTs(entry.start);
+                    if (!Number.isFinite(t)) continue;
+                    let on = false;
+                    for (const w of blocked) {
+                      if (t >= w[0] && t < w[1]) { on = true; break; }
+                    }
+                    pts.push([t, on ? slotVal(entry) : 0]);
+                  }
+                  return pts;
               - entity: text.kotiakku_goe_direct_electricity_price_sensor
                 name: Spot
                 yaxis_id: price
@@ -215,7 +269,7 @@ views:
                   in_header: false
                 data_generator: |
                   const n = Number(entity.state);
-                  const v = Number.isFinite(n) ? n : 0.1;
+                  const v = Number.isFinite(n) ? n : 0.2;
                   return [[start.getTime(), v], [end.getTime(), v]];
 
           - type: custom:apexcharts-card
@@ -291,21 +345,40 @@ views:
                     }
                     return false;
                   }
+                  function kwhOf(id) {
+                    const n = Number(((hass.states[id] || {}).state));
+                    return Number.isFinite(n) ? n : null;
+                  }
+                  function enoughAt(t) {
+                    const thr = Number(((hass.states['number.kotiakku_goe_direct_solar_enough_kwh'] || {}).state));
+                    if (!Number.isFinite(thr) || thr <= 0) return false;
+                    const today = kwhOf('sensor.kotiakku_goe_direct_solar_today_kwh');
+                    const tom = kwhOf('sensor.kotiakku_goe_direct_solar_tomorrow_kwh');
+                    const daySt = hass.states['sensor.kotiakku_goe_direct_solar_gating_day'] || {};
+                    const sunset = parseTs((daySt.attributes || {}).sunset);
+                    let day = String(daySt.state || '');
+                    if (Number.isFinite(sunset)) day = t < sunset ? 'today' : 'tomorrow';
+                    const v = day === 'tomorrow' ? tom : today;
+                    return v != null && v >= thr;
+                  }
                   const serial = entity.entity_id.split('_').pop();
                   const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
-                  const enough = String(((hass.states['binary_sensor.kotiakku_goe_direct_solar_enough'] || {}).state) || '') === 'on';
                   const solar = ['SolarPriority', 'Cheapest', 'Supercheap', 'Longest', 'Earliest'].indexOf(policy) >= 0;
                   const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
                   const force = policy === 'Force on' || until;
                   const windows = windowsFrom(((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {});
                   const full = 32 * 230 * 3 / 1000;
+                  const now = Date.now();
                   const pts = [];
                   for (const entry of priceSlots()) {
                     const t = parseTs(entry.start);
                     if (!Number.isFinite(t)) continue;
+                    const slotEnd = parseTs(entry.end);
+                    const live = !Number.isFinite(slotEnd) || slotEnd > now;
                     let on = 0;
-                    if (force) on = full;
-                    else if (solar && !enough && inWin(windows, t)) on = full;
+                    if (!live) on = 0;
+                    else if (force) on = full;
+                    else if (solar && !enoughAt(t) && inWin(windows, t)) on = full;
                     pts.push([t, on]);
                   }
                   return pts;
@@ -440,6 +513,10 @@ views:
               - entity: number.kotiakku_goe_direct_priority_222222
               - entity: sensor.kotiakku_goe_direct_window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
+              - entity: sensor.kotiakku_goe_direct_solar_today_kwh
+              - entity: sensor.kotiakku_goe_direct_solar_tomorrow_kwh
+              - entity: sensor.kotiakku_goe_direct_solar_gating_kwh
+              - entity: sensor.kotiakku_goe_direct_solar_gating_day
               - entity: sensor.kotiakku_goe_direct_solar_kwh
               - entity: number.kotiakku_goe_direct_window_min_h
               - entity: number.kotiakku_goe_direct_window_max_h

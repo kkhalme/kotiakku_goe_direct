@@ -160,7 +160,10 @@ class SolarGatingKwhSensor(_ForecastKwhSensor):
 
     @property
     def extra_state_attributes(self):
-        return {"gating_day": self._controller.gating_solar_day}
+        return {
+            "gating_day": self._controller.gating_solar_day,
+            "sunset": self._controller.sunset_iso,
+        }
 
 
 class SolarGatingDaySensor(HubEntity, SensorEntity):
@@ -177,3 +180,7 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
     @property
     def native_value(self):
         return self._controller.gating_solar_day
+
+    @property
+    def extra_state_attributes(self):
+        return {"sunset": self._controller.sunset_iso}
