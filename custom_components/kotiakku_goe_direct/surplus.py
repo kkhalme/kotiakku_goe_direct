@@ -339,7 +339,7 @@ def expected_hour_kwh(
 
 def surplus_hour_ranges(
     clock,
-    remaining_today,
+    today_kwh,
     tomorrow_kwh,
     hour_kwh,
     lat=DEFAULT_LAT,
@@ -367,7 +367,7 @@ def surplus_hour_ranges(
         return []
     hours = []
     hours.extend(
-        expected_hour_kwh(clock, today_start, today_end, remaining_today, lat, lon)
+        expected_hour_kwh(clock, today_start, today_end, today_kwh, lat, lon)
     )
     hours.extend(
         expected_hour_kwh(clock, today_end, tomorrow_end, tomorrow_kwh, lat, lon)

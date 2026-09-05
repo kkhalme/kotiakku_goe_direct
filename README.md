@@ -26,7 +26,7 @@ The integration does not assume entity ids. **Add integration** and **Configure*
 | Controller Car-power 5-min mean | go-e Controller EV watts for leftover math. Unknown → **0 W**. Do **not** keep last sample. Never written to. |
 | Charger entities | Charger 1 is required; 2–4 are optional. Any entity on each charger device (car state is ideal), then that charger’s MQTT serial and leftover priority |
 | Spot-price sensor | Needs `raw_today` / `raw_tomorrow` (HACS Nordpool) |
-| Solar today | Optional. Forecast.Solar / Solcast **full-day** today kWh (example `sensor.energy_production_today`). SolarPriority. Do not leave a leftover `…_remaining` sensor here — pick the new entity in Configure. |
+| Solar today | Optional. Forecast.Solar / Solcast **full-day** today kWh (example `sensor.energy_production_today`). SolarPriority. This is today's production, not leftover-from-now. |
 | Solar tomorrow | Optional. Forecast.Solar / Solcast tomorrow kWh. SolarPriority |
 
 Same form: whether Kotiakku solar/house are in kW (default on) and whether the Controller mean is in kW (default off = watts).
@@ -129,6 +129,8 @@ Restart, then add the integration as in A.8. Update with `git -C /config/kotiakk
 
 Policy pickers start at **Force off**. Surplus can run; no 22 kW grid charge until you pick a policy.
 
+On load — and again when Home Assistant has finished starting — the integration asks every wired sensor (Kotiakku, Forecast.Solar, Nordpool, charger car/power) to update before it plans, so restored leftover values are not used.
+
 After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, ECO phase, window bounds, the price text, leftover priorities, policies, and until-unplug switches are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
@@ -142,7 +144,7 @@ kotiakku_goe_direct:
   solar_entity: sensor.solar_power
   house_entity: sensor.house_power
   kotiakku_in_kw: true
-  solar_remaining_entity: sensor.energy_production_today
+  solar_today_entity: sensor.energy_production_today
   solar_tomorrow_entity: sensor.energy_production_tomorrow
   chargers:
     - entity: sensor.go_echarger_111111_car_state
@@ -216,7 +218,12 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_phase3_min_w` | 4140 W | Switch leftover to 3-phase (after the 15 min `psm` hold) |
 | `number.kotiakku_goe_direct_eco_lot_a` | 50 A | Group lot when restoring ECO |
 | `select.kotiakku_goe_direct_eco_phase` | Auto | Restore `psm` (Auto / Force 1-phase / Force 3-phase) |
-| `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until sunset, then when tomorrow ≥ this. Missing tomorrow after sunset is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition. `sensor.kotiakku_goe_direct_solar_kwh` is max(today, tomorrow); `gating_kwh` / `gating_day` say which day is gating |
+| `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until sunset, then when tomorrow ≥ this. Missing tomorrow after sunset is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition |
+| `sensor.kotiakku_goe_direct_solar_today_kwh` | from Configure | Today's full-day kWh. Attribute `source` is the picker entity |
+| `sensor.kotiakku_goe_direct_solar_tomorrow_kwh` | from Configure | Tomorrow kWh. Attribute `source` is the picker entity |
+| `sensor.kotiakku_goe_direct_solar_gating_kwh` | today or tomorrow | kWh that currently gates the 22 kW skip (today until sunset, then tomorrow) |
+| `sensor.kotiakku_goe_direct_solar_gating_day` | `today` / `tomorrow` | Which day's kWh is gating |
+| `sensor.kotiakku_goe_direct_solar_kwh` | max(today, tomorrow) | Headline forecast. Attributes: `source_today`, `source_tomorrow`, `enough_solar`, `offsun_hour_kwh` |
 | `number.kotiakku_goe_direct_offsun_hour_kwh` | 1 kWh | Drop a local hour from the search when its expected forecast energy ≥ this. 0 disables. Dawn/dusk/night under 1 kWh stay searchable |
 
 YAML `soc_on`, `eco_lot`, charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
@@ -264,7 +271,7 @@ python3 custom_components/kotiakku_goe_direct/tests/test_finland_year.py --plot
 
 Live Home Assistant: one dashboard tab, no helper sensors. Install [apexcharts-card](https://github.com/RomRider/apexcharts-card) from HACS, then copy [`homeassistant/dashboards/kotiakku_goe_direct_48h.yaml`](homeassistant/dashboards/kotiakku_goe_direct_48h.yaml) as a YAML dashboard, or paste the `views:` list into a UI dashboard's raw editor.
 
-The spot chart is `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) with the SolarPriority window from `sensor.kotiakku_goe_direct_window` attributes (`window_N_start` / `window_N_end`), not recorder history of the binary sensor. Spot itself is read through `text.kotiakku_goe_direct_electricity_price_sensor`. Planned 22 kW uses each charger's policy + that window. Leftover past is `|solar| − |house| + |ev|` from recorder 5-minute statistics of the three power sensors you already have — edit those entity ids (and kW vs W) in the leftover `data_generator`. Replace fake serials `111111` / `222222`. One charger: delete the charger 2 series. Display-only; it does not write MQTT.
+The spot chart is `raw_today` / `raw_tomorrow` (including the 14:00 day-ahead curve) with the SolarPriority window from `sensor.kotiakku_goe_direct_window` attributes (`windows` / `window_N_start` / `window_N_end`) and off-sun hours from that sensor's `blocked` list. Spot itself is read through `text.kotiakku_goe_direct_electricity_price_sensor`. Planned 22 kW uses each charger's policy + that window, only for slots that have not ended: before today's sunset it skips when **today** ≥ enough solar, after sunset when **tomorrow** ≥ enough. A finished window stays on the spot chart and is not drawn as 22 kW. Leftover past is `|solar| − |house| + |ev|` from recorder 5-minute statistics of the three power sensors you already have — edit those entity ids (and kW vs W) in the leftover `data_generator`. Replace fake serials `111111` / `222222`. One charger: delete the charger 2 series. Display-only; it does not write MQTT.
 
 ## Tests
 
