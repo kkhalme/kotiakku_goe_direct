@@ -233,13 +233,13 @@ def main():
                 [A, B], leftover_w=300, split_hold=True,
                 take_w={A: 0, B: 3000}, states={A: "Idle", B: "Charging"}, **idle_first,
             ),
-            {B: 300},
-            "Idle first + stale steal: only 300 W leftover, not 3 kW",
+            {A: 300, B: 300},
+            "Idle first + stale steal: 300 W leftover, not 3 kW; Idle still armed",
         )
         assert_eq(
             alloc([A, B], leftover_w=8000, split_hold=True, **idle_first),
-            {B: 8000},
-            "unplugged first: remaining car gets all leftover as first, not 3 kW",
+            {A: 8000, B: 8000},
+            "unplugged first is armed; plugged car gets leftover as first, not 3 kW",
         )
         assert_eq(
             alloc(
@@ -258,8 +258,8 @@ def main():
         equal = leftover_kw_args(lops={A: 50, B: 50}, plugged={A: False, B: True})
         assert_eq(
             alloc([A, B], leftover_w=8000, **equal),
-            {B: 8000},
-            "equal priority: unplugged charger is not offered leftover",
+            {A: 8000, B: 8000},
+            "equal priority: unplugged charger is offered leftover",
         )
         three = leftover_kw_args(lops={A: 1, B: 2, C: 3}, plugged={A: True, B: False, C: True})
         got = alloc(
@@ -268,12 +268,20 @@ def main():
             states={A: "Charging", B: "Idle", C: "Charging"},
             **three,
         )
-        assert_eq(got, {A: 9000, C: 3000}, "skip Idle middle charger; steal to the next plugged")
+        assert_eq(
+            got,
+            {A: 9000, B: 12000, C: 3000},
+            "Idle middle is armed; steal still goes to the next plugged",
+        )
         assert_eq(alloc([A], leftover_w=8000, **both), {A: 8000}, "single charger gets leftover")
         none = surplus.surplus_allocation_plan(
             [A, B], leftover_w=8000, **leftover_kw_args(plugged={A: False, B: False})
         )
-        assert_eq(none["allocations"], {}, "nobody plugged → no leftover MQTT")
+        assert_eq(
+            none["allocations"],
+            {A: 8000, B: 8000},
+            "nobody plugged → leftover MQTT still arms both",
+        )
 
     def test_reported_300w_surplus_does_not_publish_13a():
         invented = 800 - 500 + 3000
@@ -292,7 +300,7 @@ def main():
         assert_true(dec["write_on"] and dec["use_floor_budget"], "session continues as 6 A hold")
         assert_eq(cmds[B]["amp"], 6, "publishes 6 A, not 13 A")
         assert_eq(cmds[B]["psm"], 1, "1-phase floor")
-        assert_true(A not in cmds, "Idle first charger is not written")
+        assert_eq(cmds[A]["amp"], 6, "Idle first is armed at 6 A floor, not 13 A")
         # Same sensors, old leftover 3300 W would have tracked 14 A:
         old_dec, old_cmds = mqtt_for(
             3300,
@@ -613,6 +621,44 @@ def main():
         assert_eq(on[-1], ("frc", const.FRC_ON), "start publishes force on last")
         assert_true(("frc", const.FRC_NEUTRAL) not in on, "Neutral is not in the start payload")
 
+    def test_surplus_mqtt_does_not_wait_for_plug():
+        alloc = surplus.surplus_allocations
+        idle = leftover_kw_args(plugged={A: False}, lops={A: 1})
+        assert_eq(
+            alloc([A], leftover_w=8000, states={A: "Idle"}, **idle),
+            {A: 8000},
+            "single Idle charger is offered leftover",
+        )
+        missing = leftover_kw_args(plugged={A: False}, lops={A: 1})
+        assert_eq(
+            alloc([A], leftover_w=8000, states={A: None}, **missing),
+            {A: 8000},
+            "missing car state is offered leftover",
+        )
+        finished = leftover_kw_args(plugged={A: True}, lops={A: 1})
+        assert_eq(
+            alloc([A], leftover_w=8000, states={A: "Complete"}, **finished),
+            {},
+            "Complete is not offered leftover",
+        )
+        dec, cmds = mqtt_for(
+            2000, False, serials=[A], plugged={A: False}, states={A: "Idle"}
+        )
+        assert_true(dec["write_on"], "start does not wait for WaitCar")
+        assert_true(A in cmds, "Idle charger gets leftover MQTT")
+        on = const.charger_on_mqtt(cmds[A]["psm"], GROUP_LOT, cmds[A]["amp"])
+        assert_eq(on[-1], ("frc", const.FRC_ON), "start MQTT ends with frc=2")
+        dec, cmds = mqtt_for(
+            2000,
+            False,
+            serials=[A, B],
+            plugged={A: False, B: False},
+            lops={A: 50, B: 50},
+        )
+        assert_true(dec["write_on"], "equal priority start with nobody plugged")
+        assert_true(A in cmds and B in cmds, "both Idle chargers get leftover MQTT")
+        assert_eq(cmds[A]["amp"], cmds[B]["amp"], "equal leftover amp on both")
+
     def test_offsun_hour_spread_tomorrow_and_evening():
         hel = ZoneInfo("Europe/Helsinki")
         noon = Clock(datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel), tz=hel)
@@ -738,6 +784,7 @@ def main():
     case("tiny_leftover_and_steal_below_floor", test_tiny_leftover_and_steal_below_floor)
     case("mqtt_start_floor_and_steal_amps", test_mqtt_start_floor_and_steal_amps)
     case("idle_mqtt_is_force_off", test_idle_mqtt_is_force_off)
+    case("surplus_mqtt_does_not_wait_for_plug", test_surplus_mqtt_does_not_wait_for_plug)
     case("offsun_hour_spread_tomorrow_and_evening", test_offsun_hour_spread_tomorrow_and_evening)
     case("enough_solar_sunset_gate", test_enough_solar_sunset_gate)
     run()

@@ -775,24 +775,29 @@ def surplus_allocation_plan(
 ):
     """Per-charger leftover watts plus next-car hold flags.
 
-    Equal or unknown HA priority: every listed surplus charger gets the same
-    leftover (go-e splits). Unequal: the higher-priority plugged car is
-    offered leftover watts for MQTT ``amp`` when it is taking all it can
-    (at the published cap, leftover would allow more). Unused leftover
-    above ``split_floor_w`` (default 500 W) goes to the next car. If that
-    remainder is below ``split_min_w`` (default 3 kW), cut the
-    high-priority share so the next car still gets 3 kW — only if
-    leftover itself is at least ``2 × split_min_w`` (each car keeps at
-    least 3 kW), the first is actually taking power, and both shares
-    still meet 6 A. Remainder at or below 500 W is a dead zone:
-    do not start the next car. If the next car was already on and
-    leftover then shrinks so the first would use it all, keep stealing
-    3 kW for the hold minutes unless ``split_expired`` or leftover is
-    below 6 kW. ``lops`` is HA charger priority, not app ``lop``.
-    HA does not write ``lop``.
-    A single plugged charger always gets the leftover. Unplugged or
-    finished chargers are not offered leftover and cannot keep a 3 kW
-    steal alive. The steal only runs when leftover itself is at least
+    Surplus MQTT does not wait for a car. Every listed surplus charger
+    that is not finished (Complete) is offered leftover, including Idle,
+    unknown, or unplugged, so ``frc=2`` can arm the charger before
+    WaitCar. Equal or unknown HA priority: those chargers get the same
+    leftover (go-e splits). Unequal: steal/take uses plugged cars only.
+    Unplugged / Idle still get leftover MQTT (armed at leftover watts)
+    but cannot keep a 3 kW steal alive. Finished chargers are skipped so
+    the next car can take leftover as the first.
+
+    The higher-priority plugged car is offered leftover watts for MQTT
+    ``amp`` when it is taking all it can (at the published cap, leftover
+    would allow more). Unused leftover above ``split_floor_w`` (default
+    500 W) goes to the next plugged car. If that remainder is below
+    ``split_min_w`` (default 3 kW), cut the high-priority share so the
+    next car still gets 3 kW — only if leftover itself is at least
+    ``2 × split_min_w`` (each car keeps at least 3 kW), the first is
+    actually taking power, and both shares still meet 6 A. Remainder at
+    or below 500 W is a dead zone: do not *start* the next plugged car.
+    If the next car was already on and leftover then shrinks so the
+    first would use it all, keep stealing 3 kW for the hold minutes
+    unless ``split_expired`` or leftover is below 6 kW. ``lops`` is HA
+    charger priority, not app ``lop``. HA does not write ``lop``.
+    The steal only runs when leftover itself is at least
     ``2 × split_min_w`` and the higher-priority car is actually taking
     power — a WaitCar / idle first slot must not invent 3 kW for the
     next car.
@@ -804,28 +809,44 @@ def surplus_allocation_plan(
         return empty
     take_w = take_w if isinstance(take_w, dict) else None
     states = states if isinstance(states, dict) else None
-    plugged_on = [serial for serial in serials if _plugged(plugged, serial)]
-    if states is not None:
-        plugged_on = [
-            serial for serial in plugged_on if not car_finished(states.get(serial))
-        ]
-    shared = {serial: leftover_w for serial in plugged_on}
-    if not plugged_on:
+    eligible = [
+        serial
+        for serial in serials
+        if states is None or not car_finished(states.get(serial))
+    ]
+    if not eligible or leftover_w <= 0:
         return empty
-    if len(plugged_on) == 1:
-        return {"allocations": shared, "remainder_w": leftover_w, "arm_split_hold": False}
+    plugged_on = [serial for serial in eligible if _plugged(plugged, serial)]
+    unplugged = [serial for serial in eligible if serial not in plugged_on]
+    shared = {serial: leftover_w for serial in eligible}
+
+    def _shared():
+        return {
+            "allocations": dict(shared),
+            "remainder_w": leftover_w,
+            "arm_split_hold": False,
+        }
+
+    def _arm_unplugged(allocations):
+        for serial in unplugged:
+            allocations[serial] = leftover_w
+        return allocations
+
     ranks = []
     for serial in serials:
         rank = lops.get(serial) if isinstance(lops, dict) else None
         if rank is None:
-            return {
-                "allocations": shared,
-                "remainder_w": leftover_w,
-                "arm_split_hold": False,
-            }
+            return _shared()
         ranks.append(int(rank))
-    if len(set(ranks)) <= 1:
-        return {"allocations": shared, "remainder_w": leftover_w, "arm_split_hold": False}
+    if len(eligible) == 1 or len(set(ranks)) <= 1:
+        return _shared()
+    if len(plugged_on) <= 1:
+        allocations = {serial: leftover_w for serial in plugged_on}
+        return {
+            "allocations": _arm_unplugged(allocations),
+            "remainder_w": leftover_w,
+            "arm_split_hold": False,
+        }
     order = sorted(
         plugged_on, key=lambda serial: (int(lops[serial]), serials.index(serial))
     )
@@ -884,14 +905,15 @@ def surplus_allocation_plan(
             prev_take = take
             continue
         break
+    steal_count = len(allocations)
     arm_split_hold = bool(
         remainder_after_high <= split_floor_w
         and split_hold
         and not split_expired
-        and len(allocations) >= 2
+        and steal_count >= 2
     )
     return {
-        "allocations": allocations,
+        "allocations": _arm_unplugged(allocations),
         "remainder_w": remainder_after_high,
         "arm_split_hold": arm_split_hold,
     }

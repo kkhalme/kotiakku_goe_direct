@@ -649,6 +649,7 @@ class KotiakkuGoeDirectController:
     async def _on_interval(self, _now=None):
         await self.async_plan()
         await self.async_charge()
+        self._schedule_surplus()
 
     async def _on_policy(self, serial, event):
         await self.async_charge()
