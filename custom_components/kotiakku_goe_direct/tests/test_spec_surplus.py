@@ -886,69 +886,119 @@ def main():
         assert_true(usable is not None, "80 kWh today has a last usable hour")
         assert_true(usable < sunset, "last usable hour ends before sunset")
         assert_eq(
-            surplus.gating_solar_day(predawn, 80, hour_kwh, lat, lon),
+            surplus.last_usable_solar_end_ts(
+                predawn, today_start, today_end, None, hour_kwh, lat, lon
+            ),
+            None,
+            "unknown today energy has no usable-hour end",
+        )
+        assert_eq(
+            surplus.last_usable_solar_end_ts(
+                predawn, today_start, today_end, 0, hour_kwh, lat, lon
+            ),
+            None,
+            "0 kWh today has no usable hour",
+        )
+        assert_eq(
+            surplus.gating_solar_day(predawn, 80, hour_kwh, lat, lon, False),
             "today",
-            "02:00 is before last usable hour",
+            "02:00 is before last usable hour and before tomorrow prices",
         )
         assert_eq(
-            surplus.enough_solar_now(predawn, 80, 10, 40, lat, lon, hour_kwh),
+            surplus.enough_solar_now(predawn, 80, 10, 40, lat, lon, hour_kwh, False),
             True,
-            "sunny today skips 22 kW before last usable hour even if tomorrow is cloudy",
+            "sunny today skips 22 kW before prices-in even if tomorrow is cloudy",
         )
         assert_eq(
-            surplus.enough_solar_now(predawn, 20, 80, 40, lat, lon, hour_kwh),
+            surplus.enough_solar_now(predawn, 20, 80, 40, lat, lon, hour_kwh, False),
             False,
             "cloudy today does not skip before last usable hour",
         )
+        afternoon = Clock(datetime.datetime(2026, 3, 15, 14, 0, tzinfo=hel), tz=hel)
+        assert_eq(
+            surplus.gating_solar_day(afternoon, 80, hour_kwh, lat, lon, True),
+            "today",
+            "14:00 prices-in still today while later hours are usable",
+        )
+        assert_eq(
+            surplus.gating_solar_day(afternoon, 0, hour_kwh, lat, lon, False),
+            "today",
+            "no usable hour does not flip before tomorrow prices",
+        )
+        assert_eq(
+            surplus.gating_solar_day(afternoon, 0, hour_kwh, lat, lon, True),
+            "tomorrow",
+            "no usable hour flips at latest when tomorrow prices arrive",
+        )
         after_usable = Clock(datetime.datetime.fromtimestamp(usable, tz=hel), tz=hel)
         assert_eq(
-            surplus.gating_solar_day(after_usable, 80, hour_kwh, lat, lon),
+            surplus.gating_solar_day(after_usable, 80, hour_kwh, lat, lon, False),
+            "today",
+            "after last usable hour still today until tomorrow prices",
+        )
+        assert_eq(
+            surplus.gating_solar_day(after_usable, 80, hour_kwh, lat, lon, True),
             "tomorrow",
-            "at last usable hour exclusive",
+            "prices-in and last usable hour ended",
         )
         before_sunset = Clock(
             datetime.datetime.fromtimestamp(sunset - 60, tz=hel), tz=hel
         )
         assert_eq(
-            surplus.gating_solar_day(before_sunset, 80, hour_kwh, lat, lon),
+            surplus.gating_solar_day(before_sunset, 80, hour_kwh, lat, lon, True),
             "tomorrow",
             "after last usable hour, still before sunset, already tomorrow",
         )
         after = Clock(datetime.datetime.fromtimestamp(sunset, tz=hel), tz=hel)
         assert_eq(
-            surplus.gating_solar_day(after, 80, hour_kwh, lat, lon),
+            surplus.gating_solar_day(after, 80, hour_kwh, lat, lon, True),
             "tomorrow",
             "at sunset exclusive still tomorrow",
         )
         assert_eq(
-            surplus.enough_solar_now(after_usable, 80, 10, 40, lat, lon, hour_kwh),
+            surplus.enough_solar_now(
+                after_usable, 80, 10, 40, lat, lon, hour_kwh, True
+            ),
             False,
             "after last usable hour cloudy tomorrow allows night 22 kW",
         )
         assert_eq(
-            surplus.enough_solar_now(after_usable, 80, 80, 40, lat, lon, hour_kwh),
+            surplus.enough_solar_now(
+                after_usable, 80, 80, 40, lat, lon, hour_kwh, True
+            ),
             True,
             "after last usable hour sunny tomorrow still skips",
         )
         assert_eq(
-            surplus.enough_solar_now(after_usable, 80, None, 40, lat, lon, hour_kwh),
+            surplus.enough_solar_now(
+                after_usable, 80, None, 40, lat, lon, hour_kwh, True
+            ),
             False,
             "missing tomorrow after last usable hour is not enough",
         )
         assert_eq(
-            surplus.gating_solar_day(predawn, None, hour_kwh, lat, lon),
+            surplus.gating_solar_day(predawn, None, hour_kwh, lat, lon, False),
             "today",
-            "missing today forecast falls back to sunset",
+            "missing today forecast stays today until prices",
         )
         assert_eq(
-            surplus.gating_solar_day(predawn, 0, hour_kwh, lat, lon),
+            surplus.gating_solar_day(afternoon, None, hour_kwh, lat, lon, True),
             "tomorrow",
-            "0 kWh today has no usable hour",
+            "missing today forecast flips when prices arrive (no solar left)",
         )
         assert_eq(
-            surplus.gating_solar_day(predawn, 80, 0, lat, lon),
+            surplus.gating_solar_day(predawn, 0, hour_kwh, lat, lon, False),
             "today",
-            "off-sun disabled falls back to sunset",
+            "0 kWh predawn stays today until prices",
+        )
+        offsun_end = surplus.last_usable_solar_end_ts(
+            predawn, today_start, today_end, 80, 0, lat, lon
+        )
+        assert_true(offsun_end is not None, "off-sun 0 still has daylight hours")
+        assert_eq(
+            surplus.gating_solar_day(predawn, 80, 0, lat, lon, False),
+            "today",
+            "off-sun disabled: remaining daylight keeps today",
         )
         polar_night = Clock(datetime.datetime(2026, 12, 21, 12, 0, tzinfo=hel), tz=hel)
         assert_eq(
@@ -963,23 +1013,35 @@ def main():
             "78N midwinter never rises",
         )
         assert_eq(
-            surplus.gating_solar_day(polar_night, 80, hour_kwh, 78.0, 16.0),
-            "tomorrow",
-            "polar night uses tomorrow",
+            surplus.gating_solar_day(polar_night, 80, hour_kwh, 78.0, 16.0, False),
+            "today",
+            "polar night before tomorrow prices stays today",
+        )
+        polar_night_pm = Clock(
+            datetime.datetime(2026, 12, 21, 14, 0, tzinfo=hel), tz=hel
         )
         assert_eq(
-            surplus.enough_solar_now(polar_night, 80, 10, 40, 78.0, 16.0, hour_kwh),
+            surplus.gating_solar_day(polar_night_pm, 80, hour_kwh, 78.0, 16.0, True),
+            "tomorrow",
+            "polar night flips when tomorrow prices arrive",
+        )
+        assert_eq(
+            surplus.enough_solar_now(
+                polar_night_pm, 80, 10, 40, 78.0, 16.0, hour_kwh, True
+            ),
             False,
             "polar night: tomorrow 10 kWh allows 22 kW",
         )
         polar_day = Clock(datetime.datetime(2026, 6, 21, 2, 0, tzinfo=hel), tz=hel)
         assert_eq(
-            surplus.gating_solar_day(polar_day, 80, hour_kwh, 78.0, 16.0),
+            surplus.gating_solar_day(polar_day, 80, hour_kwh, 78.0, 16.0, False),
             "today",
             "polar day 02:00 stays on today",
         )
         assert_eq(
-            surplus.enough_solar_now(polar_day, 80, 10, 40, 78.0, 16.0, hour_kwh),
+            surplus.enough_solar_now(
+                polar_day, 80, 10, 40, 78.0, 16.0, hour_kwh, False
+            ),
             True,
             "polar day 02:00 still gates on today's 80 kWh",
         )

@@ -343,11 +343,19 @@ def simulate(
         )
         ts = clock.as_timestamp(now)
         upcoming = surplus.upcoming_solar_kwh(today_kwh, tomorrow)
+        prices_ok = planner.tomorrow_prices_ok(clock, attrs)
         enough = surplus.enough_solar_now(
-            clock, today_kwh, tomorrow, solar_enough_kwh, 60.17, 24.94, OFFSUN_HOUR_KWH
+            clock,
+            today_kwh,
+            tomorrow,
+            solar_enough_kwh,
+            60.17,
+            24.94,
+            OFFSUN_HOUR_KWH,
+            prices_ok,
         )
         gating_day = surplus.gating_solar_day(
-            clock, today_kwh, OFFSUN_HOUR_KWH, 60.17, 24.94
+            clock, today_kwh, OFFSUN_HOUR_KWH, 60.17, 24.94, prices_ok
         )
         in_window = window_on(result, ts)
         cheap_window = in_window
@@ -921,8 +929,8 @@ def write_report(sims, out_dir):
         "**Charger A SolarPriority**, **charger B Force off** (B never charges). One cheap window after",
         "dropping hours with at least 1 kWh of expected solar (full-day today /",
         "tomorrow shaped by elevation). SolarPriority then skips 22 kW when the",
-        "gating day's kWh ≥ 40 (today until the last hour with ≥ 1 kWh expected",
-        "solar, tomorrow after). A finished",
+        "gating day's kWh ≥ 40 (today until tomorrow's prices are in and the last",
+        "hour with ≥ 1 kWh expected solar has ended). A finished",
         "cheapest window stays the plan and is not used for 22 kW.",
         "Surplus leftover uses HA leftover priority on SolarPriority chargers (A=1).",
         "",
@@ -949,7 +957,7 @@ def write_report(sims, out_dir):
         [
             "",
             "- **Midwinter / February / October / DST**: today's kWh stays well under 40, and night hours are under 1 kWh, so SolarPriority 22 kW runs in the night window. After that window ends it stays the plan (idle) until prices or the date change.",
-            "- **April mixed**: after the last usable solar hour, tomorrow just crossing 40 kWh skips night 22 kW. Before that, today's full-day kWh gates. Surplus still starts in the brief midday sun.",
+            "- **April mixed**: after the last usable solar hour (and after 14:00 prices), tomorrow just crossing 40 kWh skips night 22 kW. Before that, today's full-day kWh gates. Surplus still starts in the brief midday sun.",
             "- **Midsummer clear**: ~87 kWh tomorrow, SolarPriority never force-on after the last usable solar hour. Polar-day-long sun keeps today's gate on while later hours still have ≥ 1 kWh. Midday leftover still runs surplus (not 22 kW).",
             "- **Midsummer overcast**: ~16 kWh is not enough solar; Off-sun still drops hours with ≥ 1 kWh expected energy.",
             "",

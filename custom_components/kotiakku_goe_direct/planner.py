@@ -194,6 +194,15 @@ def tomorrow_ok(clock, attrs, slots):
     return any(slot[0] >= tomorrow_start - 1 for slot in slots)
 
 
+def tomorrow_prices_ok(clock, attrs):
+    """True when the next local day's spot curve is present (not solar-clipped)."""
+    try:
+        slots = collect_slots(clock, attrs, clock.now())
+    except Exception:
+        slots = []
+    return tomorrow_ok(clock, attrs, slots)
+
+
 def _overlaps(slot, start, end):
     return slot[0] < end and slot[1] > start
 

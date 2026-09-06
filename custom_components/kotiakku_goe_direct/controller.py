@@ -97,6 +97,7 @@ from .planner import (
     mqtt_apply_window_action,
     now_in_windows,
     plan,
+    tomorrow_prices_ok as planner_tomorrow_prices_ok,
     until_unplug_step,
     ROLE_FULL,
     ROLE_SURPLUS,
@@ -420,6 +421,14 @@ class KotiakkuGoeDirectController:
         return self._float_entity(EID_OFFSUN_HOUR_KWH, DEFAULT_OFFSUN_HOUR_KWH)
 
     @property
+    def tomorrow_prices_ok(self):
+        """True when the next day's unclipped spot curve is present."""
+        price_entity = self.price_entity_id()
+        source = self.hass.states.get(price_entity) if price_entity else None
+        attrs = None if source is None else dict(source.attributes)
+        return planner_tomorrow_prices_ok(self.clock, attrs)
+
+    @property
     def enough_solar(self):
         lat, lon = self._site_lat_lon()
         return solar_enough_now(
@@ -430,6 +439,7 @@ class KotiakkuGoeDirectController:
             lat,
             lon,
             self.offsun_hour_kwh,
+            self.tomorrow_prices_ok,
         )
 
     @property
@@ -442,6 +452,7 @@ class KotiakkuGoeDirectController:
             lat,
             lon,
             self.offsun_hour_kwh,
+            self.tomorrow_prices_ok,
         )
 
     @property
@@ -453,6 +464,7 @@ class KotiakkuGoeDirectController:
             self.offsun_hour_kwh,
             lat,
             lon,
+            self.tomorrow_prices_ok,
         )
 
     def _today_start_end(self):
