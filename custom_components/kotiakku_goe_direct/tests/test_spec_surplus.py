@@ -353,6 +353,28 @@ def main():
             {A: 12000},
             "15 s after offering high: leftover stays on high, next waits",
         )
+        steal_hold = surplus.surplus_allocation_plan(
+            [A, B], leftover_w=12000, split_hold=True,
+            take_w={A: 0, B: 3000}, states={A: "Idle", B: "Charging"},
+            **both,
+        )
+        assert_true(A in steal_hold["allocations"], "steal/next leftover: Idle high stays on leftover MQTT")
+        assert_true(B in steal_hold["allocations"], "lower still has leftover")
+        assert_eq(
+            steal_hold["lot_allocations"],
+            {B: 12000},
+            "Idle high arm is not a group-lot share",
+        )
+        keep = surplus.surplus_higher_keep_on
+        assert_eq(keep(A, {B: 8000}, {A: 1, B: 50}), True, "worse-priority leftover: do not frc=1 high")
+        assert_eq(keep(B, {A: 8000}, {A: 1, B: 50}), False, "better-priority leftover: low may be off")
+        assert_eq(keep(A, {A: 9000, B: 3000}, {A: 1, B: 50}), False, "already allocated")
+        assert_eq(
+            keep(A, {B: 8000}, {A: 1, B: 50}, states={A: "Complete", B: "Charging"}),
+            False,
+            "Complete high stays skipped",
+        )
+        assert_eq(keep(A, {}, {A: 1, B: 50}), False, "nobody allocated")
         assert_eq(
             alloc(
                 [A, B, C], leftover_w=8000,

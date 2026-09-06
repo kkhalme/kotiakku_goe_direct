@@ -801,7 +801,11 @@ def surplus_allocation_plan(
     the hold minutes unless ``split_expired`` or leftover is below 6 kW.
     ``lops`` is HA charger priority, not app ``lop``. HA does not write
     ``lop``. Group ``lot`` uses steal/share watts only: leading Idle
-    arms do not inflate the sum.
+    arms do not inflate the sum. Whenever a lower-priority eligible
+    charger is allocated leftover, every better HA priority that is
+    still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
+    so it can start taking again. Those backfills are not group-lot
+    shares. Finished chargers stay skipped.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]
@@ -835,11 +839,33 @@ def surplus_allocation_plan(
     def _is_taking(serial, remaining=leftover_w):
         return _take_of(serial, remaining) >= 100
 
+    def _backfill_higher(out):
+        """Keep every better HA priority on leftover MQTT if a lower one is allocated."""
+        if not out:
+            return
+        worst = None
+        for serial in out:
+            rank = lops.get(serial) if isinstance(lops, dict) else None
+            if rank is None:
+                continue
+            rank = int(rank)
+            if worst is None or rank > worst:
+                worst = rank
+        if worst is None:
+            return
+        for serial in eligible:
+            rank = lops.get(serial) if isinstance(lops, dict) else None
+            if rank is None:
+                continue
+            if int(rank) < worst and serial not in out:
+                out[serial] = leftover_w
+
     def _pack(allocations, remainder_w, arm_split_hold, leading=()):
         lot_allocations = dict(allocations)
         out = dict(allocations)
         for serial in leading:
             out[serial] = leftover_w
+        _backfill_higher(out)
         taking = [serial for serial in lot_allocations if _is_taking(serial)]
         return {
             "allocations": out,
@@ -943,6 +969,32 @@ def surplus_allocation_plan(
         and len(taking) >= 2
     )
     return _pack(allocations, remainder_after_high, arm_split_hold, leading)
+
+
+def surplus_higher_keep_on(serial, allocations, lops, states=None):
+    """True when a worse-priority charger has leftover: do not ``frc=1`` this one.
+
+    Finished (Complete) chargers stay off. Plug-in does not matter.
+    """
+    if not serial or not isinstance(allocations, dict) or not allocations:
+        return False
+    if serial in allocations:
+        return False
+    if states is not None and car_finished(states.get(serial)):
+        return False
+    if not isinstance(lops, dict):
+        return False
+    rank = lops.get(serial)
+    if rank is None:
+        return False
+    rank = int(rank)
+    for other in allocations:
+        other_rank = lops.get(other)
+        if other_rank is None:
+            continue
+        if int(other_rank) > rank:
+            return True
+    return False
 
 
 def surplus_allocations(*args, **kwargs):

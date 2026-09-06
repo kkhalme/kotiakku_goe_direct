@@ -947,6 +947,19 @@ def main():
             {a: 8000},
             "15 s after leftover MQTT: high keeps leftover until the car reacts",
         )
+        hold_idle = alloc(
+            [a, b],
+            leftover_w=12000,
+            lops=lops,
+            plugged={a: False, b: True},
+            split_min_w=3000,
+            charger_max_w=22080,
+            take_w={a: 0, b: 3000},
+            states={a: "Idle", b: "Charging"},
+            split_hold=True,
+        )
+        assert_true(a in hold_idle, "split_hold + Idle high: high still allocated leftover MQTT")
+        assert_true(b in hold_idle, "lower still has leftover")
         assert_eq(
             alloc(
                 [a, b],

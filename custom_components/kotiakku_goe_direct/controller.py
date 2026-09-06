@@ -116,6 +116,7 @@ from .surplus import (
     sensor_usable,
     surplus_allocation_plan,
     surplus_decision,
+    surplus_higher_keep_on,
     surplus_hour_ranges,
     surplus_phase_budget,
     surplus_want_w,
@@ -1052,8 +1053,11 @@ class KotiakkuGoeDirectController:
             for serial in surplus:
                 watts_i = allocations["allocations"].get(serial)
                 if watts_i is None:
-                    await self._publish_off(serial)
-                    continue
+                    if surplus_higher_keep_on(serial, allocated, lops, states):
+                        watts_i = alloc_w
+                    else:
+                        await self._publish_off(serial)
+                        continue
                 source_w = target_w if dec["use_floor_budget"] else min(
                     int(watts_i), max(int(snap["available_w"]), 0)
                 )
