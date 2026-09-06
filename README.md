@@ -68,6 +68,7 @@ Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ star
 - Leftover below 1000 W, **or** SoC below 90%, **or** Kotiakku SoC / solar / house unknown or unusable → keep **6 A** for up to the low hold minutes (default 15). If the last surplus `psm` was 3-phase, stay 3-phase 6 A for that window so Tesla is not interrupted twice (phase switch, then stop). Chatter around 1000 W does not reset that timer: leftover must reach the start leftover (2000 W) to cancel the hold
 - Leftover wants the other phase → keep the current `psm` for those same 15 min, then switch. Leftover returning to the current phase cancels the timer
 - Second surplus charger already taking, leftover then shrinks so the high-priority car would use it all → keep the 3 kW second-car floor for those same 15 min, then drop it. That steal needs two cars that are actually taking leftover; a high-priority car that is not taking does not keep 3 kW on the next one. Steal is not applied when leftover itself is below **6 kW** (3 kW per car)
+- After leftover MQTT, wait **15 s** for that car to start taking before leftover goes to the next charger (a Tesla often needs several seconds to begin)
 - That low hold for the whole duration → `frc=1` (force off)
 - Recovered leftover (at least the start leftover, 2000 W), SoC, or sensors cancel the hold timer. A warning is logged when Kotiakku values are unusable. Surplus cannot **start** while those sensors are unusable. Restart loses remaining hold minutes (same as the other holds).
 
