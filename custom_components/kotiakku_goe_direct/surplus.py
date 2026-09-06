@@ -189,42 +189,86 @@ def last_sun_end_ts(
     return last
 
 
+def last_usable_solar_end_ts(
+    clock,
+    day_start,
+    day_end,
+    energy_kwh,
+    hour_kwh,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+):
+    """Exclusive end of the last local hour today with expected kWh ≥ ``hour_kwh``.
+
+    None when no hour qualifies (all hours under the threshold, including
+    ``energy_kwh == 0`` or polar night). Unknown energy or a non-positive /
+    invalid hour threshold falls back to ``last_sun_end_ts`` so a missing
+    forecast does not flip to tomorrow at noon, and disabling off-sun keeps
+    sunset gating.
+    """
+    try:
+        threshold = float(hour_kwh)
+    except (TypeError, ValueError):
+        return last_sun_end_ts(clock, day_start, day_end, lat, lon)
+    if threshold <= 0 or energy_kwh is None:
+        return last_sun_end_ts(clock, day_start, day_end, lat, lon)
+    last = None
+    for _start, end, kwh in expected_hour_kwh(
+        clock, day_start, day_end, energy_kwh, lat, lon
+    ):
+        if kwh >= threshold:
+            last = end
+    return last
+
+
+def _gating_until_ts(clock, today_kwh, hour_kwh, lat, lon):
+    """``(now_ts, until_ts)`` for the today→tomorrow gating switch, or None."""
+    now = clock.now()
+    today_start = clock.start_of_local_day(now)
+    today_end = today_start + datetime.timedelta(days=1)
+    now_ts = float(clock.as_timestamp(now))
+    until = last_usable_solar_end_ts(
+        clock, today_start, today_end, today_kwh, hour_kwh, lat, lon
+    )
+    return now_ts, until
+
+
 def gating_solar_kwh(
     clock,
     today_kwh,
     tomorrow_kwh,
     lat=DEFAULT_LAT,
     lon=DEFAULT_LON,
+    hour_kwh=1,
 ):
-    """kWh that gates 22 kW: today's full-day estimate until sunset, then tomorrow.
+    """kWh that gates 22 kW: today until the last usable solar hour, then tomorrow.
 
-    Before today's last sun (including pre-dawn): ``today_kwh``. After sunset,
-    polar night, or if sunset cannot be computed: ``tomorrow_kwh``.
+    Before the exclusive end of the last local hour with expected energy
+    ≥ ``hour_kwh`` (including pre-dawn): ``today_kwh``. After that, when no
+    hour qualifies, or if the switch time cannot be computed: ``tomorrow_kwh``.
     """
-    now = clock.now()
     try:
-        today_start = clock.start_of_local_day(now)
-        today_end = today_start + datetime.timedelta(days=1)
-        now_ts = float(clock.as_timestamp(now))
+        now_ts, until = _gating_until_ts(clock, today_kwh, hour_kwh, lat, lon)
     except Exception:
         return tomorrow_kwh
-    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
-    if sunset is None or now_ts >= sunset:
+    if until is None or now_ts >= until:
         return tomorrow_kwh
     return today_kwh
 
 
-def gating_solar_day(clock, lat=DEFAULT_LAT, lon=DEFAULT_LON):
-    """``today`` until sunset; ``tomorrow`` after sunset or polar night."""
-    now = clock.now()
+def gating_solar_day(
+    clock,
+    today_kwh,
+    hour_kwh=1,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+):
+    """``today`` until the last usable solar hour; ``tomorrow`` after that or when none."""
     try:
-        today_start = clock.start_of_local_day(now)
-        today_end = today_start + datetime.timedelta(days=1)
-        now_ts = float(clock.as_timestamp(now))
+        now_ts, until = _gating_until_ts(clock, today_kwh, hour_kwh, lat, lon)
     except Exception:
         return "tomorrow"
-    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
-    if sunset is None or now_ts >= sunset:
+    if until is None or now_ts >= until:
         return "tomorrow"
     return "today"
 
@@ -236,10 +280,11 @@ def enough_solar_now(
     threshold_kwh,
     lat=DEFAULT_LAT,
     lon=DEFAULT_LON,
+    hour_kwh=1,
 ):
     """Skip 22 kW when the gating day's full-day kWh is at least the threshold."""
     return enough_solar(
-        gating_solar_kwh(clock, today_kwh, tomorrow_kwh, lat, lon),
+        gating_solar_kwh(clock, today_kwh, tomorrow_kwh, lat, lon, hour_kwh),
         threshold_kwh,
     )
 
