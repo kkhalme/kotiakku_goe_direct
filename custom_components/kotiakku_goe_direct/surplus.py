@@ -32,7 +32,7 @@ FINISHED_STATES = {
     "finished",
 }
 
-# Seconds to wait after leftover MQTT before treating a car as not taking.
+# Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
 
@@ -515,19 +515,21 @@ def surplus_phase_budget(
     }
 
 
-def group_lot_for_amps(lot, amps, group_lot):
+def group_lot_for_amps(lot, amps, group_lot, *, overdraw=False):
     """Raise leftover ``lot`` so a held 1-phase ``amp`` still fits.
 
     Equal leftover already shares one group ``lot``; do not sum identical
     amps or two 17 A cars would raise 12 kW leftover to 34 A. Differing
     amps (priority split or mixed 1-phase / 3-phase hold) still need the
-    sum so both caps fit, at most ``group_lot``.
+    sum so both caps fit, at most ``group_lot``. ``overdraw`` sums even
+    identical amps so a pending offer and a taking car can both draw
+    for ``OFFER_WAIT_S``.
     """
     lot = int(lot)
     amps = [int(amp) for amp in amps]
     if not amps:
         return lot
-    if len(set(amps)) <= 1:
+    if not overdraw and len(set(amps)) <= 1:
         return min(int(group_lot), max(lot, amps[0]))
     return min(int(group_lot), max(lot, sum(amps)))
 
@@ -565,18 +567,20 @@ def group_lot_for_allocations(
     group_lot,
     volts,
     phase3_min_w,
+    overdraw=False,
 ):
     """Keep leftover ``lot`` when every surplus charger gets the same watts.
 
     Differing shares (priority split / steal) use 1-phase and 3-phase
     ``amp`` together. Raise group ``lot`` to the sum of those amps so
     load balancing can actually deliver both, still at most ``group_lot``.
+    ``overdraw`` sums even identical leftover watts for the 15 s offer wait.
     """
     lot = int(lot)
     if not isinstance(allocations, dict) or len(allocations) < 2:
         return lot
     watts_values = [max(int(watts_i), 0) for watts_i in allocations.values()]
-    if len(set(watts_values)) <= 1:
+    if not overdraw and len(set(watts_values)) <= 1:
         return lot
     amp_sum = sum(
         int(budget(watts_i, min_amp, max_amp, group_lot, volts, phase3_min_w)[2])
@@ -780,28 +784,44 @@ def surplus_allocation_plan(
     (≥100 W), not plug-in. ``plugged`` is kept for callers and ignored.
 
     A high-priority car that is not taking still gets leftover MQTT so
-    it can start, but leftover itself goes to the next car in priority
-    order as the first — after ``OFFER_WAIT_S`` (15 s) to see whether
-    the offered car starts taking. ``offer_pending`` is those serials
-    still in that wait (controller: offered leftover, take < 100 W,
-    15 s not expired). While pending, leftover stays on that car; do
-    not start the next one yet. If nobody is taking and nobody is
-    pending, every eligible charger is armed at leftover watts. Finished
-    chargers are skipped so remaining equal-priority cars still share.
-    After a taking first car, unused leftover above ``split_floor_w``
-    (default 500 W) goes to the next car in priority — even if that car
-    is not taking yet, so it can start. If that next car is pending,
-    stop there until it reacts or the wait expires. If that remainder
-    is below ``split_min_w`` (default 3 kW), cut the high-priority
-    share so the next car still gets 3 kW — only if leftover itself is
-    at least ``2 × split_min_w`` (each car keeps at least 3 kW), the
-    first is actually taking power, and both shares still meet 6 A. Remainder at or below 500 W is a dead zone: do not
-    *start* the next car. If the next car was already taking and leftover
-    then shrinks so the first would use it all, keep stealing 3 kW for
-    the hold minutes unless ``split_expired`` or leftover is below 6 kW.
+    it can start. If it does not take all leftover, the next car in
+    priority still gets leftover as first. While that lower car is
+    taking, high stays ``frc=2``. HA only steals from or drops the
+    lower car once high is actually taking (≥100 W).
+
+    ``OFFER_WAIT_S`` (15 s) is a cut delay, not an exclusive offer.
+    ``offer_pending`` is serials still in that wait (controller: offered
+    leftover, take < 100 W, 15 s not expired). Do not ``frc=1`` anyone
+    during the wait: leftover can stay on the offered charger and the
+    next taking charger together (temporary over-draw; those pending
+    arms are group-lot shares until the wait expires). Steal also waits:
+    do not cut a taking car to mint 3 kW, and do not start a further car,
+    while a higher-priority offer is still pending. After the wait, if
+    high is still not taking, leftover belongs to the next as first and
+    high stays armed (not a lot share). If nobody is taking, every
+    eligible charger is armed at leftover watts. Finished chargers are
+    skipped so remaining equal-priority cars still share. After a taking
+    first car, unused leftover above ``split_floor_w`` (default 500 W)
+    goes to the next car in priority — even if that car is not taking
+    yet, so it can start. If that next car is pending, stop there until
+    it reacts or the wait expires (do not start a further car yet). If
+    that remainder is below ``split_min_w`` (default 3 kW), cut the
+    high-priority share so the next car still gets 3 kW — only if
+    leftover itself is at least ``2 × split_min_w`` (each car keeps at
+    least 3 kW), the first is actually taking power, both shares still
+    meet 6 A, and no higher-priority offer is still pending. Remainder
+    at or below 500 W is a dead zone: do not *start* the next car. If
+    the next car was already taking and leftover then shrinks so the
+    first would use it all, keep stealing 3 kW for the hold minutes
+    unless ``split_expired`` or leftover is below 6 kW.
     ``lops`` is HA charger priority, not app ``lop``. HA does not write
-    ``lop``. Group ``lot`` uses steal/share watts only: leading Idle
-    arms do not inflate the sum.
+    ``lop``. Group ``lot`` uses steal/share watts only, except during
+    the offer-wait over-draw. Whenever a lower-priority eligible
+    charger is allocated leftover, every better HA priority that is
+    still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
+    so it can start taking again. Those backfills are not group-lot
+    shares unless the offer wait is still running. Finished chargers
+    stay skipped.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]
@@ -812,6 +832,7 @@ def surplus_allocation_plan(
         "arm_split_hold": False,
         "taking": [],
         "lot_allocations": {},
+        "overdraw": False,
     }
     if not serials:
         return empty
@@ -835,11 +856,40 @@ def surplus_allocation_plan(
     def _is_taking(serial, remaining=leftover_w):
         return _take_of(serial, remaining) >= 100
 
-    def _pack(allocations, remainder_w, arm_split_hold, leading=()):
+    def _backfill_higher(out):
+        """Keep every better HA priority on leftover MQTT if a lower one is allocated."""
+        if not out:
+            return
+        worst = None
+        for serial in out:
+            rank = lops.get(serial) if isinstance(lops, dict) else None
+            if rank is None:
+                continue
+            rank = int(rank)
+            if worst is None or rank > worst:
+                worst = rank
+        if worst is None:
+            return
+        for serial in eligible:
+            rank = lops.get(serial) if isinstance(lops, dict) else None
+            if rank is None:
+                continue
+            if int(rank) < worst and serial not in out:
+                out[serial] = leftover_w
+
+    def _pack(allocations, remainder_w, arm_split_hold, leading=(), overdraw_serials=()):
         lot_allocations = dict(allocations)
         out = dict(allocations)
         for serial in leading:
             out[serial] = leftover_w
+        taking_now = [serial for serial in lot_allocations if _is_taking(serial)]
+        overdraw = False
+        if overdraw_serials and taking_now:
+            overdraw = True
+            for serial in overdraw_serials:
+                lot_allocations[serial] = leftover_w
+                out[serial] = leftover_w
+        _backfill_higher(out)
         taking = [serial for serial in lot_allocations if _is_taking(serial)]
         return {
             "allocations": out,
@@ -847,6 +897,7 @@ def surplus_allocation_plan(
             "arm_split_hold": arm_split_hold,
             "taking": taking,
             "lot_allocations": lot_allocations,
+            "overdraw": overdraw,
         }
 
     def _shared():
@@ -870,14 +921,17 @@ def surplus_allocation_plan(
     )
     leading = []
     pool = list(order)
+    overdraw_serials = []
     while pool and not _is_taking(pool[0]) and not _is_pending(pool[0]):
         leading.append(pool.pop(0))
+    while pool and not _is_taking(pool[0]) and _is_pending(pool[0]):
+        serial = pool.pop(0)
+        leading.append(serial)
+        overdraw_serials.append(serial)
     if not pool:
         return _shared()
-    if _is_pending(pool[0]):
-        return _pack({pool[0]: leftover_w}, leftover_w, False, leading)
     if len(pool) == 1:
-        return _pack({pool[0]: leftover_w}, leftover_w, False, leading)
+        return _pack({pool[0]: leftover_w}, leftover_w, False, leading, overdraw_serials)
     remaining = leftover_w
     allocations = {}
     prev = None
@@ -889,11 +943,13 @@ def surplus_allocation_plan(
                 break
             offered = min(remaining, charger_max_w)
             take = _take_of(serial, remaining)
-            allocations[serial] = offered if take <= 0 else take
+            allocations[serial] = offered if (take <= 0 or overdraw_serials) else take
             remaining -= take
             remainder_after_high = remaining
             prev = serial
             prev_take = take
+            if overdraw_serials:
+                break
             continue
         need = min_charge_w(remaining, min_amp, volts, phase3_min_w)
         if remaining >= split_min_w and remaining >= need:
@@ -912,6 +968,8 @@ def surplus_allocation_plan(
             leftover_w >= 2 * split_min_w
             and prev_take >= 100
             and ((not in_dead) or (split_hold and not split_expired))
+            and not _is_pending(serial)
+            and not overdraw_serials
         )
         keep_w = _steal_keep_w(
             remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w
@@ -942,7 +1000,35 @@ def surplus_allocation_plan(
         and not split_expired
         and len(taking) >= 2
     )
-    return _pack(allocations, remainder_after_high, arm_split_hold, leading)
+    return _pack(
+        allocations, remainder_after_high, arm_split_hold, leading, overdraw_serials
+    )
+
+
+def surplus_higher_keep_on(serial, allocations, lops, states=None):
+    """True when a worse-priority charger has leftover: do not ``frc=1`` this one.
+
+    Finished (Complete) chargers stay off. Plug-in does not matter.
+    """
+    if not serial or not isinstance(allocations, dict) or not allocations:
+        return False
+    if serial in allocations:
+        return False
+    if states is not None and car_finished(states.get(serial)):
+        return False
+    if not isinstance(lops, dict):
+        return False
+    rank = lops.get(serial)
+    if rank is None:
+        return False
+    rank = int(rank)
+    for other in allocations:
+        other_rank = lops.get(other)
+        if other_rank is None:
+            continue
+        if int(other_rank) > rank:
+            return True
+    return False
 
 
 def surplus_allocations(*args, **kwargs):

@@ -75,5 +75,4 @@ class PolicySelect(_HubSelect):
             self._controller.legacy_until_unplug.add(self._serial)
 
     async def _on_changed(self):
-        await self._controller.async_charge()
-        self._controller._schedule_surplus()
+        self._controller._schedule_apply()

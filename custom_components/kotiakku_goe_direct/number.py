@@ -96,7 +96,7 @@ class _HubNumber(NumberEntity, RestoreEntity):
 
     async def _on_changed(self):
         await self._controller.async_plan()
-        await self._controller.async_charge()
+        self._controller._schedule_apply()
 
 
 class WindowHours(_HubNumber):
@@ -175,7 +175,7 @@ class SurplusNumber(_HubNumber):
     async def _on_changed(self):
         if self.entity_id in (EID_SOLAR_ENOUGH_KWH, EID_OFFSUN_HOUR_KWH):
             await self._controller.async_plan()
-        await self._controller.async_knobs_changed()
+        self._controller._schedule_apply()
 
 
 class ChargerPriorityNumber(_HubNumber):
@@ -193,4 +193,4 @@ class ChargerPriorityNumber(_HubNumber):
         self._attr_name = f"{serial} priority"
 
     async def _on_changed(self):
-        await self._controller.async_knobs_changed()
+        self._controller._schedule_apply()

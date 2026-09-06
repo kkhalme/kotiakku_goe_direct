@@ -37,4 +37,4 @@ class PriceEntityText(TextEntity, RestoreEntity):
         self.async_write_ha_state()
         self._controller._retarget_price()
         await self._controller.async_plan()
-        await self._controller.async_charge()
+        self._controller._schedule_apply()

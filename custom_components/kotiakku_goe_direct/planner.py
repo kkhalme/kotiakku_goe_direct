@@ -23,6 +23,7 @@ TARGET_EPS_S = 30
 HOUR_EPS = 0.001
 PRICE_EPS = 0.0000001
 MAX_WINDOWS = 16
+MQTT_APPLY_S = 2
 DEFAULT_MIN_HOURS = 2.0
 DEFAULT_MAX_HOURS = 5.0
 DEFAULT_CEILING = 0.2
@@ -541,6 +542,145 @@ def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=
     ):
         return False
     return restore_policy(policy) in _WINDOW_SURPLUS_POLICIES
+
+
+ROLE_FULL = "full"
+ROLE_SURPLUS = "surplus"
+ROLE_OFF = "off"
+
+
+def charger_mqtt_role(
+    policy, result, now_ts, *, enough_solar=False, until_unplug=False
+):
+    """What this charger should be doing: 22 kW, leftover, or off."""
+    if charger_full_power(
+        policy,
+        result,
+        now_ts,
+        enough_solar=enough_solar,
+        until_unplug=until_unplug,
+    ):
+        return ROLE_FULL
+    if charger_surplus(
+        policy,
+        result,
+        now_ts,
+        enough_solar=enough_solar,
+        until_unplug=until_unplug,
+    ):
+        return ROLE_SURPLUS
+    return ROLE_OFF
+
+
+def charger_mqtt_command(
+    role,
+    *,
+    surplus_on,
+    surplus_pub=None,
+    had_full=False,
+    leftover_session=False,
+    group_lot=50,
+    max_amp=32,
+):
+    """One MQTT intent for a charger. None means do not publish.
+
+    Charge windows and leftover share this so a cheap hour ending does
+    not ``frc=1`` a charger leftover is about to write. Full-power is
+    always 22 kW. Leftover on only when surplus is writing this serial.
+    Otherwise off if Force off, a 22 kW session just ended, leftover is
+    stopping, or leftover is on but this serial is not allocated. Idle
+    SolarPriority that leftover has never started is a no-op (do not
+    spam ``frc=1``).
+    """
+    if role == ROLE_FULL:
+        return ("on", 2, int(group_lot), int(max_amp))
+    if role == ROLE_SURPLUS:
+        if surplus_on and surplus_pub is not None:
+            return (
+                "on",
+                int(surplus_pub["psm"]),
+                int(surplus_pub["lot"]),
+                int(surplus_pub["amp"]),
+            )
+        if surplus_on or had_full or leftover_session:
+            return ("off",)
+        return None
+    return ("off",)
+
+
+def mqtt_apply_window_action(window_open, applying):
+    """What a ``_schedule_apply`` call should do to the 2 s MQTT window.
+
+    First schedule in a quiet period starts the window. Later schedules
+    join it (do not restart the timer). A flush already running defers
+    a new 2 s window until after it finishes.
+    """
+    if applying:
+        return "defer"
+    if window_open:
+        return "join"
+    return "start"
+
+
+def charger_mqtt_status_value(payload):
+    """Integer from a live go-e ``frc`` / ``amp`` / ``lot`` / ``psm`` payload."""
+    if payload is None or isinstance(payload, bool):
+        return None
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", "replace")
+    if isinstance(payload, (int, float)):
+        return int(payload)
+    text = str(payload).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def charger_mqtt_live_complete(desired, actual):
+    """True when live go-e keys are present for comparing ``desired``."""
+    if desired is None or not isinstance(actual, dict):
+        return False
+    if desired[0] == "off":
+        return charger_mqtt_status_value(actual.get("frc")) is not None
+    if desired[0] != "on":
+        return False
+    for key in ("frc", "psm", "lot", "amp"):
+        if charger_mqtt_status_value(actual.get(key)) is None:
+            return False
+    return True
+
+
+def charger_mqtt_needs_update(desired, actual):
+    """True when live go-e ``frc`` / ``amp`` / ``lot`` / ``psm`` do not match.
+
+    Unknown or incomplete actual → need a write. Matching actual → skip.
+    """
+    if desired is None:
+        return False
+    if not isinstance(actual, dict):
+        return True
+    if desired[0] == "off":
+        frc = charger_mqtt_status_value(actual.get("frc"))
+        if frc is None:
+            return True
+        return int(frc) != 1
+    if desired[0] != "on" or len(desired) < 4:
+        return True
+    have_frc = charger_mqtt_status_value(actual.get("frc"))
+    have_psm = charger_mqtt_status_value(actual.get("psm"))
+    have_lot = charger_mqtt_status_value(actual.get("lot"))
+    have_amp = charger_mqtt_status_value(actual.get("amp"))
+    if None in (have_frc, have_psm, have_lot, have_amp):
+        return True
+    return not (
+        have_frc == 2
+        and have_psm == int(desired[1])
+        and have_lot == int(desired[2])
+        and have_amp == int(desired[3])
+    )
 
 
 def _empty_result(
