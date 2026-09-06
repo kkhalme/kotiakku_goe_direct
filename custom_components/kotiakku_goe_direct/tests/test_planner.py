@@ -926,9 +926,11 @@ def main():
                 plugged={a: False, b: True},
                 split_min_w=3000,
                 charger_max_w=22080,
+                take_w={a: 0, b: 0},
+                states={a: "Idle", b: "Charging"},
             ),
             {a: 8000, b: 8000},
-            "higher priority unplugged is armed; plugged car still gets leftover",
+            "higher not taking is armed; taking car gets leftover as first, not 3 kW",
         )
         assert_eq(
             alloc(
@@ -955,10 +957,12 @@ def main():
                 plugged={a: False, b: True},
                 split_min_w=3000,
                 charger_max_w=22080,
+                take_w={a: 0, b: 3000},
+                states={a: "Idle", b: "Charging"},
                 split_hold=True,
             ),
             {a: 300, b: 300},
-            "300 W leftover arms unplugged too; no 3 kW floor",
+            "300 W leftover arms Idle too; no 3 kW floor",
         )
         _lot, psm_tiny, amp_tiny = surplus.budget(tiny, 6, 32, 50, 230, 4140)
         assert_eq((psm_tiny, amp_tiny), (1, 6), "300 W budgets 6 A, not 13 A / 3 kW")
@@ -1008,7 +1012,7 @@ def main():
                 states={a: "WaitCar", b: "Charging"},
             ),
             {a: 8000, b: 8000},
-            "higher not accepting: still offer leftover, no steal",
+            "higher not accepting: leftover still offered, no steal",
         )
         assert_eq(
             surplus.surplus_targets(

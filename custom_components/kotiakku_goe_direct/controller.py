@@ -978,13 +978,17 @@ class KotiakkuGoeDirectController:
                 split_hold=self.split_session,
                 split_expired=split_expired,
             )
-            self.split_session = len(allocations["allocations"]) >= 2
+            taking = allocations.get("taking") or []
+            self.split_session = len(taking) >= 2
             self._arm_split(allocations["arm_split_hold"])
             await self._save()
+            lot_alloc = allocations.get("lot_allocations")
+            if lot_alloc is None:
+                lot_alloc = allocations["allocations"]
             if not dec["use_floor_budget"]:
                 lot = group_lot_for_allocations(
                     lot,
-                    allocations["allocations"],
+                    lot_alloc,
                     min_amp=self.min_amp,
                     max_amp=self.max_amp,
                     group_lot=self.group_lot,
@@ -1014,8 +1018,15 @@ class KotiakkuGoeDirectController:
                 targets[serial] = pub
                 self._arm_phase(serial, pub["arm_phase"])
             if n_full <= 0:
+                lot_serials = set(lot_alloc)
                 lot = group_lot_for_amps(
-                    lot, [pub["amp"] for pub in targets.values()], self.group_lot
+                    lot,
+                    [
+                        pub["amp"]
+                        for serial, pub in targets.items()
+                        if serial in lot_serials
+                    ],
+                    self.group_lot,
                 )
             for serial, pub in targets.items():
                 await self._publish_on(serial, pub["psm"], lot, pub["amp"])

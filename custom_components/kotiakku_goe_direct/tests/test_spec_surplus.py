@@ -227,19 +227,33 @@ def main():
             {A: 7500},
             "after 15 min grace, drop the second car",
         )
-        idle_first = leftover_kw_args(plugged={A: False, B: True})
+        idle_first_take = leftover_kw_args(
+            plugged={A: False, B: True},
+            take_w={A: 0, B: 3000},
+            states={A: "Idle", B: "Charging"},
+        )
         assert_eq(
             alloc(
                 [A, B], leftover_w=300, split_hold=True,
-                take_w={A: 0, B: 3000}, states={A: "Idle", B: "Charging"}, **idle_first,
+                **idle_first_take,
             ),
             {A: 300, B: 300},
             "Idle first + stale steal: 300 W leftover, not 3 kW; Idle still armed",
         )
+        idle_first_plan = surplus.surplus_allocation_plan(
+            [A, B], leftover_w=8000, split_hold=True, **idle_first_take,
+        )
         assert_eq(
-            alloc([A, B], leftover_w=8000, split_hold=True, **idle_first),
+            idle_first_plan["allocations"],
             {A: 8000, B: 8000},
-            "unplugged first is armed; plugged car gets leftover as first, not 3 kW",
+            "Idle first is armed; next taking car gets leftover as first, not 3 kW",
+        )
+        assert_eq(idle_first_plan["taking"], [B], "split follows the taking car, not Idle-armed")
+        assert_eq(idle_first_plan["arm_split_hold"], False, "one taking car does not arm steal grace")
+        assert_eq(
+            idle_first_plan["lot_allocations"],
+            {B: 8000},
+            "group lot uses the taking share, not the Idle arm",
         )
         assert_eq(
             alloc(
@@ -254,6 +268,7 @@ def main():
             take_w={A: 0, B: 2500}, states={A: "WaitCar", B: "Charging"}, **both,
         )
         assert_eq(wait.get(B), 2500, "WaitCar taking 0 W does not mint a 3 kW steal from 2500 W")
+        assert_eq(wait.get(A), 2500, "WaitCar still gets leftover MQTT so it can start")
         assert_true(SPLIT_MIN not in wait.values(), "2500 W leftover never allocates exactly 3 kW steal")
         equal = leftover_kw_args(lops={A: 50, B: 50}, plugged={A: False, B: True})
         assert_eq(
@@ -262,26 +277,71 @@ def main():
             "equal priority: unplugged charger is offered leftover",
         )
         three = leftover_kw_args(lops={A: 1, B: 2, C: 3}, plugged={A: True, B: False, C: True})
-        got = alloc(
+        three_plan = surplus.surplus_allocation_plan(
             [A, B, C], leftover_w=12000,
             take_w={A: 10000, B: 0, C: 0},
             states={A: "Charging", B: "Idle", C: "Charging"},
             **three,
         )
         assert_eq(
-            got,
-            {A: 9000, B: 12000, C: 3000},
-            "Idle middle is armed; steal still goes to the next plugged",
+            three_plan["allocations"],
+            {A: 9000, B: 3000},
+            "Idle middle is next in priority: steal 9+3 to it, not skip to C",
+        )
+        assert_eq(three_plan["taking"], [A], "Idle steal share is not a taking car yet")
+        assert_eq(three_plan["arm_split_hold"], False, "steal to a non-taking car does not arm grace")
+        assert_true(C not in three_plan["allocations"], "third waits until leftover is unused")
+        idle_lead = leftover_kw_args(lops={A: 1, B: 2, C: 3})
+        lead_plan = surplus.surplus_allocation_plan(
+            [A, B, C], leftover_w=12000,
+            take_w={A: 0, B: 10000, C: 0},
+            states={A: "Idle", B: "Charging", C: "Charging"},
+            **idle_lead,
+        )
+        assert_eq(
+            lead_plan["allocations"],
+            {A: 12000, B: 9000, C: 3000},
+            "Idle first is armed; steal runs on the taking remainder",
+        )
+        assert_eq(
+            lead_plan["lot_allocations"],
+            {B: 9000, C: 3000},
+            "Idle-armed leftover watts are not a group-lot share",
+        )
+        assert_eq(lead_plan["taking"], [B], "only the car actually taking is in split")
+        assert_eq(
+            surplus.group_lot_for_allocations(
+                17, lead_plan["lot_allocations"],
+                min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140,
+            ),
+            26,
+            "9+3 steal raises lot to 13 A + 13 A without the Idle arm",
+        )
+        assert_eq(
+            alloc(
+                [A, B, C], leftover_w=8000,
+                take_w={A: 0, B: 0, C: 0},
+                states={A: "Complete", B: "Charging", C: "Charging"},
+                **leftover_kw_args(lops={A: 1, B: 50, C: 50}),
+            ),
+            {B: 8000, C: 8000},
+            "Complete dropped from ranks: remaining equal-priority cars share leftover",
         )
         assert_eq(alloc([A], leftover_w=8000, **both), {A: 8000}, "single charger gets leftover")
         none = surplus.surplus_allocation_plan(
-            [A, B], leftover_w=8000, **leftover_kw_args(plugged={A: False, B: False})
+            [A, B], leftover_w=8000,
+            **leftover_kw_args(
+                plugged={A: False, B: False},
+                take_w={A: 0, B: 0},
+                states={A: "Idle", B: "Idle"},
+            ),
         )
         assert_eq(
             none["allocations"],
             {A: 8000, B: 8000},
-            "nobody plugged → leftover MQTT still arms both",
+            "nobody taking → leftover MQTT still arms both",
         )
+        assert_eq(none["taking"], [], "Idle arms are not a split session")
 
     def test_reported_300w_surplus_does_not_publish_13a():
         invented = 800 - 500 + 3000
@@ -320,7 +380,8 @@ def main():
         assert_eq(surplus.leftover_w(800, 3500, 3000), 300, "include-EV path is also 300 W")
         # Recovered 1500 W during an active hold stays 6 A, does not jump to 13 A.
         mid, mid_cmds = mqtt_for(
-            1500, True, hold_active=True, plugged={A: False, B: True}, serials=[A, B]
+            1500, True, hold_active=True, plugged={A: False, B: True}, serials=[A, B],
+            take_w={A: 0, B: 1500}, states={A: "Idle", B: "Charging"},
         )
         assert_true(mid["use_floor_budget"], "hold hysteresis")
         assert_eq(mid_cmds[B]["amp"], 6, "still 6 A at 1500 W while hold is active")
@@ -557,8 +618,8 @@ def main():
                 [A, B], leftover_w=8000,
                 take_w={A: 99, B: 0}, states={A: "Charging", B: "Charging"}, **both,
             ),
-            {A: 99, B: 7901},
-            "high take under 100 W is not a steal: remainder is unused leftover",
+            {A: 8000, B: 8000},
+            "high take under 100 W: leftover goes to the next; high is still armed",
         )
         assert_eq(
             surplus.surplus_allocation_plan([], leftover_w=8000, **both)["allocations"],
