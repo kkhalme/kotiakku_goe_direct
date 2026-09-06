@@ -944,8 +944,8 @@ def main():
                 states={a: "Idle", b: "Charging"},
                 offer_pending={a},
             ),
-            {a: 8000},
-            "15 s after leftover MQTT: high keeps leftover until the car reacts",
+            {a: 8000, b: 8000},
+            "15 s after leftover MQTT: high stays on; do not cut the next car",
         )
         hold_idle = alloc(
             [a, b],

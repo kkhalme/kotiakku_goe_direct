@@ -250,6 +250,7 @@ def main():
         )
         assert_eq(idle_first_plan["taking"], [B], "split follows the taking car, not Idle-armed")
         assert_eq(idle_first_plan["arm_split_hold"], False, "one taking car does not arm steal grace")
+        assert_eq(idle_first_plan["overdraw"], False, "after the wait, Idle arm is not a lot share")
         assert_eq(
             idle_first_plan["lot_allocations"],
             {B: 8000},
@@ -261,11 +262,26 @@ def main():
         )
         assert_eq(
             waiting["allocations"],
-            {A: 8000},
-            "first 15 s after leftover MQTT: keep leftover on the offered car",
+            {A: 8000, B: 8000},
+            "first 15 s: keep leftover on the offered car and do not cut the taking car",
         )
-        assert_true(B not in waiting["allocations"], "next car waits for the offered car to react")
-        assert_eq(waiting["taking"], [], "pending offer is not a taking split")
+        assert_true(B in waiting["allocations"], "taking car stays on during the offer wait")
+        assert_eq(waiting["taking"], [B], "pending offer is not a taking split")
+        assert_eq(waiting["overdraw"], True, "15 s wait allows leftover on both (over-draw)")
+        assert_eq(
+            waiting["lot_allocations"],
+            {A: 8000, B: 8000},
+            "pending high is a group-lot share until the wait expires",
+        )
+        assert_eq(
+            surplus.group_lot_for_allocations(
+                11, waiting["lot_allocations"],
+                min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140,
+                overdraw=True,
+            ),
+            22,
+            "over-draw raises lot so both leftover amps fit",
+        )
         assert_eq(
             alloc(
                 [A, B], leftover_w=8000,
@@ -350,8 +366,15 @@ def main():
         )
         assert_eq(
             wait_lead["allocations"],
-            {A: 12000},
-            "15 s after offering high: leftover stays on high, next waits",
+            {A: 12000, B: 9000, C: 3000},
+            "15 s after offering high: high stays on, taking cars keep leftover (over-draw)",
+        )
+        assert_true(B in wait_lead["allocations"], "do not frc=1 a taking car during the wait")
+        assert_eq(wait_lead["overdraw"], True, "pending high plus taking leftover is over-draw")
+        assert_eq(
+            wait_lead["lot_allocations"],
+            {A: 12000, B: 9000, C: 3000},
+            "pending high is a group-lot share with the steal during the wait",
         )
         steal_hold = surplus.surplus_allocation_plan(
             [A, B], leftover_w=12000, split_hold=True,
@@ -588,9 +611,14 @@ def main():
             "no amps keeps leftover lot",
         )
         assert_eq(
-            surplus.group_lot_for_amps(17, [32, 21], 50),
-            50,
-            "1-phase 32 A + 21 A sums to 53 and is capped at group_lot",
+            surplus.group_lot_for_amps(11, [11, 11], 50),
+            11,
+            "equal leftover amps do not sum",
+        )
+        assert_eq(
+            surplus.group_lot_for_amps(11, [11, 11], 50, overdraw=True),
+            22,
+            "offer-wait over-draw sums equal leftover amps",
         )
         assert_eq(
             surplus.group_lot_for_allocations(

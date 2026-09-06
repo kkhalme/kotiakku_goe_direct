@@ -1039,6 +1039,7 @@ class KotiakkuGoeDirectController:
             lot_alloc = allocations.get("lot_allocations")
             if lot_alloc is None:
                 lot_alloc = allocations["allocations"]
+            overdraw = bool(allocations.get("overdraw"))
             if not dec["use_floor_budget"]:
                 lot = group_lot_for_allocations(
                     lot,
@@ -1048,6 +1049,7 @@ class KotiakkuGoeDirectController:
                     group_lot=self.group_lot,
                     volts=self.volts,
                     phase3_min_w=self.phase3_min_w,
+                    overdraw=overdraw,
                 )
             targets = {}
             for serial in surplus:
@@ -1084,6 +1086,7 @@ class KotiakkuGoeDirectController:
                         if serial in lot_serials
                     ],
                     self.group_lot,
+                    overdraw=overdraw,
                 )
             for serial, pub in targets.items():
                 await self._publish_on(serial, pub["psm"], lot, pub["amp"])
