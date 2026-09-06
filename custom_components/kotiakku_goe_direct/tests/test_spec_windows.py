@@ -318,9 +318,63 @@ def main():
         ov, seen = until_unplug_step(True, False, True)
         assert_eq((ov, seen), (False, False), "clears on unplug after seen")
         off = const.charger_off_mqtt()
-        assert_eq(off[0], ("frc", "1"), "leaving a window publishes force off, not Neutral")
+        assert_eq(off[0], ("frc", "1"), "stop MQTT is force off, not Neutral")
         assert_eq(off, (("frc", "1"), ("fup", "false")), "idle MQTT is force off only")
         assert_true(("frc", "0") not in off, "Neutral would keep charging in Basic/default")
+
+    def test_charger_mqtt_is_one_decision():
+        result = {"raw_windows": [{"start": 3000, "end": 4000}]}
+        role = planner.charger_mqtt_role
+        cmd = planner.charger_mqtt_command
+        leftover = {"psm": 2, "lot": 11, "amp": 11}
+        assert_eq(role("SolarPriority", result, 3500), planner.ROLE_FULL, "in window is 22 kW")
+        assert_eq(role("SolarPriority", result, 4000), planner.ROLE_SURPLUS, "window end is leftover")
+        assert_eq(role("Force off", result, 3500), planner.ROLE_OFF, "Force off is off")
+        assert_eq(
+            cmd(
+                planner.ROLE_SURPLUS,
+                surplus_on=True,
+                surplus_pub=leftover,
+                had_full=True,
+            ),
+            ("on", 2, 11, 11),
+            "cheap hour ending with leftover does not frc=1",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, had_full=True),
+            ("off",),
+            "cheap hour ending without leftover is frc=1",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, had_full=False),
+            None,
+            "idle leftover policy does not spam frc=1",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, leftover_session=True),
+            ("off",),
+            "stopping leftover is frc=1",
+        )
+        assert_eq(
+            cmd(
+                planner.ROLE_FULL,
+                surplus_on=True,
+                surplus_pub=leftover,
+                had_full=True,
+            ),
+            ("on", 2, 50, 32),
+            "full-power wins over leftover",
+        )
+        assert_eq(
+            cmd(planner.ROLE_OFF, surplus_on=True, surplus_pub=leftover, had_full=True),
+            ("off",),
+            "Force off is always frc=1",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=None, had_full=True),
+            ("off",),
+            "leftover on other cars: this serial is off",
+        )
 
     def test_plan_result_is_a_window_list():
         out = plan(
@@ -645,6 +699,7 @@ def main():
     case("horizon_clip_and_prices_only_fallback", test_horizon_clip_and_prices_only_fallback)
     case("ticks_do_not_slide_prices_do", test_ticks_do_not_slide_prices_do)
     case("full_power_solarpriority", test_full_power_solarpriority)
+    case("charger_mqtt_is_one_decision", test_charger_mqtt_is_one_decision)
     case("plan_result_is_a_window_list", test_plan_result_is_a_window_list)
     case("seed_tie_elapsed_gap_and_weighted_avg", test_seed_tie_elapsed_gap_and_weighted_avg)
     case("grow_sides_flex_modes_and_caps", test_grow_sides_flex_modes_and_caps)

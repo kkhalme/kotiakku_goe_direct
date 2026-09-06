@@ -198,7 +198,7 @@ Leftover surplus writes **SolarPriority** and **SolarAndGrid** chargers. Surplus
 
 Windows are planned from `raw_today` / `raw_tomorrow` (or `today` / `tomorrow`), clipped to days that also have solar kWh when any forecast exists. The search finds the cheapest contiguous min-hours seed (ceiling is ignored while scoring), aborts if that seed’s average is above the ceiling (default **0.2**), then grows by one native slot at a time. Flex is the looser of percent-of-|seed| and a fixed €/kWh. Max hours is a cap, not a target. Off-sun hours still split islands; only one window is filled. The window is a function of prices, solar clip, the off-sun mask, and knobs — not of the clock — so 15-minute ticks do not slide it. Tomorrow’s curve typically appears sometime after 14:00 local and is a new environment (the plan may jump). Helsinki midnight may change the window when Nordpool `raw_today` and the calendar day roll. The plan also replans when today’s or tomorrow’s kWh, flex, or the Off-sun hour knob change.
 
-Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. After: `frc=1` then `fup` false.
+Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=2`. One decision writes MQTT: 22 kW, leftover, or `frc=1`. A cheap hour ending does **not** force-off a charger leftover is about to write — leftover MQTT replaces 22 kW. If leftover is not writing, stop is `frc=1` then `fup` false. Identical MQTT is not sent again.
 
 | Entity | Default | Role |
 | --- | --- | --- |
@@ -261,6 +261,7 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | SolarPriority, window on, today's kWh ≥ 40 kWh before sunset | No full-power (wait for today's PV). Surplus may still write that charger. `binary_sensor.kotiakku_goe_direct_solar_enough` on |
 | SolarAndGrid, window on, today's kWh ≥ 40 kWh before sunset | **That** charger still 22 kW. Surplus skips **that** serial |
 | SolarAndGrid, window off, leftover ≥ 2000 W | Leftover MQTT (`frc=2`) |
+| SolarPriority, cheap window ends, leftover still on | Leftover MQTT replaces 22 kW. No `frc=1` in between |
 | SolarPriority, after sunset, tomorrow ≥ 40 kWh | No night 22 kW. Surplus may still write that charger |
 | SolarPriority, after sunset, today 80 kWh and tomorrow 10 kWh | Night cheap hours **are** 22 kW (day2 is not enough) |
 | SolarPriority, hour with ≥ 1 kWh expected solar | Dropped from the window search; no SolarPriority 22 kW in that hour |

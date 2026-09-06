@@ -87,10 +87,14 @@ from .const import (
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import (
     charger_full_power as policy_full_power,
+    charger_mqtt_command,
+    charger_mqtt_role,
     charger_surplus as policy_surplus,
     now_in_windows,
     plan,
     until_unplug_step,
+    ROLE_FULL,
+    ROLE_SURPLUS,
 )
 from .serial import resolve_car_entity_id, resolve_power_entity_id
 from .surplus import (
@@ -192,6 +196,8 @@ class KotiakkuGoeDirectController:
         self.seen = {s: False for s in self.chargers}
         self.legacy_until_unplug = set()
         self._charging = False
+        self._pending_floor = False
+        self._pending_split = False
         self._last_policy = {s: POLICY_FORCE_OFF for s in self.chargers}
         self._charge_session = {s: False for s in self.chargers}
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -211,6 +217,7 @@ class KotiakkuGoeDirectController:
         self._refreshing = False
         self._surplus_amp = {}
         self._surplus_psm = {}
+        self._last_mqtt = {}
         self._kotiakku_ids = {
             eid
             for eid in (
@@ -905,20 +912,205 @@ class KotiakkuGoeDirectController:
             "problems": problems,
         }
 
-    async def _stop_surplus(self):
-        for serial in self.chargers:
-            if self.charger_full_power(serial):
-                continue
-            await self._publish_off(serial)
+    def _clear_surplus_session(self):
         self.session = False
         self.split_session = False
         self._arm_split(False)
         for serial in list(self._offer_unsub):
             self._arm_offer_wait(serial, False)
         self._offer_expired.clear()
-        await self._save()
 
     async def async_surplus(self, floor_expired=False, split_expired=False):
+        if floor_expired:
+            self._pending_floor = True
+        if split_expired:
+            self._pending_split = True
+        await self._async_apply()
+
+    async def async_charge(self):
+        await self._async_apply()
+
+    async def _async_apply(self):
+        if self._charging:
+            return
+        self._charging = True
+        try:
+            while True:
+                floor = self._pending_floor
+                split = self._pending_split
+                self._pending_floor = False
+                self._pending_split = False
+                await self._apply_chargers(floor, split)
+                if not self._pending_floor and not self._pending_split:
+                    break
+        finally:
+            self._charging = False
+
+    async def _sync_until_unplug(self):
+        changed = False
+        until_on = {}
+        for serial in self.chargers:
+            car_state = self._state(self.car_entity(serial))
+            plugged = car_plugged(car_state)
+            override = self.until_unplug(serial)
+            new_on, new_seen = until_unplug_step(
+                override, plugged, self.seen.get(serial)
+            )
+            if bool(self.seen.get(serial)) != new_seen:
+                changed = True
+            self.seen[serial] = new_seen
+            if new_on != override:
+                await self._turn_until_unplug(serial, new_on)
+                changed = True
+            until_on[serial] = new_on
+        return changed, until_on
+
+    def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full):
+        """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
+        target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
+        lot, psm, amp = budget(
+            target_w,
+            self.min_amp,
+            self.max_amp,
+            self.group_lot,
+            self.volts,
+            self.phase3_min_w,
+        )
+        lot, psm, amp = group_surplus_setpoint(
+            lot,
+            psm,
+            amp,
+            n_full=n_full,
+            group_lot=self.group_lot,
+        )
+        lops = {serial: self.charger_priority(serial) for serial in surplus}
+        plugged = {}
+        states = {}
+        take_w = {}
+        charger_max_w = self.max_amp * self.volts * 3
+        for serial in surplus:
+            state = self._state(self.car_entity(serial))
+            states[serial] = state
+            plugged[serial] = car_plugged(state)
+            take_w[serial] = surplus_want_w(
+                snap["available_w"],
+                charger_take_w(
+                    state,
+                    self.charger_power_w(serial),
+                    snap["available_w"],
+                    charger_max_w,
+                ),
+                last_amp=self._surplus_amp.get(serial),
+                last_psm=self._surplus_psm.get(serial),
+                volts=self.volts,
+                min_amp=self.min_amp,
+                max_amp=self.max_amp,
+                group_lot=self.group_lot,
+                phase3_min_w=self.phase3_min_w,
+            )
+        alloc_w = snap["available_w"]
+        if dec["use_floor_budget"]:
+            alloc_w = max(alloc_w, self.min_amp * self.volts)
+        offer_pending = {
+            serial
+            for serial in surplus
+            if take_w.get(serial, 0) < 100 and serial not in self._offer_expired
+        }
+        allocations = surplus_allocation_plan(
+            surplus,
+            lops=lops,
+            plugged=plugged,
+            leftover_w=alloc_w,
+            split_min_w=self.split_min_w,
+            charger_max_w=charger_max_w,
+            take_w=take_w,
+            states=states,
+            min_amp=self.min_amp,
+            volts=self.volts,
+            phase3_min_w=self.phase3_min_w,
+            split_floor_w=self.split_floor_w,
+            split_hold=self.split_session,
+            split_expired=split_expired,
+            offer_pending=offer_pending,
+        )
+        taking = allocations.get("taking") or []
+        self.split_session = len(taking) >= 2
+        self._arm_split(allocations["arm_split_hold"])
+        allocated = allocations["allocations"]
+        for serial in surplus:
+            taking_now = take_w.get(serial, 0) >= 100
+            self._arm_offer_wait(
+                serial,
+                serial in allocated and not taking_now,
+                taking=taking_now,
+            )
+        lot_alloc = allocations.get("lot_allocations")
+        if lot_alloc is None:
+            lot_alloc = allocations["allocations"]
+        overdraw = bool(allocations.get("overdraw"))
+        if not dec["use_floor_budget"]:
+            lot = group_lot_for_allocations(
+                lot,
+                lot_alloc,
+                min_amp=self.min_amp,
+                max_amp=self.max_amp,
+                group_lot=self.group_lot,
+                volts=self.volts,
+                phase3_min_w=self.phase3_min_w,
+                overdraw=overdraw,
+            )
+        targets = {}
+        for serial in surplus:
+            watts_i = allocations["allocations"].get(serial)
+            if watts_i is None:
+                if surplus_higher_keep_on(serial, allocated, lops, states):
+                    watts_i = alloc_w
+                else:
+                    continue
+            source_w = target_w if dec["use_floor_budget"] else min(
+                int(watts_i), max(int(snap["available_w"]), 0)
+            )
+            pub = surplus_phase_budget(
+                source_w,
+                self.min_amp,
+                self.max_amp,
+                self.group_lot,
+                self.volts,
+                self.phase3_min_w,
+                last_psm=self._surplus_psm.get(serial),
+                hold_expired=serial in self._phase_expired,
+            )
+            targets[serial] = pub
+            self._arm_phase(serial, pub["arm_phase"])
+        if n_full <= 0:
+            lot_serials = set(lot_alloc)
+            lot = group_lot_for_amps(
+                lot,
+                [
+                    pub["amp"]
+                    for serial, pub in targets.items()
+                    if serial in lot_serials
+                ],
+                self.group_lot,
+                overdraw=overdraw,
+            )
+        for pub in targets.values():
+            pub["lot"] = lot
+        return targets
+
+    async def _apply_chargers(self, floor_expired=False, split_expired=False):
+        changed, until_on = await self._sync_until_unplug()
+        now_ts = self._now_ts()
+        roles = {}
+        for serial in self.chargers:
+            roles[serial] = charger_mqtt_role(
+                self.policy(serial),
+                self.window_result,
+                now_ts,
+                enough_solar=self.enough_solar,
+                until_unplug=until_on.get(serial),
+            )
+            self._last_policy[serial] = self.policy(serial)
         snap = self._snapshot()
         dec = surplus_decision(
             self.session,
@@ -942,207 +1134,52 @@ class KotiakkuGoeDirectController:
             _LOGGER.info("kotiakku_goe_direct: Kotiakku sensors usable again")
             self._logged_kotiakku_unusable = False
         self._arm_floor(dec["arm_floor"])
-        if not dec["write_on"] and not dec["write_off"]:
-            if self._surplus_amp or self.session:
-                await self._stop_surplus()
-            return
-        if dec["write_on"]:
-            surplus = [serial for serial in self.chargers if self.surplus_allowed(serial)]
-            if not surplus:
-                await self._stop_surplus()
-                return
-            target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
-            lot, psm, amp = budget(
-                target_w,
-                self.min_amp,
-                self.max_amp,
-                self.group_lot,
-                self.volts,
-                self.phase3_min_w,
-            )
-            n_full = sum(1 for serial in self.chargers if self.charger_full_power(serial))
-            lot, psm, amp = group_surplus_setpoint(
-                lot,
-                psm,
-                amp,
-                n_full=n_full,
-                group_lot=self.group_lot,
-            )
+        surplus = [serial for serial in self.chargers if roles[serial] == ROLE_SURPLUS]
+        was_session = self.session
+        was_surplus_mqtt = set(self._surplus_amp)
+        surplus_on = False
+        pubs = {}
+        if dec["write_on"] and surplus:
+            surplus_on = True
             self.session = True
-            await self._save()
-            for serial in self.chargers:
-                if serial in surplus or self.charger_full_power(serial):
-                    continue
-                await self._publish_off(serial)
-            lops = {serial: self.charger_priority(serial) for serial in surplus}
-            plugged = {}
-            states = {}
-            take_w = {}
-            charger_max_w = self.max_amp * self.volts * 3
-            for serial in surplus:
-                state = self._state(self.car_entity(serial))
-                states[serial] = state
-                plugged[serial] = car_plugged(state)
-                take_w[serial] = surplus_want_w(
-                    snap["available_w"],
-                    charger_take_w(
-                        state,
-                        self.charger_power_w(serial),
-                        snap["available_w"],
-                        charger_max_w,
-                    ),
-                    last_amp=self._surplus_amp.get(serial),
-                    last_psm=self._surplus_psm.get(serial),
-                    volts=self.volts,
-                    min_amp=self.min_amp,
-                    max_amp=self.max_amp,
-                    group_lot=self.group_lot,
-                    phase3_min_w=self.phase3_min_w,
-                )
-            alloc_w = snap["available_w"]
-            if dec["use_floor_budget"]:
-                alloc_w = max(alloc_w, self.min_amp * self.volts)
-            offer_pending = {
-                serial
-                for serial in surplus
-                if take_w.get(serial, 0) < 100 and serial not in self._offer_expired
-            }
-            allocations = surplus_allocation_plan(
+            pubs = self._leftover_pubs(
                 surplus,
-                lops=lops,
-                plugged=plugged,
-                leftover_w=alloc_w,
-                split_min_w=self.split_min_w,
-                charger_max_w=charger_max_w,
-                take_w=take_w,
-                states=states,
-                min_amp=self.min_amp,
-                volts=self.volts,
-                phase3_min_w=self.phase3_min_w,
-                split_floor_w=self.split_floor_w,
-                split_hold=self.split_session,
-                split_expired=split_expired,
-                offer_pending=offer_pending,
+                dec,
+                snap,
+                split_expired,
+                n_full=sum(1 for serial in self.chargers if roles[serial] == ROLE_FULL),
             )
-            taking = allocations.get("taking") or []
-            self.split_session = len(taking) >= 2
-            self._arm_split(allocations["arm_split_hold"])
-            allocated = allocations["allocations"]
-            for serial in surplus:
-                taking_now = take_w.get(serial, 0) >= 100
-                self._arm_offer_wait(
-                    serial,
-                    serial in allocated and not taking_now,
-                    taking=taking_now,
-                )
-            await self._save()
-            lot_alloc = allocations.get("lot_allocations")
-            if lot_alloc is None:
-                lot_alloc = allocations["allocations"]
-            overdraw = bool(allocations.get("overdraw"))
-            if not dec["use_floor_budget"]:
-                lot = group_lot_for_allocations(
-                    lot,
-                    lot_alloc,
-                    min_amp=self.min_amp,
-                    max_amp=self.max_amp,
-                    group_lot=self.group_lot,
-                    volts=self.volts,
-                    phase3_min_w=self.phase3_min_w,
-                    overdraw=overdraw,
-                )
-            targets = {}
-            for serial in surplus:
-                watts_i = allocations["allocations"].get(serial)
-                if watts_i is None:
-                    if surplus_higher_keep_on(serial, allocated, lops, states):
-                        watts_i = alloc_w
-                    else:
-                        await self._publish_off(serial)
-                        continue
-                source_w = target_w if dec["use_floor_budget"] else min(
-                    int(watts_i), max(int(snap["available_w"]), 0)
-                )
-                # psm may be held 15 min; amp is leftover on that held phase.
-                pub = surplus_phase_budget(
-                    source_w,
-                    self.min_amp,
-                    self.max_amp,
-                    self.group_lot,
-                    self.volts,
-                    self.phase3_min_w,
-                    last_psm=self._surplus_psm.get(serial),
-                    hold_expired=serial in self._phase_expired,
-                )
-                targets[serial] = pub
-                self._arm_phase(serial, pub["arm_phase"])
-            if n_full <= 0:
-                lot_serials = set(lot_alloc)
-                lot = group_lot_for_amps(
-                    lot,
-                    [
-                        pub["amp"]
-                        for serial, pub in targets.items()
-                        if serial in lot_serials
-                    ],
-                    self.group_lot,
-                    overdraw=overdraw,
-                )
-            for serial, pub in targets.items():
-                await self._publish_on(serial, pub["psm"], lot, pub["amp"])
-            return
-        await self._stop_surplus()
-
-    async def async_charge(self):
-        if self._charging:
-            return
-        self._charging = True
-        try:
-            await self._async_charge()
-        finally:
-            self._charging = False
-
-    async def _async_charge(self):
-        changed = False
+        elif dec["write_on"] or dec["write_off"] or was_session or was_surplus_mqtt:
+            self._clear_surplus_session()
         for serial in self.chargers:
-            car_state = self._state(self.car_entity(serial))
-            plugged = car_plugged(car_state)
-            override = self.until_unplug(serial)
-            new_on, new_seen = until_unplug_step(
-                override, plugged, self.seen.get(serial)
+            role = roles[serial]
+            had_full = bool(self._charge_session.get(serial))
+            leftover_live = serial in was_surplus_mqtt or (
+                was_session and role == ROLE_SURPLUS
             )
-            if bool(self.seen.get(serial)) != new_seen:
-                changed = True
-            self.seen[serial] = new_seen
-            if new_on != override:
-                await self._turn_until_unplug(serial, new_on)
-                changed = True
-            want_on = policy_full_power(
-                self.policy(serial),
-                self.window_result,
-                self._now_ts(),
-                enough_solar=self.enough_solar,
-                until_unplug=new_on,
+            cmd = charger_mqtt_command(
+                role,
+                surplus_on=surplus_on,
+                surplus_pub=pubs.get(serial),
+                had_full=had_full,
+                leftover_session=leftover_live,
+                group_lot=self.group_lot,
+                max_amp=self.max_amp,
             )
-            want_off = self._charge_session.get(serial) and not want_on
-            force_idle = (
-                self.policy(serial) == POLICY_FORCE_OFF and not new_on and not want_on
-            )
-            if want_on:
-                if not self._charge_session.get(serial):
+            if role == ROLE_FULL:
+                if not had_full:
                     changed = True
                 self._charge_session[serial] = True
                 self._arm_phase(serial, False)
-                await self._publish_on(serial, 2, self.group_lot, self.max_amp)
-            elif force_idle or want_off:
-                was_charging = bool(
-                    self._charge_session.get(serial) or serial in self._surplus_amp
-                )
-                await self._publish_off(serial)
-                self._charge_session[serial] = False
-                if was_charging:
+            else:
+                if had_full:
                     changed = True
-            self._last_policy[serial] = self.policy(serial)
+                self._charge_session[serial] = False
+            if cmd is None:
+                continue
+            published = await self._publish_cmd(serial, cmd)
+            if published:
+                changed = True
         if changed:
             await self._save()
             self.notify()
@@ -1179,6 +1216,18 @@ class KotiakkuGoeDirectController:
             blocking=True,
         )
 
+    async def _publish_cmd(self, serial, cmd):
+        if not serial or cmd is None:
+            return False
+        if self._last_mqtt.get(serial) == cmd:
+            return False
+        if cmd[0] == "off":
+            await self._publish_off(serial)
+        else:
+            await self._publish_on(serial, cmd[1], cmd[2], cmd[3])
+        self._last_mqtt[serial] = cmd
+        return True
+
     async def _publish_on(self, serial, psm, lot, amp):
         await self._mqtt_many(serial, charger_on_mqtt(psm, lot, amp))
         if serial:
@@ -1191,6 +1240,7 @@ class KotiakkuGoeDirectController:
             self._arm_phase(serial, False)
             self._surplus_psm.pop(serial, None)
             self._surplus_amp.pop(serial, None)
+            self._last_mqtt[serial] = ("off",)
 
     async def _mqtt_many(self, serial, pairs):
         for key, payload in pairs:

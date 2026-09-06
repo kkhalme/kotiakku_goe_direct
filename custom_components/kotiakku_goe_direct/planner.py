@@ -543,6 +543,70 @@ def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=
     return restore_policy(policy) in _WINDOW_SURPLUS_POLICIES
 
 
+ROLE_FULL = "full"
+ROLE_SURPLUS = "surplus"
+ROLE_OFF = "off"
+
+
+def charger_mqtt_role(
+    policy, result, now_ts, *, enough_solar=False, until_unplug=False
+):
+    """What this charger should be doing: 22 kW, leftover, or off."""
+    if charger_full_power(
+        policy,
+        result,
+        now_ts,
+        enough_solar=enough_solar,
+        until_unplug=until_unplug,
+    ):
+        return ROLE_FULL
+    if charger_surplus(
+        policy,
+        result,
+        now_ts,
+        enough_solar=enough_solar,
+        until_unplug=until_unplug,
+    ):
+        return ROLE_SURPLUS
+    return ROLE_OFF
+
+
+def charger_mqtt_command(
+    role,
+    *,
+    surplus_on,
+    surplus_pub=None,
+    had_full=False,
+    leftover_session=False,
+    group_lot=50,
+    max_amp=32,
+):
+    """One MQTT intent for a charger. None means do not publish.
+
+    Charge windows and leftover share this so a cheap hour ending does
+    not ``frc=1`` a charger leftover is about to write. Full-power is
+    always 22 kW. Leftover on only when surplus is writing this serial.
+    Otherwise off if Force off, a 22 kW session just ended, leftover is
+    stopping, or leftover is on but this serial is not allocated. Idle
+    SolarPriority that leftover has never started is a no-op (do not
+    spam ``frc=1``).
+    """
+    if role == ROLE_FULL:
+        return ("on", 2, int(group_lot), int(max_amp))
+    if role == ROLE_SURPLUS:
+        if surplus_on and surplus_pub is not None:
+            return (
+                "on",
+                int(surplus_pub["psm"]),
+                int(surplus_pub["lot"]),
+                int(surplus_pub["amp"]),
+            )
+        if surplus_on or had_full or leftover_session:
+            return ("off",)
+        return None
+    return ("off",)
+
+
 def _empty_result(
     min_hours,
     max_hours,
