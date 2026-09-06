@@ -413,7 +413,7 @@ def simulate(
                 split_hold=split_hold,
                 split_expired=split_expired,
             )
-            split_hold = len(plan["allocations"]) >= 2
+            split_hold = len(plan.get("taking") or []) >= 2
             cmds = {SERIAL_CHEAP: a, SERIAL_SURPLUS: b}
             for serial in surplus_serials:
                 watts_i = plan["allocations"].get(serial)

@@ -97,6 +97,7 @@ from .surplus import (
     UNUSABLE_STATES,
     DEFAULT_LAT,
     DEFAULT_LON,
+    OFFER_WAIT_S,
     budget,
     car_plugged,
     charger_take_w,
@@ -200,6 +201,8 @@ class KotiakkuGoeDirectController:
         self._split_unsub = None
         self._phase_unsub = {}
         self._phase_expired = set()
+        self._offer_unsub = {}
+        self._offer_expired = set()
         self._boundary_unsub = None
         self._price_unsub = None
         self._tracked_price = None
@@ -580,6 +583,8 @@ class KotiakkuGoeDirectController:
             self._cancel(attr)
         for serial in list(self._phase_unsub):
             self._arm_phase(serial, False)
+        for serial in list(self._offer_unsub):
+            self._arm_offer_wait(serial, False)
 
     async def _save(self):
         await self._store.async_save(
@@ -649,6 +654,7 @@ class KotiakkuGoeDirectController:
     async def _on_interval(self, _now=None):
         await self.async_plan()
         await self.async_charge()
+        self._schedule_surplus()
 
     async def _on_policy(self, serial, event):
         await self.async_charge()
@@ -710,6 +716,37 @@ class KotiakkuGoeDirectController:
 
         self._phase_unsub[serial] = async_call_later(
             self.hass, self.hold_min * 60, _fire
+        )
+
+    def _arm_offer_wait(self, serial, need, taking=False):
+        if not serial:
+            return
+        if taking:
+            unsub = self._offer_unsub.pop(serial, None)
+            if unsub:
+                unsub()
+            self._offer_expired.discard(serial)
+            return
+        if not need:
+            unsub = self._offer_unsub.pop(serial, None)
+            if unsub:
+                unsub()
+            return
+        if serial in self._offer_unsub or serial in self._offer_expired:
+            return
+        _LOGGER.info(
+            "kotiakku_goe_direct: waiting %ss for %s to take leftover",
+            OFFER_WAIT_S,
+            serial,
+        )
+
+        async def _fire(_now=None, serial=serial):
+            self._offer_unsub.pop(serial, None)
+            self._offer_expired.add(serial)
+            await self.async_surplus()
+
+        self._offer_unsub[serial] = async_call_later(
+            self.hass, OFFER_WAIT_S, _fire
         )
 
     def _schedule_boundaries(self):
@@ -875,6 +912,9 @@ class KotiakkuGoeDirectController:
         self.session = False
         self.split_session = False
         self._arm_split(False)
+        for serial in list(self._offer_unsub):
+            self._arm_offer_wait(serial, False)
+        self._offer_expired.clear()
         await self._save()
 
     async def async_surplus(self, floor_expired=False, split_expired=False):
@@ -961,6 +1001,11 @@ class KotiakkuGoeDirectController:
             alloc_w = snap["available_w"]
             if dec["use_floor_budget"]:
                 alloc_w = max(alloc_w, self.min_amp * self.volts)
+            offer_pending = {
+                serial
+                for serial in surplus
+                if take_w.get(serial, 0) < 100 and serial not in self._offer_expired
+            }
             allocations = surplus_allocation_plan(
                 surplus,
                 lops=lops,
@@ -976,14 +1021,27 @@ class KotiakkuGoeDirectController:
                 split_floor_w=self.split_floor_w,
                 split_hold=self.split_session,
                 split_expired=split_expired,
+                offer_pending=offer_pending,
             )
-            self.split_session = len(allocations["allocations"]) >= 2
+            taking = allocations.get("taking") or []
+            self.split_session = len(taking) >= 2
             self._arm_split(allocations["arm_split_hold"])
+            allocated = allocations["allocations"]
+            for serial in surplus:
+                taking_now = take_w.get(serial, 0) >= 100
+                self._arm_offer_wait(
+                    serial,
+                    serial in allocated and not taking_now,
+                    taking=taking_now,
+                )
             await self._save()
+            lot_alloc = allocations.get("lot_allocations")
+            if lot_alloc is None:
+                lot_alloc = allocations["allocations"]
             if not dec["use_floor_budget"]:
                 lot = group_lot_for_allocations(
                     lot,
-                    allocations["allocations"],
+                    lot_alloc,
                     min_amp=self.min_amp,
                     max_amp=self.max_amp,
                     group_lot=self.group_lot,
@@ -1013,8 +1071,15 @@ class KotiakkuGoeDirectController:
                 targets[serial] = pub
                 self._arm_phase(serial, pub["arm_phase"])
             if n_full <= 0:
+                lot_serials = set(lot_alloc)
                 lot = group_lot_for_amps(
-                    lot, [pub["amp"] for pub in targets.values()], self.group_lot
+                    lot,
+                    [
+                        pub["amp"]
+                        for serial, pub in targets.items()
+                        if serial in lot_serials
+                    ],
+                    self.group_lot,
                 )
             for serial, pub in targets.items():
                 await self._publish_on(serial, pub["psm"], lot, pub["amp"])
