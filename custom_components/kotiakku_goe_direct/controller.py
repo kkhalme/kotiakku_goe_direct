@@ -976,7 +976,10 @@ class KotiakkuGoeDirectController:
         if value is None:
             return
         bucket = self._charger_mqtt.setdefault(serial, {})
+        old = bucket.get(key)
         bucket[key] = value
+        if key == "frc" and old != value:
+            self._schedule_apply()
 
     def _snapshot(self):
         problems = self._kotiakku_problems()
@@ -1256,6 +1259,7 @@ class KotiakkuGoeDirectController:
                 leftover_session=leftover_live,
                 group_lot=self.group_lot,
                 max_amp=self.max_amp,
+                live_frc=(self._charger_mqtt.get(serial) or {}).get("frc"),
             )
             if role == ROLE_FULL:
                 if not had_full:

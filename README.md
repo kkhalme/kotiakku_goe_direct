@@ -270,6 +270,7 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | SolarPriority, today 8 kWh and tomorrow 6 kWh | Night cheap hours still 22 kW (hours under 1 kWh stay searchable) |
 | SolarPriority, forecast unknown or unset | Search all available spot slots (nothing excluded, not enough solar) |
 | Force off during a price window | That charger stays off (`frc` 1). Surplus does not write that charger |
+| SolarPriority / SolarAndGrid, no leftover and no window, unplug then replug | Charger may show Neutral after unplug; HA writes `frc=1`. Replug does not start charging |
 | Force On Until Unplug switch on | That charger 22 kW until **its** car unplugs. Full battery (Complete) keeps it on. Policy select stays put |
 
 ## 7. Graphs

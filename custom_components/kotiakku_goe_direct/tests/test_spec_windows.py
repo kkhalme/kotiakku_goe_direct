@@ -351,6 +351,21 @@ def main():
             "idle leftover policy does not spam frc=1",
         )
         assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, had_full=False, live_frc=1),
+            None,
+            "already force-off idle leftover is still a no-op",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, had_full=False, live_frc=0),
+            ("off",),
+            "Neutral after unplug is force-off",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=False, had_full=False, live_frc=2),
+            ("off",),
+            "stale On while idle leftover is force-off",
+        )
+        assert_eq(
             cmd(planner.ROLE_SURPLUS, surplus_on=False, leftover_session=True),
             ("off",),
             "stopping leftover is frc=1",
@@ -398,6 +413,7 @@ def main():
         assert_eq(need(on, {"frc": 2}), True, "incomplete actual needs a write")
         assert_eq(need(("off",), {"frc": 1}), False, "already force-off")
         assert_eq(need(("off",), {"frc": 2}), True, "still on needs frc=1")
+        assert_eq(need(("off",), {"frc": 0}), True, "Neutral needs frc=1")
         assert_eq(need(("off",), None), True, "unknown off state needs a write")
         assert_eq(
             need(on, {"frc": "2", "psm": "2", "lot": "11", "amp": "11"}),
