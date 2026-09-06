@@ -255,6 +255,17 @@ def main():
             {B: 8000},
             "group lot uses the taking share, not the Idle arm",
         )
+        assert_eq(surplus.OFFER_WAIT_S, 15, "wait 15 s after offering leftover")
+        waiting = surplus.surplus_allocation_plan(
+            [A, B], leftover_w=8000, split_hold=True, offer_pending={A}, **idle_first_take,
+        )
+        assert_eq(
+            waiting["allocations"],
+            {A: 8000},
+            "first 15 s after leftover MQTT: keep leftover on the offered car",
+        )
+        assert_true(B not in waiting["allocations"], "next car waits for the offered car to react")
+        assert_eq(waiting["taking"], [], "pending offer is not a taking split")
         assert_eq(
             alloc(
                 [A, B], leftover_w=8000,
@@ -316,6 +327,31 @@ def main():
             ),
             26,
             "9+3 steal raises lot to 13 A + 13 A without the Idle arm",
+        )
+        wait_mid = surplus.surplus_allocation_plan(
+            [A, B, C], leftover_w=18000,
+            take_w={A: 5000, B: 0, C: 0},
+            states={A: "Charging", B: "Idle", C: "Charging"},
+            offer_pending={B},
+            **three,
+        )
+        assert_eq(
+            wait_mid["allocations"],
+            {A: 5000, B: 13000},
+            "15 s after offering remainder: do not start the third car yet",
+        )
+        assert_true(C not in wait_mid["allocations"], "third waits for the offered next car")
+        wait_lead = surplus.surplus_allocation_plan(
+            [A, B, C], leftover_w=12000,
+            take_w={A: 0, B: 10000, C: 0},
+            states={A: "Idle", B: "Charging", C: "Charging"},
+            offer_pending={A},
+            **idle_lead,
+        )
+        assert_eq(
+            wait_lead["allocations"],
+            {A: 12000},
+            "15 s after offering high: leftover stays on high, next waits",
         )
         assert_eq(
             alloc(

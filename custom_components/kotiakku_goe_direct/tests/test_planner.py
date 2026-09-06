@@ -935,6 +935,21 @@ def main():
         assert_eq(
             alloc(
                 [a, b],
+                leftover_w=8000,
+                lops=lops,
+                plugged={a: False, b: True},
+                split_min_w=3000,
+                charger_max_w=22080,
+                take_w={a: 0, b: 0},
+                states={a: "Idle", b: "Charging"},
+                offer_pending={a},
+            ),
+            {a: 8000},
+            "15 s after leftover MQTT: high keeps leftover until the car reacts",
+        )
+        assert_eq(
+            alloc(
+                [a, b],
                 leftover_w=300,
                 lops=lops,
                 plugged={a: False, b: True},

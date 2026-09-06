@@ -32,6 +32,9 @@ FINISHED_STATES = {
     "finished",
 }
 
+# Seconds to wait after leftover MQTT before treating a car as not taking.
+OFFER_WAIT_S = 15
+
 
 def watts(state, in_kw, default=0):
     try:
@@ -765,6 +768,7 @@ def surplus_allocation_plan(
     split_floor_w=500,
     split_hold=False,
     split_expired=False,
+    offer_pending=None,
 ):
     """Per-charger leftover watts plus next-car hold flags.
 
@@ -777,16 +781,21 @@ def surplus_allocation_plan(
 
     A high-priority car that is not taking still gets leftover MQTT so
     it can start, but leftover itself goes to the next car in priority
-    order as the first. If nobody is taking, every eligible charger is
-    armed at leftover watts. Finished chargers are skipped so remaining
-    equal-priority cars still share. After a taking first car, unused
-    leftover above ``split_floor_w`` (default 500 W) goes to the next
-    car in priority — even if that car is not taking yet, so it can
-    start. If that remainder is below ``split_min_w`` (default 3 kW),
-    cut the high-priority share so the next car still gets 3 kW — only
-    if leftover itself is at least ``2 × split_min_w`` (each car keeps
-    at least 3 kW), the first is actually taking power, and both shares
-    still meet 6 A. Remainder at or below 500 W is a dead zone: do not
+    order as the first — after ``OFFER_WAIT_S`` (15 s) to see whether
+    the offered car starts taking. ``offer_pending`` is those serials
+    still in that wait (controller: offered leftover, take < 100 W,
+    15 s not expired). While pending, leftover stays on that car; do
+    not start the next one yet. If nobody is taking and nobody is
+    pending, every eligible charger is armed at leftover watts. Finished
+    chargers are skipped so remaining equal-priority cars still share.
+    After a taking first car, unused leftover above ``split_floor_w``
+    (default 500 W) goes to the next car in priority — even if that car
+    is not taking yet, so it can start. If that next car is pending,
+    stop there until it reacts or the wait expires. If that remainder
+    is below ``split_min_w`` (default 3 kW), cut the high-priority
+    share so the next car still gets 3 kW — only if leftover itself is
+    at least ``2 × split_min_w`` (each car keeps at least 3 kW), the
+    first is actually taking power, and both shares still meet 6 A. Remainder at or below 500 W is a dead zone: do not
     *start* the next car. If the next car was already taking and leftover
     then shrinks so the first would use it all, keep stealing 3 kW for
     the hold minutes unless ``split_expired`` or leftover is below 6 kW.
@@ -843,6 +852,11 @@ def surplus_allocation_plan(
     def _shared():
         return _pack(shared, leftover_w, False)
 
+    pending = set(offer_pending or ())
+
+    def _is_pending(serial):
+        return serial in pending and not _is_taking(serial)
+
     ranks = []
     for serial in eligible:
         rank = lops.get(serial) if isinstance(lops, dict) else None
@@ -856,10 +870,12 @@ def surplus_allocation_plan(
     )
     leading = []
     pool = list(order)
-    while pool and not _is_taking(pool[0]):
+    while pool and not _is_taking(pool[0]) and not _is_pending(pool[0]):
         leading.append(pool.pop(0))
     if not pool:
         return _shared()
+    if _is_pending(pool[0]):
+        return _pack({pool[0]: leftover_w}, leftover_w, False, leading)
     if len(pool) == 1:
         return _pack({pool[0]: leftover_w}, leftover_w, False, leading)
     remaining = leftover_w
@@ -887,6 +903,9 @@ def surplus_allocation_plan(
             remaining -= take
             prev = serial
             prev_take = take
+            if _is_pending(serial):
+                remaining = 0
+                break
             continue
         in_dead = remaining <= split_floor_w
         want_steal = (
@@ -911,6 +930,9 @@ def surplus_allocation_plan(
             remaining -= take
             prev = serial
             prev_take = take
+            if _is_pending(serial):
+                remaining = 0
+                break
             continue
         break
     taking = [serial for serial in allocations if _is_taking(serial)]
