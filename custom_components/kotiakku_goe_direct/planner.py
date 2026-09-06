@@ -590,6 +590,7 @@ def charger_mqtt_command(
     leftover_session=False,
     group_lot=50,
     max_amp=32,
+    live_frc=None,
 ):
     """One MQTT intent for a charger. None means do not publish.
 
@@ -599,7 +600,8 @@ def charger_mqtt_command(
     Otherwise off if Force off, a 22 kW session just ended, leftover is
     stopping, or leftover is on but this serial is not allocated. Idle
     SolarPriority that leftover has never started is a no-op (do not
-    spam ``frc=1``).
+    spam ``frc=1``) unless live ``frc`` is known and not force-off:
+    Neutral after unplug would start charging in Basic/default.
     """
     if role == ROLE_FULL:
         return ("on", 2, int(group_lot), int(max_amp))
@@ -612,6 +614,8 @@ def charger_mqtt_command(
                 int(surplus_pub["amp"]),
             )
         if surplus_on or had_full or leftover_session:
+            return ("off",)
+        if live_frc is not None and int(live_frc) != 1:
             return ("off",)
         return None
     return ("off",)
