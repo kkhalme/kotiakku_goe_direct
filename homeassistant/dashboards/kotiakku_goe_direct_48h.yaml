@@ -355,9 +355,12 @@ views:
                     const today = kwhOf('sensor.kotiakku_goe_direct_solar_today_kwh');
                     const tom = kwhOf('sensor.kotiakku_goe_direct_solar_tomorrow_kwh');
                     const daySt = hass.states['sensor.kotiakku_goe_direct_solar_gating_day'] || {};
-                    const sunset = parseTs((daySt.attributes || {}).sunset);
+                    const usable = parseTs((daySt.attributes || {}).usable_end);
+                    const prices = (daySt.attributes || {}).tomorrow_ok;
+                    const pricesOn = prices === true || prices === 'on' || prices === 'true';
+                    const solarLeft = Number.isFinite(usable) && t < usable;
                     let day = String(daySt.state || '');
-                    if (Number.isFinite(sunset)) day = t < sunset ? 'today' : 'tomorrow';
+                    day = (!solarLeft && pricesOn) ? 'tomorrow' : 'today';
                     const v = day === 'tomorrow' ? tom : today;
                     return v != null && v >= thr;
                   }

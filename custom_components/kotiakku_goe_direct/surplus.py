@@ -189,42 +189,102 @@ def last_sun_end_ts(
     return last
 
 
+def last_usable_solar_end_ts(
+    clock,
+    day_start,
+    day_end,
+    energy_kwh,
+    hour_kwh,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+):
+    """Exclusive end of the last local hour today with expected kWh ≥ ``hour_kwh``.
+
+    None when no hour qualifies (all hours under the threshold, including
+    ``energy_kwh == 0`` or polar night) or when energy is unknown. A
+    non-positive / invalid hour threshold uses any hour with expected
+    energy above 0 (off-sun disabled: remaining daylight still counts).
+    """
+    try:
+        threshold = float(hour_kwh)
+    except (TypeError, ValueError):
+        threshold = 0.0
+    if energy_kwh is None:
+        return None
+    if threshold <= 0:
+        threshold = 1e-12
+    last = None
+    for _start, end, kwh in expected_hour_kwh(
+        clock, day_start, day_end, energy_kwh, lat, lon
+    ):
+        if kwh >= threshold:
+            last = end
+    return last
+
+
+def _gating_until_ts(clock, today_kwh, hour_kwh, lat, lon):
+    """``(now_ts, until_ts)`` for remaining usable solar today.
+
+    ``until_ts`` is None when no hour qualifies.
+    """
+    now = clock.now()
+    today_start = clock.start_of_local_day(now)
+    today_end = today_start + datetime.timedelta(days=1)
+    now_ts = float(clock.as_timestamp(now))
+    until = last_usable_solar_end_ts(
+        clock, today_start, today_end, today_kwh, hour_kwh, lat, lon
+    )
+    return now_ts, until
+
+
+def _gating_use_tomorrow(clock, today_kwh, hour_kwh, lat, lon, tomorrow_ok):
+    """True when tomorrow's prices are in and today's usable solar is gone.
+
+    This is the latest the gate flips: not at midnight just because no hour
+    meets the threshold, and not at sunset. Stay on today until both.
+    """
+    if not tomorrow_ok:
+        return False
+    try:
+        now_ts, until = _gating_until_ts(clock, today_kwh, hour_kwh, lat, lon)
+    except Exception:
+        return False
+    if until is not None and now_ts < until:
+        return False
+    return True
+
+
 def gating_solar_kwh(
     clock,
     today_kwh,
     tomorrow_kwh,
     lat=DEFAULT_LAT,
     lon=DEFAULT_LON,
+    hour_kwh=1,
+    tomorrow_ok=False,
 ):
-    """kWh that gates 22 kW: today's full-day estimate until sunset, then tomorrow.
+    """kWh that gates 22 kW: today until usable solar ends and tomorrow's prices are in.
 
-    Before today's last sun (including pre-dawn): ``today_kwh``. After sunset,
-    polar night, or if sunset cannot be computed: ``tomorrow_kwh``.
+    Stay on ``today_kwh`` while a later hour today still has expected energy
+    ≥ ``hour_kwh``, or while the next day's spot curve is missing. After
+    both (prices in and no usable solar left, including no qualifying hour):
+    ``tomorrow_kwh``.
     """
-    now = clock.now()
-    try:
-        today_start = clock.start_of_local_day(now)
-        today_end = today_start + datetime.timedelta(days=1)
-        now_ts = float(clock.as_timestamp(now))
-    except Exception:
-        return tomorrow_kwh
-    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
-    if sunset is None or now_ts >= sunset:
+    if _gating_use_tomorrow(clock, today_kwh, hour_kwh, lat, lon, tomorrow_ok):
         return tomorrow_kwh
     return today_kwh
 
 
-def gating_solar_day(clock, lat=DEFAULT_LAT, lon=DEFAULT_LON):
-    """``today`` until sunset; ``tomorrow`` after sunset or polar night."""
-    now = clock.now()
-    try:
-        today_start = clock.start_of_local_day(now)
-        today_end = today_start + datetime.timedelta(days=1)
-        now_ts = float(clock.as_timestamp(now))
-    except Exception:
-        return "tomorrow"
-    sunset = last_sun_end_ts(clock, today_start, today_end, lat, lon)
-    if sunset is None or now_ts >= sunset:
+def gating_solar_day(
+    clock,
+    today_kwh,
+    hour_kwh=1,
+    lat=DEFAULT_LAT,
+    lon=DEFAULT_LON,
+    tomorrow_ok=False,
+):
+    """``today`` until tomorrow's prices are in and usable solar today is gone."""
+    if _gating_use_tomorrow(clock, today_kwh, hour_kwh, lat, lon, tomorrow_ok):
         return "tomorrow"
     return "today"
 
@@ -236,10 +296,14 @@ def enough_solar_now(
     threshold_kwh,
     lat=DEFAULT_LAT,
     lon=DEFAULT_LON,
+    hour_kwh=1,
+    tomorrow_ok=False,
 ):
     """Skip 22 kW when the gating day's full-day kWh is at least the threshold."""
     return enough_solar(
-        gating_solar_kwh(clock, today_kwh, tomorrow_kwh, lat, lon),
+        gating_solar_kwh(
+            clock, today_kwh, tomorrow_kwh, lat, lon, hour_kwh, tomorrow_ok
+        ),
         threshold_kwh,
     )
 

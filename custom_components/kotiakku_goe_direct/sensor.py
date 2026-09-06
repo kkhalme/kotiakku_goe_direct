@@ -149,7 +149,7 @@ class SolarTomorrowSensor(_ForecastKwhSensor):
 
 
 class SolarGatingKwhSensor(_ForecastKwhSensor):
-    """kWh that currently gates the 22 kW skip (today until sunset, then tomorrow)."""
+    """kWh that gates the 22 kW skip (today until prices-in and usable solar ends)."""
 
     def __init__(self, controller):
         super().__init__(controller)
@@ -166,11 +166,13 @@ class SolarGatingKwhSensor(_ForecastKwhSensor):
         return {
             "gating_day": self._controller.gating_solar_day,
             "sunset": self._controller.sunset_iso,
+            "usable_end": self._controller.usable_solar_end_iso,
+            "tomorrow_ok": self._controller.tomorrow_prices_ok,
         }
 
 
 class SolarGatingDaySensor(HubEntity, SensorEntity):
-    """``today`` until sunset; ``tomorrow`` after sunset or polar night."""
+    """``today`` until tomorrow's prices are in and usable solar today is gone."""
 
     _attr_icon = "mdi:weather-sunset-down"
 
@@ -186,4 +188,8 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return {"sunset": self._controller.sunset_iso}
+        return {
+            "sunset": self._controller.sunset_iso,
+            "usable_end": self._controller.usable_solar_end_iso,
+            "tomorrow_ok": self._controller.tomorrow_prices_ok,
+        }

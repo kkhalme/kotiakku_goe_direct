@@ -416,6 +416,29 @@ def main():
         assert_eq(flagged["tomorrow_ok"], True, "tomorrow_valid flag")
         no_flag = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=0, flex_euro=0)
         assert_eq(no_flag["tomorrow_ok"], False, "today-only prices are not tomorrow_ok")
+        assert_eq(
+            planner.tomorrow_prices_ok(
+                clock, {"raw_today": slots_from(base, [0.04] * 16), "tomorrow_valid": True}
+            ),
+            True,
+            "tomorrow_prices_ok follows tomorrow_valid",
+        )
+        assert_eq(
+            planner.tomorrow_prices_ok(
+                clock,
+                {
+                    "raw_today": slots_from(base, [0.04] * 16),
+                    "raw_tomorrow": slots_from(base + 86400, [0.04] * 16),
+                },
+            ),
+            True,
+            "tomorrow_prices_ok sees unclipped raw_tomorrow",
+        )
+        assert_eq(
+            planner.tomorrow_prices_ok(clock, {"raw_today": slots_from(base, [0.04] * 16)}),
+            False,
+            "tomorrow_prices_ok false without tomorrow curve",
+        )
 
     def test_horizon_tomorrow_only_and_zero_today():
         today = slots_from(base, [0.001] * 16)

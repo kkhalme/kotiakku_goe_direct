@@ -97,6 +97,7 @@ from .planner import (
     mqtt_apply_window_action,
     now_in_windows,
     plan,
+    tomorrow_prices_ok as planner_tomorrow_prices_ok,
     until_unplug_step,
     ROLE_FULL,
     ROLE_SURPLUS,
@@ -116,6 +117,7 @@ from .surplus import (
     gating_solar_day,
     gating_solar_kwh as forecast_gating_kwh,
     last_sun_end_ts as forecast_last_sun_end,
+    last_usable_solar_end_ts as forecast_last_usable_end,
     leftover_w,
     group_lot_for_allocations,
     group_lot_for_amps,
@@ -419,6 +421,14 @@ class KotiakkuGoeDirectController:
         return self._float_entity(EID_OFFSUN_HOUR_KWH, DEFAULT_OFFSUN_HOUR_KWH)
 
     @property
+    def tomorrow_prices_ok(self):
+        """True when the next day's unclipped spot curve is present."""
+        price_entity = self.price_entity_id()
+        source = self.hass.states.get(price_entity) if price_entity else None
+        attrs = None if source is None else dict(source.attributes)
+        return planner_tomorrow_prices_ok(self.clock, attrs)
+
+    @property
     def enough_solar(self):
         lat, lon = self._site_lat_lon()
         return solar_enough_now(
@@ -428,6 +438,8 @@ class KotiakkuGoeDirectController:
             self.solar_enough_kwh,
             lat,
             lon,
+            self.offsun_hour_kwh,
+            self.tomorrow_prices_ok,
         )
 
     @property
@@ -439,30 +451,64 @@ class KotiakkuGoeDirectController:
             self.tomorrow_kwh,
             lat,
             lon,
+            self.offsun_hour_kwh,
+            self.tomorrow_prices_ok,
         )
 
     @property
     def gating_solar_day(self):
         lat, lon = self._site_lat_lon()
-        return gating_solar_day(self.clock, lat, lon)
+        return gating_solar_day(
+            self.clock,
+            self.today_kwh,
+            self.offsun_hour_kwh,
+            lat,
+            lon,
+            self.tomorrow_prices_ok,
+        )
 
-    @property
-    def sunset_iso(self):
-        """Exclusive end of today's last sun, ISO UTC, or None on polar night."""
-        lat, lon = self._site_lat_lon()
+    def _today_start_end(self):
         now = self.clock.now()
-        try:
-            today_start = self.clock.start_of_local_day(now)
-            today_end = today_start + timedelta(days=1)
-            ts = forecast_last_sun_end(self.clock, today_start, today_end, lat, lon)
-        except Exception:
-            return None
+        today_start = self.clock.start_of_local_day(now)
+        return today_start, today_start + timedelta(days=1)
+
+    def _iso_from_ts(self, ts):
         if ts is None:
             return None
         try:
             return self.clock.utc_from_timestamp(ts).isoformat()
         except Exception:
             return None
+
+    @property
+    def sunset_iso(self):
+        """Exclusive end of today's last sun, ISO UTC, or None on polar night."""
+        lat, lon = self._site_lat_lon()
+        try:
+            today_start, today_end = self._today_start_end()
+            ts = forecast_last_sun_end(self.clock, today_start, today_end, lat, lon)
+        except Exception:
+            return None
+        return self._iso_from_ts(ts)
+
+    @property
+    def usable_solar_end_iso(self):
+        """Exclusive end of today's last usable solar hour, ISO UTC, or None."""
+        lat, lon = self._site_lat_lon()
+        try:
+            today_start, today_end = self._today_start_end()
+            ts = forecast_last_usable_end(
+                self.clock,
+                today_start,
+                today_end,
+                self.today_kwh,
+                self.offsun_hour_kwh,
+                lat,
+                lon,
+            )
+        except Exception:
+            return None
+        return self._iso_from_ts(ts)
 
     def _site_lat_lon(self):
         try:
