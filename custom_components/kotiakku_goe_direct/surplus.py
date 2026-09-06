@@ -794,9 +794,11 @@ def surplus_allocation_plan(
     leftover, take < 100 W, 15 s not expired). Do not ``frc=1`` anyone
     during the wait: leftover can stay on the offered charger and the
     next taking charger together (temporary over-draw; those pending
-    arms are group-lot shares until the wait expires). After the wait,
-    if high is still not taking, leftover belongs to the next as first
-    and high stays armed (not a lot share). If nobody is taking, every
+    arms are group-lot shares until the wait expires). Steal also waits:
+    do not cut a taking car to mint 3 kW, and do not start a further car,
+    while a higher-priority offer is still pending. After the wait, if
+    high is still not taking, leftover belongs to the next as first and
+    high stays armed (not a lot share). If nobody is taking, every
     eligible charger is armed at leftover watts. Finished chargers are
     skipped so remaining equal-priority cars still share. After a taking
     first car, unused leftover above ``split_floor_w`` (default 500 W)
@@ -806,11 +808,12 @@ def surplus_allocation_plan(
     that remainder is below ``split_min_w`` (default 3 kW), cut the
     high-priority share so the next car still gets 3 kW — only if
     leftover itself is at least ``2 × split_min_w`` (each car keeps at
-    least 3 kW), the first is actually taking power, and both shares
-    still meet 6 A. Remainder at or below 500 W is a dead zone: do not
-    *start* the next car. If the next car was already taking and leftover
-    then shrinks so the first would use it all, keep stealing 3 kW for
-    the hold minutes unless ``split_expired`` or leftover is below 6 kW.
+    least 3 kW), the first is actually taking power, both shares still
+    meet 6 A, and no higher-priority offer is still pending. Remainder
+    at or below 500 W is a dead zone: do not *start* the next car. If
+    the next car was already taking and leftover then shrinks so the
+    first would use it all, keep stealing 3 kW for the hold minutes
+    unless ``split_expired`` or leftover is below 6 kW.
     ``lops`` is HA charger priority, not app ``lop``. HA does not write
     ``lop``. Group ``lot`` uses steal/share watts only, except during
     the offer-wait over-draw. Whenever a lower-priority eligible
@@ -940,11 +943,13 @@ def surplus_allocation_plan(
                 break
             offered = min(remaining, charger_max_w)
             take = _take_of(serial, remaining)
-            allocations[serial] = offered if take <= 0 else take
+            allocations[serial] = offered if (take <= 0 or overdraw_serials) else take
             remaining -= take
             remainder_after_high = remaining
             prev = serial
             prev_take = take
+            if overdraw_serials:
+                break
             continue
         need = min_charge_w(remaining, min_amp, volts, phase3_min_w)
         if remaining >= split_min_w and remaining >= need:
@@ -963,6 +968,8 @@ def surplus_allocation_plan(
             leftover_w >= 2 * split_min_w
             and prev_take >= 100
             and ((not in_dead) or (split_hold and not split_expired))
+            and not _is_pending(serial)
+            and not overdraw_serials
         )
         keep_w = _steal_keep_w(
             remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w

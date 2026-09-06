@@ -376,6 +376,49 @@ def main():
             "leftover on other cars: this serial is off",
         )
 
+    def test_charger_mqtt_needs_live_state():
+        need = planner.charger_mqtt_needs_update
+        on = ("on", 2, 11, 11)
+        assert_eq(
+            need(on, {"frc": 2, "psm": 2, "lot": 11, "amp": 11}),
+            False,
+            "matching live frc/amp/lot/psm skips MQTT",
+        )
+        assert_eq(
+            need(on, {"frc": 2, "psm": 2, "lot": 11, "amp": 16}),
+            True,
+            "drifted amp needs a write",
+        )
+        assert_eq(
+            need(on, {"frc": 1, "psm": 2, "lot": 11, "amp": 11}),
+            True,
+            "drifted frc needs a write",
+        )
+        assert_eq(need(on, None), True, "missing actual needs a write")
+        assert_eq(need(on, {"frc": 2}), True, "incomplete actual needs a write")
+        assert_eq(need(("off",), {"frc": 1}), False, "already force-off")
+        assert_eq(need(("off",), {"frc": 2}), True, "still on needs frc=1")
+        assert_eq(need(("off",), None), True, "unknown off state needs a write")
+        assert_eq(
+            need(on, {"frc": "2", "psm": "2", "lot": "11", "amp": "11"}),
+            False,
+            "string live values still match",
+        )
+        assert_eq(planner.charger_mqtt_live_complete(on, {"frc": 2}), False, "incomplete is not live")
+        assert_eq(
+            planner.charger_mqtt_live_complete(on, {"frc": 2, "psm": 2, "lot": 11, "amp": 11}),
+            True,
+            "all keys present is live",
+        )
+
+    def test_mqtt_apply_window_is_2s_from_first():
+        action = planner.mqtt_apply_window_action
+        assert_eq(planner.MQTT_APPLY_S, 2, "MQTT batch window is 2 s")
+        assert_eq(action(False, False), "start", "first schedule opens the 2 s window")
+        assert_eq(action(True, False), "join", "later schedules do not restart the timer")
+        assert_eq(action(False, True), "defer", "flush running opens a new window after")
+        assert_eq(action(True, True), "defer", "applying wins over an open window")
+
     def test_plan_result_is_a_window_list():
         out = plan(
             Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc)),
@@ -700,6 +743,8 @@ def main():
     case("ticks_do_not_slide_prices_do", test_ticks_do_not_slide_prices_do)
     case("full_power_solarpriority", test_full_power_solarpriority)
     case("charger_mqtt_is_one_decision", test_charger_mqtt_is_one_decision)
+    case("charger_mqtt_needs_live_state", test_charger_mqtt_needs_live_state)
+    case("mqtt_apply_window_is_2s_from_first", test_mqtt_apply_window_is_2s_from_first)
     case("plan_result_is_a_window_list", test_plan_result_is_a_window_list)
     case("seed_tie_elapsed_gap_and_weighted_avg", test_seed_tie_elapsed_gap_and_weighted_avg)
     case("grow_sides_flex_modes_and_caps", test_grow_sides_flex_modes_and_caps)

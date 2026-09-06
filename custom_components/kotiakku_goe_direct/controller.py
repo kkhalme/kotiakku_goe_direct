@@ -86,10 +86,15 @@ from .const import (
 )
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import (
+    MQTT_APPLY_S,
     charger_full_power as policy_full_power,
     charger_mqtt_command,
+    charger_mqtt_live_complete,
+    charger_mqtt_needs_update,
     charger_mqtt_role,
+    charger_mqtt_status_value,
     charger_surplus as policy_surplus,
+    mqtt_apply_window_action,
     now_in_windows,
     plan,
     until_unplug_step,
@@ -196,14 +201,16 @@ class KotiakkuGoeDirectController:
         self.seen = {s: False for s in self.chargers}
         self.legacy_until_unplug = set()
         self._charging = False
+        self._apply_again = False
         self._pending_floor = False
         self._pending_split = False
+        self._pending_force = False
         self._last_policy = {s: POLICY_FORCE_OFF for s in self.chargers}
         self._charge_session = {s: False for s in self.chargers}
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._listeners = []
         self._unsubs = []
-        self._surplus_unsub = None
+        self._apply_unsub = None
         self._floor_unsub = None
         self._split_unsub = None
         self._phase_unsub = {}
@@ -218,6 +225,7 @@ class KotiakkuGoeDirectController:
         self._surplus_amp = {}
         self._surplus_psm = {}
         self._last_mqtt = {}
+        self._charger_mqtt = {}
         self._kotiakku_ids = {
             eid
             for eid in (
@@ -346,8 +354,7 @@ class KotiakkuGoeDirectController:
     group_lot = _int_prop(EID_GROUP_LOT, DEFAULT_GROUP_LOT)
 
     async def async_knobs_changed(self):
-        self._schedule_surplus()
-        await self.async_charge()
+        self._schedule_apply()
 
     def policy(self, serial):
         state = restore_policy(self._state(self.policy_entity(serial)))
@@ -519,8 +526,7 @@ class KotiakkuGoeDirectController:
     async def _on_hass_started(self, _event=None):
         await self._refresh_source_entities()
         await self.async_plan()
-        await self.async_charge()
-        self._schedule_surplus()
+        self._schedule_apply()
 
     async def async_setup(self):
         stored = await self._store.async_load()
@@ -559,11 +565,10 @@ class KotiakkuGoeDirectController:
             )
         )
         self._retarget_price()
-        await self._subscribe_nrg_mqtt()
+        await self._subscribe_charger_mqtt()
         await self._migrate_legacy_until_unplug()
         await self.async_plan()
-        self._schedule_surplus()
-        await self.async_charge()
+        self._schedule_apply()
         if self.hass.state is not CoreState.running:
             self._unsubs.append(
                 self.hass.bus.async_listen_once(
@@ -582,7 +587,7 @@ class KotiakkuGoeDirectController:
             unsub()
         self._unsubs.clear()
         for attr in (
-            "_surplus_unsub",
+            "_apply_unsub",
             "_floor_unsub",
             "_split_unsub",
             "_boundary_unsub",
@@ -621,62 +626,70 @@ class KotiakkuGoeDirectController:
             return
         entity = event.data.get("entity_id")
         if entity in self._kotiakku_ids:
-            self._schedule_surplus()
+            self._schedule_apply()
             return
         if entity in self._forecast_ids:
             await self.async_plan()
-            await self.async_charge()
-            self._schedule_surplus()
+            self._schedule_apply()
             return
         if entity in WINDOW_EIDS:
             self._retarget_price()
             await self.async_plan()
-            await self.async_charge()
+            self._schedule_apply()
             return
         if entity in SURPLUS_EIDS:
             if entity in (EID_SOLAR_ENOUGH_KWH, EID_OFFSUN_HOUR_KWH):
                 await self.async_plan()
-            await self.async_knobs_changed()
+            self._schedule_apply()
             return
         if entity and entity.startswith("select.kotiakku_goe_direct_policy_"):
             serial = entity.rsplit("_", 1)[-1]
             await self._on_policy(serial, event)
             return
         if entity and entity.startswith("switch.kotiakku_goe_direct_until_unplug_"):
-            await self.async_charge()
-            self._schedule_surplus()
+            self._schedule_apply()
             return
         if entity in self._car_ids:
-            await self.async_charge()
-            self._schedule_surplus()
+            self._schedule_apply()
             return
         if entity in self._priority_ids or entity in self._power_ids:
-            self._schedule_surplus()
+            self._schedule_apply()
 
     async def _on_price(self, _event):
         if self._refreshing:
             return
         await self.async_plan()
-        await self.async_charge()
+        self._schedule_apply()
 
     async def _on_interval(self, _now=None):
         await self.async_plan()
-        await self.async_charge()
-        self._schedule_surplus()
+        self._schedule_apply(force=True)
 
     async def _on_policy(self, serial, event):
-        await self.async_charge()
-        self._schedule_surplus()
+        self._schedule_apply()
 
-    def _schedule_surplus(self):
-        self._cancel("_surplus_unsub")
-        self._surplus_unsub = async_call_later(
-            self.hass, self.settle_s, self._surplus_later
+    def _schedule_apply(self, floor_expired=False, split_expired=False, force=False):
+        if floor_expired:
+            self._pending_floor = True
+        if split_expired:
+            self._pending_split = True
+        if force:
+            self._pending_force = True
+        action = mqtt_apply_window_action(
+            self._apply_unsub is not None, self._charging
+        )
+        if action == "defer":
+            self._apply_again = True
+            return
+        if action == "join":
+            return
+        self._apply_unsub = async_call_later(
+            self.hass, MQTT_APPLY_S, self._apply_later
         )
 
-    async def _surplus_later(self, _now=None):
-        self._surplus_unsub = None
-        await self.async_surplus(floor_expired=False)
+    async def _apply_later(self, _now=None):
+        self._apply_unsub = None
+        await self._async_apply()
 
     def _arm_hold(self, attr, fire, need):
         if not need:
@@ -691,14 +704,14 @@ class KotiakkuGoeDirectController:
 
     async def _floor_fire(self, _now=None):
         self._floor_unsub = None
-        await self.async_surplus(floor_expired=True)
+        self._schedule_apply(floor_expired=True)
 
     def _arm_split(self, need):
         self._arm_hold("_split_unsub", self._split_fire, need)
 
     async def _split_fire(self, _now=None):
         self._split_unsub = None
-        await self.async_surplus(split_expired=True)
+        self._schedule_apply(split_expired=True)
 
     def _arm_phase(self, serial, need):
         if not serial:
@@ -720,7 +733,7 @@ class KotiakkuGoeDirectController:
         async def _fire(_now=None, serial=serial):
             self._phase_unsub.pop(serial, None)
             self._phase_expired.add(serial)
-            await self.async_surplus()
+            self._schedule_apply()
 
         self._phase_unsub[serial] = async_call_later(
             self.hass, self.hold_min * 60, _fire
@@ -751,7 +764,7 @@ class KotiakkuGoeDirectController:
         async def _fire(_now=None, serial=serial):
             self._offer_unsub.pop(serial, None)
             self._offer_expired.add(serial)
-            await self.async_surplus()
+            self._schedule_apply()
 
         self._offer_unsub[serial] = async_call_later(
             self.hass, OFFER_WAIT_S, _fire
@@ -776,8 +789,7 @@ class KotiakkuGoeDirectController:
     async def _on_boundary(self, _now=None):
         self._boundary_unsub = None
         self.notify()
-        await self.async_charge()
-        self._schedule_surplus()
+        self._schedule_apply()
         self._schedule_boundaries()
 
     async def async_plan(self):
@@ -854,27 +866,42 @@ class KotiakkuGoeDirectController:
         )
         self._logged_kotiakku_unusable = True
 
-    async def _subscribe_nrg_mqtt(self):
+    async def _subscribe_charger_mqtt(self):
         try:
             from homeassistant.components.mqtt import async_subscribe
         except Exception:
             return
+        keys = (
+            ("nrg", self._on_nrg_mqtt),
+            ("frc", self._on_status_mqtt),
+            ("amp", self._on_status_mqtt),
+            ("lot", self._on_status_mqtt),
+            ("psm", self._on_status_mqtt),
+        )
         for serial in self.chargers:
-            topic = f"go-eCharger/{serial}/nrg"
-            try:
-                unsub = await async_subscribe(self.hass, topic, self._on_nrg_mqtt)
-            except Exception as err:
-                _LOGGER.debug("kotiakku_goe_direct: mqtt subscribe %s failed: %s", topic, err)
-                continue
-            self._unsubs.append(unsub)
+            for key, handler in keys:
+                topic = f"go-eCharger/{serial}/{key}"
+                try:
+                    unsub = await async_subscribe(self.hass, topic, handler)
+                except Exception as err:
+                    _LOGGER.debug(
+                        "kotiakku_goe_direct: mqtt subscribe %s failed: %s",
+                        topic,
+                        err,
+                    )
+                    continue
+                self._unsubs.append(unsub)
 
-    def _mqtt_serial_payload(self, msg, key):
+    def _mqtt_serial_payload(self, msg, key=None):
         topic = str(getattr(msg, "topic", "") or "")
         parts = topic.split("/")
-        if len(parts) < 3 or parts[-1] != key:
+        if len(parts) < 3:
             return None, None
         serial = parts[1]
+        topic_key = parts[-1]
         if serial not in self.chargers:
+            return None, None
+        if key is not None and topic_key != key:
             return None, None
         payload = getattr(msg, "payload", None)
         if isinstance(payload, (bytes, bytearray)):
@@ -889,7 +916,21 @@ class KotiakkuGoeDirectController:
         old = self._nrg_w.get(serial)
         self._nrg_w[serial] = value
         if old != value:
-            self._schedule_surplus()
+            self._schedule_apply()
+
+    def _on_status_mqtt(self, msg):
+        topic = str(getattr(msg, "topic", "") or "")
+        key = topic.split("/")[-1]
+        if key not in ("frc", "amp", "lot", "psm"):
+            return
+        serial, payload = self._mqtt_serial_payload(msg, key)
+        if not serial:
+            return
+        value = charger_mqtt_status_value(payload)
+        if value is None:
+            return
+        bucket = self._charger_mqtt.setdefault(serial, {})
+        bucket[key] = value
 
     def _snapshot(self):
         problems = self._kotiakku_problems()
@@ -921,30 +962,34 @@ class KotiakkuGoeDirectController:
         self._offer_expired.clear()
 
     async def async_surplus(self, floor_expired=False, split_expired=False):
-        if floor_expired:
-            self._pending_floor = True
-        if split_expired:
-            self._pending_split = True
-        await self._async_apply()
+        self._schedule_apply(floor_expired=floor_expired, split_expired=split_expired)
 
     async def async_charge(self):
-        await self._async_apply()
+        self._schedule_apply()
 
     async def _async_apply(self):
         if self._charging:
+            self._apply_again = True
             return
         self._charging = True
         try:
-            while True:
-                floor = self._pending_floor
-                split = self._pending_split
-                self._pending_floor = False
-                self._pending_split = False
-                await self._apply_chargers(floor, split)
-                if not self._pending_floor and not self._pending_split:
-                    break
+            floor = self._pending_floor
+            split = self._pending_split
+            force = self._pending_force
+            self._pending_floor = False
+            self._pending_split = False
+            self._pending_force = False
+            await self._apply_chargers(floor, split, force=force)
         finally:
             self._charging = False
+            if (
+                self._apply_again
+                or self._pending_floor
+                or self._pending_split
+                or self._pending_force
+            ):
+                self._apply_again = False
+                self._schedule_apply()
 
     async def _sync_until_unplug(self):
         changed = False
@@ -1098,7 +1143,7 @@ class KotiakkuGoeDirectController:
             pub["lot"] = lot
         return targets
 
-    async def _apply_chargers(self, floor_expired=False, split_expired=False):
+    async def _apply_chargers(self, floor_expired=False, split_expired=False, force=False):
         changed, until_on = await self._sync_until_unplug()
         now_ts = self._now_ts()
         roles = {}
@@ -1177,7 +1222,7 @@ class KotiakkuGoeDirectController:
                 self._charge_session[serial] = False
             if cmd is None:
                 continue
-            published = await self._publish_cmd(serial, cmd)
+            published = await self._publish_cmd(serial, cmd, force=force)
             if published:
                 changed = True
         if changed:
@@ -1216,10 +1261,28 @@ class KotiakkuGoeDirectController:
             blocking=True,
         )
 
-    async def _publish_cmd(self, serial, cmd):
+    def _remember_cmd(self, serial, cmd):
+        if cmd[0] == "off":
+            self._arm_phase(serial, False)
+            self._surplus_psm.pop(serial, None)
+            self._surplus_amp.pop(serial, None)
+            return
+        self._surplus_psm[serial] = int(cmd[1])
+        self._surplus_amp[serial] = int(cmd[3])
+
+    async def _publish_cmd(self, serial, cmd, force=False):
         if not serial or cmd is None:
             return False
-        if self._last_mqtt.get(serial) == cmd:
+        live = self._charger_mqtt.get(serial)
+        if not charger_mqtt_needs_update(cmd, live):
+            self._remember_cmd(serial, cmd)
+            return False
+        if (
+            not force
+            and not charger_mqtt_live_complete(cmd, live)
+            and self._last_mqtt.get(serial) == cmd
+        ):
+            self._remember_cmd(serial, cmd)
             return False
         if cmd[0] == "off":
             await self._publish_off(serial)
@@ -1231,15 +1294,12 @@ class KotiakkuGoeDirectController:
     async def _publish_on(self, serial, psm, lot, amp):
         await self._mqtt_many(serial, charger_on_mqtt(psm, lot, amp))
         if serial:
-            self._surplus_psm[serial] = int(psm)
-            self._surplus_amp[serial] = int(amp)
+            self._remember_cmd(serial, ("on", psm, lot, amp))
 
     async def _publish_off(self, serial):
         await self._mqtt_many(serial, charger_off_mqtt())
         if serial:
-            self._arm_phase(serial, False)
-            self._surplus_psm.pop(serial, None)
-            self._surplus_amp.pop(serial, None)
+            self._remember_cmd(serial, ("off",))
             self._last_mqtt[serial] = ("off",)
 
     async def _mqtt_many(self, serial, pairs):

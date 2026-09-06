@@ -366,15 +366,32 @@ def main():
         )
         assert_eq(
             wait_lead["allocations"],
-            {A: 12000, B: 9000, C: 3000},
-            "15 s after offering high: high stays on, taking cars keep leftover (over-draw)",
+            {A: 12000, B: 12000},
+            "15 s after offering high: steal waits; taking leftover stays (over-draw)",
         )
         assert_true(B in wait_lead["allocations"], "do not frc=1 a taking car during the wait")
+        assert_true(C not in wait_lead["allocations"], "steal and the third car wait 15 s")
         assert_eq(wait_lead["overdraw"], True, "pending high plus taking leftover is over-draw")
         assert_eq(
             wait_lead["lot_allocations"],
-            {A: 12000, B: 9000, C: 3000},
-            "pending high is a group-lot share with the steal during the wait",
+            {A: 12000, B: 12000},
+            "pending high is a group-lot share with taking leftover during the wait",
+        )
+        steal_pending = surplus.surplus_allocation_plan(
+            [A, B], leftover_w=12000,
+            take_w={A: 10000, B: 0},
+            states={A: "Charging", B: "Idle"},
+            offer_pending={B},
+            **both,
+        )
+        assert_eq(
+            steal_pending["allocations"].get(A),
+            10000,
+            "pending next car: do not cut taking high to mint 3 kW",
+        )
+        assert_true(
+            SPLIT_MIN not in steal_pending["allocations"].values(),
+            "no 9+3 steal while the next offer is still pending",
         )
         steal_hold = surplus.surplus_allocation_plan(
             [A, B], leftover_w=12000, split_hold=True,
