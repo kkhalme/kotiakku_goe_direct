@@ -98,8 +98,10 @@ from .planner import (
     now_in_windows,
     plan,
     tomorrow_prices_ok as planner_tomorrow_prices_ok,
+    keep_min_until_unplug_step,
     until_unplug_step,
     ROLE_FULL,
+    ROLE_KEEP,
     ROLE_SURPLUS,
 )
 from .serial import resolve_car_entity_id, resolve_power_entity_id
@@ -109,6 +111,8 @@ from .surplus import (
     DEFAULT_LON,
     OFFER_WAIT_S,
     budget,
+    car_charging,
+    car_finished,
     car_plugged,
     charger_take_w,
     effective_ev_w,
@@ -202,6 +206,8 @@ class KotiakkuGoeDirectController:
         self.restore = {s: POLICY_FORCE_OFF for s in self.chargers}
         self.seen = {s: False for s in self.chargers}
         self.legacy_until_unplug = set()
+        self._keep_min = {s: False for s in self.chargers}
+        self._keep_min_offered = {s: False for s in self.chargers}
         self._charging = False
         self._apply_again = False
         self._pending_floor = False
@@ -582,6 +588,15 @@ class KotiakkuGoeDirectController:
             self.restore.update(stored.get("restore") or {})
             self.seen.update(stored.get("seen") or {})
             self._charge_session.update(stored.get("charge_session") or {})
+            self._keep_min.update(
+                {k: bool(v) for k, v in (stored.get("keep_min") or {}).items()}
+            )
+            self._keep_min_offered.update(
+                {
+                    k: bool(v)
+                    for k, v in (stored.get("keep_min_offered") or {}).items()
+                }
+            )
         await self._refresh_source_entities()
         track = [
             self.soc_entity,
@@ -653,6 +668,8 @@ class KotiakkuGoeDirectController:
                 "restore": self.restore,
                 "seen": self.seen,
                 "charge_session": self._charge_session,
+                "keep_min": self._keep_min,
+                "keep_min_offered": self._keep_min_offered,
             }
         )
 
@@ -1059,6 +1076,51 @@ class KotiakkuGoeDirectController:
             until_on[serial] = new_on
         return changed, until_on
 
+    def _sync_keep_min(self, *, track_command, commanded=None):
+        """Arm 3-phase 6 A until unplug after the car finishes by itself."""
+        changed = False
+        keep_on = {}
+        commanded = commanded or {}
+        for serial in self.chargers:
+            car_state = self._state(self.car_entity(serial))
+            was_on = bool(self._keep_min.get(serial))
+            new_on, new_offered = keep_min_until_unplug_step(
+                self._keep_min.get(serial),
+                self._keep_min_offered.get(serial),
+                plugged=car_plugged(car_state),
+                finished=car_finished(car_state),
+                charging=car_charging(car_state),
+                commanded_on=bool(commanded.get(serial)),
+                force_off=self.policy(serial) == POLICY_FORCE_OFF,
+                track_command=track_command,
+            )
+            if was_on != new_on or bool(self._keep_min_offered.get(serial)) != new_offered:
+                changed = True
+            if new_on and not was_on:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s finished charging; 3-phase %s A until unplug (cabin precondition)",
+                    serial,
+                    self.min_amp,
+                )
+            self._keep_min[serial] = new_on
+            self._keep_min_offered[serial] = new_offered
+            keep_on[serial] = new_on
+        return changed, keep_on
+
+    def _charger_roles(self, now_ts, until_on, keep_on):
+        roles = {}
+        for serial in self.chargers:
+            roles[serial] = charger_mqtt_role(
+                self.policy(serial),
+                self.window_result,
+                now_ts,
+                enough_solar=self.enough_solar,
+                until_unplug=until_on.get(serial),
+                keep_min=keep_on.get(serial),
+            )
+            self._last_policy[serial] = self.policy(serial)
+        return roles
+
     def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full):
         """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
@@ -1194,17 +1256,10 @@ class KotiakkuGoeDirectController:
 
     async def _apply_chargers(self, floor_expired=False, split_expired=False, force=False):
         changed, until_on = await self._sync_until_unplug()
+        keep_changed, keep_on = self._sync_keep_min(track_command=False)
+        changed = changed or keep_changed
         now_ts = self._now_ts()
-        roles = {}
-        for serial in self.chargers:
-            roles[serial] = charger_mqtt_role(
-                self.policy(serial),
-                self.window_result,
-                now_ts,
-                enough_solar=self.enough_solar,
-                until_unplug=until_on.get(serial),
-            )
-            self._last_policy[serial] = self.policy(serial)
+        roles = self._charger_roles(now_ts, until_on, keep_on)
         snap = self._snapshot()
         dec = surplus_decision(
             self.session,
@@ -1233,6 +1288,11 @@ class KotiakkuGoeDirectController:
         was_surplus_mqtt = set(self._surplus_amp)
         surplus_on = False
         pubs = {}
+        n_held = sum(
+            1
+            for serial in self.chargers
+            if roles[serial] in (ROLE_FULL, ROLE_KEEP)
+        )
         if dec["write_on"] and surplus:
             surplus_on = True
             self.session = True
@@ -1241,10 +1301,19 @@ class KotiakkuGoeDirectController:
                 dec,
                 snap,
                 split_expired,
-                n_full=sum(1 for serial in self.chargers if roles[serial] == ROLE_FULL),
+                n_full=n_held,
             )
         elif dec["write_on"] or dec["write_off"] or was_session or was_surplus_mqtt:
             self._clear_surplus_session()
+        commanded = {
+            serial: roles[serial] == ROLE_FULL or serial in pubs
+            for serial in self.chargers
+        }
+        keep_changed, keep_on = self._sync_keep_min(
+            track_command=True, commanded=commanded
+        )
+        changed = changed or keep_changed
+        roles = self._charger_roles(now_ts, until_on, keep_on)
         for serial in self.chargers:
             role = roles[serial]
             had_full = bool(self._charge_session.get(serial))
@@ -1259,6 +1328,7 @@ class KotiakkuGoeDirectController:
                 leftover_session=leftover_live,
                 group_lot=self.group_lot,
                 max_amp=self.max_amp,
+                min_amp=self.min_amp,
                 live_frc=(self._charger_mqtt.get(serial) or {}).get("frc"),
             )
             if role == ROLE_FULL:
@@ -1270,6 +1340,8 @@ class KotiakkuGoeDirectController:
                 if had_full:
                     changed = True
                 self._charge_session[serial] = False
+                if role == ROLE_KEEP:
+                    self._arm_phase(serial, False)
             if cmd is None:
                 continue
             published = await self._publish_cmd(serial, cmd, force=force)

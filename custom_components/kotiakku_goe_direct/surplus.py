@@ -608,11 +608,12 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     HA leftover split uses HA priority numbers, not app ``lop``. HA does
     not write ``lop``.
 
-    Mixed (another charger is full-power): do not write leftover ``lot`` —
-    last writer would shrink the shared group. Keep ``lot`` at group_lot
-    and keep leftover ``amp`` / ``psm`` as that charger's leftover cap.
-    Combined demand may exceed the group; app priorities split it. Do not
-    reserve current for the full-power charger by capping surplus ``amp``.
+    Mixed (another charger is full-power or 6 A keep): do not write leftover
+    ``lot`` — last writer would shrink the shared group. Keep ``lot`` at
+    group_lot and keep leftover ``amp`` / ``psm`` as that charger's leftover
+    cap. Combined demand may exceed the group; app priorities split it. Do
+    not reserve current for the full-power charger by capping surplus
+    ``amp``.
     """
     lot = int(lot)
     psm = int(psm)

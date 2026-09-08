@@ -288,6 +288,11 @@ def main():
             False,
             "until-unplug is full-power, not surplus",
         )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 0, keep_min=True),
+            False,
+            "6 A keep after self-finish is not leftover",
+        )
         assert_eq(charger_full_power("Force on", result, 0), True, "force on")
         assert_eq(
             charger_full_power("SolarPriority", result, 0, until_unplug=True),
@@ -390,6 +395,24 @@ def main():
             ("off",),
             "leftover on other cars: this serial is off",
         )
+        assert_eq(
+            role("SolarPriority", result, 4000, keep_min=True),
+            planner.ROLE_KEEP,
+            "self-finish after the window is 6 A keep, not leftover",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),
+            ("on", 2, 50, 6),
+            "keep MQTT is 3-phase 6 A",
+        )
+        step = planner.keep_min_until_unplug_step
+        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
+        active, offered = step(False, True, plugged=True, charging=True, commanded_on=False)
+        assert_eq((active, offered), (False, False), "window cut while Charging does not arm keep")
+        active, offered = step(False, True, plugged=True, finished=True, commanded_on=True)
+        assert_eq((active, offered), (True, True), "Complete during the window arms keep")
+        active, offered = step(True, True, plugged=True, charging=True, commanded_on=False)
+        assert_eq((active, offered), (True, True), "precondition after Complete stays keep")
 
     def test_charger_mqtt_needs_live_state():
         need = planner.charger_mqtt_needs_update

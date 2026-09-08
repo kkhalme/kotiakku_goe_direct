@@ -511,6 +511,90 @@ def main():
     case("string_params_from_templates", test_string_params_from_templates)
     case("restore_policy_maps_legacy_names", test_restore_policy_maps_legacy_names)
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
+
+    def test_keep_min_until_unplug_after_self_finish():
+        step = planner.keep_min_until_unplug_step
+        role = planner.charger_mqtt_role
+        cmd = planner.charger_mqtt_command
+        result = {"raw_windows": [{"start": 1000, "end": 2000}]}
+        leftover = {"psm": 2, "lot": 11, "amp": 11}
+
+        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
+        assert_eq((active, offered), (False, True), "charging while commanded on arms offered")
+        active, offered = step(False, True, plugged=True, finished=True, commanded_on=True)
+        assert_eq((active, offered), (True, True), "Complete while still commanded on arms keep")
+        active, offered = step(True, True, plugged=True, finished=True, commanded_on=False)
+        assert_eq((active, offered), (True, True), "window end after Complete keeps 6 A until unplug")
+        active, offered = step(
+            True, True, plugged=True, charging=True, commanded_on=False
+        )
+        assert_eq((active, offered), (True, True), "precondition Charging stays 6 A until unplug")
+        active, offered = step(True, True, plugged=False, finished=False, commanded_on=False)
+        assert_eq((active, offered), (False, False), "unplug clears keep")
+
+        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
+        active, offered = step(
+            False, True, plugged=True, charging=True, commanded_on=False
+        )
+        assert_eq((active, offered), (False, False), "window cut while Charging clears offered")
+        active, offered = step(
+            False, False, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((active, offered), (False, False), "Complete after a cut does not arm keep")
+
+        active, offered = step(
+            False, True, plugged=True, finished=True, commanded_on=False, track_command=False
+        )
+        assert_eq(
+            (active, offered),
+            (True, True),
+            "leftover skipped Complete still arms from offered (pass 1)",
+        )
+        active, offered = step(True, True, plugged=True, finished=True, force_off=True)
+        assert_eq((active, offered), (False, False), "Force off clears keep")
+
+        assert_eq(
+            role("SolarPriority", result, 0, keep_min=True),
+            planner.ROLE_KEEP,
+            "outside window after self-finish is 6 A keep",
+        )
+        assert_eq(
+            role("SolarPriority", result, 1500, keep_min=True),
+            planner.ROLE_FULL,
+            "cheap window still 22 kW over keep",
+        )
+        assert_eq(
+            role("Force off", result, 0, keep_min=True),
+            planner.ROLE_OFF,
+            "Force off never keep",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarPriority", result, 0, keep_min=True),
+            False,
+            "keep is not leftover",
+        )
+        assert_eq(
+            role("SolarPriority", result, 0, until_unplug=True, keep_min=True),
+            planner.ROLE_FULL,
+            "22 kW until-unplug wins over 6 A keep",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=False),
+            ("on", 2, 50, 6),
+            "keep MQTT is 3-phase 6 A with group lot 50",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover, min_amp=6),
+            ("on", 2, 50, 6),
+            "keep wins over leftover watts",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=False, group_lot=50, min_amp=8),
+            ("on", 2, 50, 8),
+            "keep amp follows min amp",
+        )
+
+    case("keep_min_until_unplug_after_self_finish", test_keep_min_until_unplug_after_self_finish)
     case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
     case("current_or_next_and_flex_attrs", test_current_or_next_and_flex_attrs)
     case("horizon_tomorrow_only_and_zero_today", test_horizon_tomorrow_only_and_zero_today)
