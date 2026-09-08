@@ -71,16 +71,22 @@ from .const import (
     EID_SOLAR_ENOUGH_KWH,
     EID_OFFSUN_HOUR_KWH,
     EID_VOLTS,
+    EID_KEEP_AMP,
+    EID_KEEP_PHASE,
     POLICY_FORCE_OFF,
     POLICIES,
+    DEFAULT_KEEP_AMP,
+    DEFAULT_KEEP_PHASE,
     charger_off_mqtt,
     charger_on_mqtt,
+    keep_phase_psm,
     restore_policy,
     STORAGE_KEY,
     STORAGE_VERSION,
     SURPLUS_EIDS,
     WINDOW_EIDS,
     default_charger_priority,
+    after_charge_complete_keep_entity_id,
     priority_entity_id,
     until_unplug_entity_id,
 )
@@ -208,6 +214,7 @@ class KotiakkuGoeDirectController:
         self.legacy_until_unplug = set()
         self._keep_min = {s: False for s in self.chargers}
         self._keep_min_offered = {s: False for s in self.chargers}
+        self._keep_min_seen = {s: False for s in self.chargers}
         self._charging = False
         self._apply_again = False
         self._pending_floor = False
@@ -274,6 +281,12 @@ class KotiakkuGoeDirectController:
 
     def until_unplug(self, serial):
         return str(self._state(self.until_unplug_entity(serial)) or "").lower() == "on"
+
+    def keep_min_entity(self, serial):
+        return after_charge_complete_keep_entity_id(serial)
+
+    def keep_min(self, serial):
+        return str(self._state(self.keep_min_entity(serial)) or "").lower() == "on"
 
     def car_entity(self, serial):
         return self._car_entities.get(serial) or f"sensor.go_echarger_{serial}_car_state"
@@ -360,6 +373,19 @@ class KotiakkuGoeDirectController:
     max_amp = _int_prop(EID_MAX_AMP, DEFAULT_MAX_AMP)
     phase3_min_w = _int_prop(EID_PHASE3_MIN_W, DEFAULT_PHASE3_MIN_W)
     group_lot = _int_prop(EID_GROUP_LOT, DEFAULT_GROUP_LOT)
+
+    @property
+    def keep_amp(self):
+        value = self._int_entity(EID_KEEP_AMP, DEFAULT_KEEP_AMP)
+        if value < 6:
+            return 6
+        if value > 32:
+            return 32
+        return value
+
+    @property
+    def keep_psm(self):
+        return keep_phase_psm(self._text_entity(EID_KEEP_PHASE, DEFAULT_KEEP_PHASE))
 
     async def async_knobs_changed(self):
         self._schedule_apply()
@@ -597,6 +623,9 @@ class KotiakkuGoeDirectController:
                     for k, v in (stored.get("keep_min_offered") or {}).items()
                 }
             )
+            self._keep_min_seen.update(
+                {k: bool(v) for k, v in (stored.get("keep_min_seen") or {}).items()}
+            )
         await self._refresh_source_entities()
         track = [
             self.soc_entity,
@@ -610,6 +639,8 @@ class KotiakkuGoeDirectController:
         track.extend(SURPLUS_EIDS)
         track.extend(self.policy_entity(s) for s in self.chargers)
         track.extend(self.until_unplug_entity(s) for s in self.chargers)
+        track.extend(self.keep_min_entity(s) for s in self.chargers)
+        track.append(EID_KEEP_PHASE)
         track.extend(self.car_entity(s) for s in self.chargers)
         track.extend(self.priority_entity(s) for s in self.chargers)
         track.extend(self.power_entity(s) for s in self.chargers)
@@ -628,6 +659,7 @@ class KotiakkuGoeDirectController:
         self._retarget_price()
         await self._subscribe_charger_mqtt()
         await self._migrate_legacy_until_unplug()
+        await self._migrate_keep_min_switch()
         await self.async_plan()
         self._schedule_apply()
         if self.hass.state is not CoreState.running:
@@ -668,8 +700,9 @@ class KotiakkuGoeDirectController:
                 "restore": self.restore,
                 "seen": self.seen,
                 "charge_session": self._charge_session,
-                "keep_min": self._keep_min,
+                "keep_min": {s: self.keep_min(s) for s in self.chargers},
                 "keep_min_offered": self._keep_min_offered,
+                "keep_min_seen": self._keep_min_seen,
             }
         )
 
@@ -710,6 +743,14 @@ class KotiakkuGoeDirectController:
             await self._on_policy(serial, event)
             return
         if entity and entity.startswith("switch.kotiakku_goe_direct_until_unplug_"):
+            self._schedule_apply()
+            return
+        if entity and entity.startswith(
+            "switch.kotiakku_goe_direct_after_charge_complete_keep_"
+        ):
+            self._schedule_apply()
+            return
+        if entity == EID_KEEP_PHASE:
             self._schedule_apply()
             return
         if entity in self._car_ids:
@@ -1076,34 +1117,45 @@ class KotiakkuGoeDirectController:
             until_on[serial] = new_on
         return changed, until_on
 
-    def _sync_keep_min(self, *, track_command, commanded=None):
-        """Arm 3-phase 6 A until unplug after the car finishes by itself."""
+    async def _sync_keep_min(self, *, track_command, commanded=None):
+        """Arm after-charge-complete keep until unplug after a self-finish."""
         changed = False
         keep_on = {}
         commanded = commanded or {}
         for serial in self.chargers:
             car_state = self._state(self.car_entity(serial))
+            override = self.keep_min(serial)
             was_on = bool(self._keep_min.get(serial))
-            new_on, new_offered = keep_min_until_unplug_step(
-                self._keep_min.get(serial),
+            new_on, new_seen, new_offered = keep_min_until_unplug_step(
+                override,
+                self._keep_min_seen.get(serial),
                 self._keep_min_offered.get(serial),
                 plugged=car_plugged(car_state),
                 finished=car_finished(car_state),
                 charging=car_charging(car_state),
                 commanded_on=bool(commanded.get(serial)),
-                force_off=self.policy(serial) == POLICY_FORCE_OFF,
+                was_on=was_on,
                 track_command=track_command,
             )
-            if was_on != new_on or bool(self._keep_min_offered.get(serial)) != new_offered:
+            if (
+                was_on != new_on
+                or bool(self._keep_min_seen.get(serial)) != new_seen
+                or bool(self._keep_min_offered.get(serial)) != new_offered
+            ):
                 changed = True
             if new_on and not was_on:
                 _LOGGER.info(
-                    "kotiakku_goe_direct: %s finished charging; 3-phase %s A until unplug (cabin precondition)",
+                    "kotiakku_goe_direct: %s after_charge_complete_keep on (%s-phase %s A until unplug)",
                     serial,
-                    self.min_amp,
+                    3 if self.keep_psm == 2 else 1,
+                    self.keep_amp,
                 )
             self._keep_min[serial] = new_on
+            self._keep_min_seen[serial] = new_seen
             self._keep_min_offered[serial] = new_offered
+            if new_on != override:
+                await self._turn_keep_min(serial, new_on)
+                changed = True
             keep_on[serial] = new_on
         return changed, keep_on
 
@@ -1256,7 +1308,7 @@ class KotiakkuGoeDirectController:
 
     async def _apply_chargers(self, floor_expired=False, split_expired=False, force=False):
         changed, until_on = await self._sync_until_unplug()
-        keep_changed, keep_on = self._sync_keep_min(track_command=False)
+        keep_changed, keep_on = await self._sync_keep_min(track_command=False)
         changed = changed or keep_changed
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
@@ -1309,7 +1361,7 @@ class KotiakkuGoeDirectController:
             serial: roles[serial] == ROLE_FULL or serial in pubs
             for serial in self.chargers
         }
-        keep_changed, keep_on = self._sync_keep_min(
+        keep_changed, keep_on = await self._sync_keep_min(
             track_command=True, commanded=commanded
         )
         changed = changed or keep_changed
@@ -1329,6 +1381,8 @@ class KotiakkuGoeDirectController:
                 group_lot=self.group_lot,
                 max_amp=self.max_amp,
                 min_amp=self.min_amp,
+                keep_psm=self.keep_psm,
+                keep_amp=self.keep_amp,
                 live_frc=(self._charger_mqtt.get(serial) or {}).get("frc"),
             )
             if role == ROLE_FULL:
@@ -1361,8 +1415,24 @@ class KotiakkuGoeDirectController:
             if not self.until_unplug(serial):
                 await self._turn_until_unplug(serial, True)
 
+    async def _migrate_keep_min_switch(self):
+        for serial in self.chargers:
+            if self._keep_min.get(serial) and not self.keep_min(serial):
+                await self._turn_keep_min(serial, True)
+
     async def _turn_until_unplug(self, serial, on):
         entity = self.until_unplug_entity(serial)
+        if self.hass.states.get(entity) is None:
+            return
+        await self.hass.services.async_call(
+            "switch",
+            "turn_on" if on else "turn_off",
+            {"entity_id": entity},
+            blocking=True,
+        )
+
+    async def _turn_keep_min(self, serial, on):
+        entity = self.keep_min_entity(serial)
         if self.hass.states.get(entity) is None:
             return
         await self.hass.services.async_call(

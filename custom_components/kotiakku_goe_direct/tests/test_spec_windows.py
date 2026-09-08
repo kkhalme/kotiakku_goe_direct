@@ -406,13 +406,21 @@ def main():
             "keep MQTT is 3-phase 6 A",
         )
         step = planner.keep_min_until_unplug_step
-        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
-        active, offered = step(False, True, plugged=True, charging=True, commanded_on=False)
-        assert_eq((active, offered), (False, False), "window cut while Charging does not arm keep")
-        active, offered = step(False, True, plugged=True, finished=True, commanded_on=True)
-        assert_eq((active, offered), (True, True), "Complete during the window arms keep")
-        active, offered = step(True, True, plugged=True, charging=True, commanded_on=False)
-        assert_eq((active, offered), (True, True), "precondition after Complete stays keep")
+        on, seen, offered = step(
+            False, False, False, plugged=True, charging=True, commanded_on=True
+        )
+        on, seen, offered = step(
+            False, False, True, plugged=True, charging=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (False, False, False), "window cut while Charging does not arm keep")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=True
+        )
+        assert_eq((on, seen, offered), (True, True, True), "Complete during the window arms keep")
+        on, seen, offered = step(
+            True, True, True, plugged=True, charging=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (True, True, True), "precondition after Complete stays keep")
 
     def test_charger_mqtt_needs_live_state():
         need = planner.charger_mqtt_needs_update

@@ -512,9 +512,11 @@ views:
             entities:
               - entity: select.kotiakku_goe_direct_policy_111111
               - entity: switch.kotiakku_goe_direct_until_unplug_111111
+              - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_111111
               - entity: number.kotiakku_goe_direct_priority_111111
               - entity: select.kotiakku_goe_direct_policy_222222
               - entity: switch.kotiakku_goe_direct_until_unplug_222222
+              - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_222222
               - entity: number.kotiakku_goe_direct_priority_222222
               - entity: sensor.kotiakku_goe_direct_window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
@@ -530,4 +532,6 @@ views:
               - entity: number.kotiakku_goe_direct_electricity_price_ceiling
               - entity: number.kotiakku_goe_direct_solar_enough_kwh
               - entity: number.kotiakku_goe_direct_offsun_hour_kwh
+              - entity: select.kotiakku_goe_direct_after_charge_complete_keep_phase
+              - entity: number.kotiakku_goe_direct_after_charge_complete_keep_a
               - entity: text.kotiakku_goe_direct_electricity_price_sensor

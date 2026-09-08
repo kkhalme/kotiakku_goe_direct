@@ -519,44 +519,66 @@ def main():
         result = {"raw_windows": [{"start": 1000, "end": 2000}]}
         leftover = {"psm": 2, "lot": 11, "amp": 11}
 
-        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
-        assert_eq((active, offered), (False, True), "charging while commanded on arms offered")
-        active, offered = step(False, True, plugged=True, finished=True, commanded_on=True)
-        assert_eq((active, offered), (True, True), "Complete while still commanded on arms keep")
-        active, offered = step(True, True, plugged=True, finished=True, commanded_on=False)
-        assert_eq((active, offered), (True, True), "window end after Complete keeps 6 A until unplug")
-        active, offered = step(
-            True, True, plugged=True, charging=True, commanded_on=False
+        on, seen, offered = step(
+            False, False, False, plugged=True, charging=True, commanded_on=True
         )
-        assert_eq((active, offered), (True, True), "precondition Charging stays 6 A until unplug")
-        active, offered = step(True, True, plugged=False, finished=False, commanded_on=False)
-        assert_eq((active, offered), (False, False), "unplug clears keep")
+        assert_eq((on, seen, offered), (False, False, True), "charging while commanded on arms offered")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=True
+        )
+        assert_eq((on, seen, offered), (True, True, True), "Complete after offered turns the switch on")
+        on, seen, offered = step(
+            True, True, True, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (True, True, True), "window end after Complete keeps until unplug")
+        on, seen, offered = step(
+            True, True, True, plugged=True, charging=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (True, True, True), "precondition Charging stays keep")
+        on, seen, offered = step(
+            True, True, True, plugged=False, finished=False, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (False, False, False), "unplug clears the switch")
 
-        active, offered = step(False, False, plugged=True, charging=True, commanded_on=True)
-        active, offered = step(
-            False, True, plugged=True, charging=True, commanded_on=False
+        on, seen, offered = step(
+            False, False, False, plugged=True, charging=True, commanded_on=True
         )
-        assert_eq((active, offered), (False, False), "window cut while Charging clears offered")
-        active, offered = step(
-            False, False, plugged=True, finished=True, commanded_on=False
+        on, seen, offered = step(
+            False, False, True, plugged=True, charging=True, commanded_on=False
         )
-        assert_eq((active, offered), (False, False), "Complete after a cut does not arm keep")
+        assert_eq((on, seen, offered), (False, False, False), "window cut while Charging clears offered")
+        on, seen, offered = step(
+            False, False, False, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (False, False, False), "Complete after a cut does not arm keep")
 
-        active, offered = step(
-            False, True, plugged=True, finished=True, commanded_on=False, track_command=False
+        on, seen, offered = step(
+            False,
+            False,
+            True,
+            plugged=True,
+            finished=True,
+            commanded_on=False,
+            track_command=False,
         )
         assert_eq(
-            (active, offered),
-            (True, True),
+            (on, seen, offered),
+            (True, True, True),
             "leftover skipped Complete still arms from offered (pass 1)",
         )
-        active, offered = step(True, True, plugged=True, finished=True, force_off=True)
-        assert_eq((active, offered), (False, False), "Force off clears keep")
+        on, seen, offered = step(
+            False, True, True, plugged=True, finished=True, was_on=True
+        )
+        assert_eq((on, seen, offered), (False, False, False), "manual off does not re-arm")
+        on, seen, offered = step(True, False, False, plugged=True)
+        assert_eq((on, seen, offered), (True, True, False), "manual on stays until unplug")
+        on, seen, offered = step(True, True, True, plugged=True, finished=True)
+        assert_eq(on, True, "Force off policy does not clear a keep switch")
 
         assert_eq(
             role("SolarPriority", result, 0, keep_min=True),
             planner.ROLE_KEEP,
-            "outside window after self-finish is 6 A keep",
+            "outside window after self-finish is keep",
         )
         assert_eq(
             role("SolarPriority", result, 1500, keep_min=True),
@@ -565,8 +587,8 @@ def main():
         )
         assert_eq(
             role("Force off", result, 0, keep_min=True),
-            planner.ROLE_OFF,
-            "Force off never keep",
+            planner.ROLE_KEEP,
+            "keep switch overrides Force off like 22 kW until-unplug",
         )
         assert_eq(
             planner.charger_surplus("SolarPriority", result, 0, keep_min=True),
@@ -576,22 +598,22 @@ def main():
         assert_eq(
             role("SolarPriority", result, 0, until_unplug=True, keep_min=True),
             planner.ROLE_FULL,
-            "22 kW until-unplug wins over 6 A keep",
+            "22 kW until-unplug wins over keep",
         )
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=False),
             ("on", 2, 50, 6),
-            "keep MQTT is 3-phase 6 A with group lot 50",
+            "keep MQTT defaults to 3-phase 6 A with group lot 50",
         )
         assert_eq(
-            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover, min_amp=6),
+            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),
             ("on", 2, 50, 6),
             "keep wins over leftover watts",
         )
         assert_eq(
-            cmd(planner.ROLE_KEEP, surplus_on=False, group_lot=50, min_amp=8),
-            ("on", 2, 50, 8),
-            "keep amp follows min amp",
+            cmd(planner.ROLE_KEEP, surplus_on=False, keep_psm=1, keep_amp=8),
+            ("on", 1, 50, 8),
+            "keep amp and phase follow the knobs",
         )
 
     case("keep_min_until_unplug_after_self_finish", test_keep_min_until_unplug_after_self_finish)

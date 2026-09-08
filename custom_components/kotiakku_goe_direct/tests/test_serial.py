@@ -472,7 +472,7 @@ def main():
         assert_eq(const.psm_int("Force 1-phase"), 1, "option to int")
         assert_eq(const.psm_int("nope"), 0, "unknown option")
         spec_ids = [spec["entity_id"] for spec in const.SURPLUS_NUMBER_SPECS]
-        assert_eq(len(spec_ids), 15, "fifteen surplus numbers")
+        assert_eq(len(spec_ids), 16, "sixteen surplus numbers")
         for entity_id in spec_ids:
             assert_true(entity_id in const.SURPLUS_EIDS, entity_id)
         assert_true(const.EID_GROUP_LOT in const.SURPLUS_EIDS, "group lot")
@@ -481,6 +481,8 @@ def main():
         assert_true(const.EID_SPLIT_FLOOR_W in const.SURPLUS_EIDS, "remainder floor")
         assert_true(const.EID_SOLAR_ENOUGH_KWH in const.SURPLUS_EIDS, "enough solar")
         assert_true(const.EID_OFFSUN_HOUR_KWH in const.SURPLUS_EIDS, "offsun hour")
+        assert_true(const.EID_KEEP_AMP in const.SURPLUS_EIDS, "keep amp")
+        assert_true(const.EID_KEEP_PHASE in const.SURPLUS_EIDS, "keep phase")
         assert_eq(const.DEFAULT_SPLIT_MIN_W, 3000, "next surplus min 3 kW")
         assert_eq(const.DEFAULT_SPLIT_FLOOR_W, 500, "remainder floor 500 W")
         assert_eq(const.DEFAULT_SOLAR_ENOUGH_KWH, 40, "enough solar 40 kWh")
@@ -506,6 +508,23 @@ def main():
             "switch.kotiakku_goe_direct_until_unplug_111111",
             "until unplug switch",
         )
+        assert_eq(
+            const.after_charge_complete_keep_entity_id("111111"),
+            "switch.kotiakku_goe_direct_after_charge_complete_keep_111111",
+            "after charge complete keep switch",
+        )
+        assert_eq(
+            const.EID_KEEP_AMP,
+            "number.kotiakku_goe_direct_after_charge_complete_keep_a",
+            "keep amp",
+        )
+        assert_eq(
+            const.EID_KEEP_PHASE,
+            "select.kotiakku_goe_direct_after_charge_complete_keep_phase",
+            "keep phase",
+        )
+        assert_eq(const.keep_phase_psm("3-phase"), 2, "3-phase is psm 2")
+        assert_eq(const.keep_phase_psm("1-phase"), 1, "1-phase is psm 1")
         assert_eq(const.DOMAIN, "kotiakku_goe_direct", "domain")
         assert_eq(const.HUB_ID, "kotiakku_goe_direct", "hub id")
         assert_eq(const.STORAGE_KEY, "kotiakku_goe_direct", "storage key")

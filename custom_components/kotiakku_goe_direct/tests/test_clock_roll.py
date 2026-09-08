@@ -495,39 +495,38 @@ def main():
         role = planner.charger_mqtt_role
         cmd = planner.charger_mqtt_command
         result = {"raw_windows": []}
-        active, offered = False, False
-        active, offered = step(
-            active, offered, plugged=True, charging=True, commanded_on=True
+        on, seen, offered = step(
+            False, False, False, plugged=True, charging=True, commanded_on=True
         )
         assert_eq(offered, True, "cheap window charging is offered")
-        active, offered = step(
-            active, offered, plugged=True, finished=True, commanded_on=True
+        on, seen, offered = step(
+            on, seen, offered, plugged=True, finished=True, commanded_on=True
         )
-        assert_eq(active, True, "Complete during the window arms keep")
+        assert_eq(on, True, "Complete during the window arms keep")
         assert_eq(
-            role(POLICY_SOLAR_PRIORITY, result, 0, keep_min=active),
+            role(POLICY_SOLAR_PRIORITY, result, 0, keep_min=on),
             planner.ROLE_KEEP,
-            "after the window: 6 A keep",
+            "after the window: keep",
         )
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=False),
             ("on", 2, 50, 6),
-            "keep MQTT is 3-phase 6 A",
+            "keep MQTT defaults to 3-phase 6 A",
         )
-        active, offered = step(
-            active, offered, plugged=True, charging=True, commanded_on=False
+        on, seen, offered = step(
+            on, seen, offered, plugged=True, charging=True, commanded_on=False
         )
-        assert_eq(active, True, "morning precondition Charging does not drop keep")
-        cut_active, cut_offered = step(
-            False, True, plugged=True, charging=True, commanded_on=False
+        assert_eq(on, True, "morning precondition Charging does not drop keep")
+        cut_on, cut_seen, cut_offered = step(
+            False, False, True, plugged=True, charging=True, commanded_on=False
         )
-        assert_eq((cut_active, cut_offered), (False, False), "window cut clears offered")
-        later, later_offered = step(
-            cut_active, cut_offered, plugged=True, finished=True, commanded_on=False
+        assert_eq((cut_on, cut_offered), (False, False), "window cut clears offered")
+        later_on, later_seen, later_offered = step(
+            cut_on, cut_seen, cut_offered, plugged=True, finished=True, commanded_on=False
         )
-        assert_eq((later, later_offered), (False, False), "Complete after a cut stays off")
-        active, offered = step(True, True, plugged=False)
-        assert_eq((active, offered), (False, False), "unplug clears keep")
+        assert_eq((later_on, later_offered), (False, False), "Complete after a cut stays off")
+        on, seen, offered = step(True, True, True, plugged=False)
+        assert_eq((on, seen, offered), (False, False, False), "unplug clears keep")
 
     def test_min_equals_max_stays_fixed_over_time():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)

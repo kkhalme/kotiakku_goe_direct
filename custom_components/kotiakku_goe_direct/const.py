@@ -121,6 +121,15 @@ EID_GROUP_LOT = "number.kotiakku_goe_direct_group_lot_a"
 GROUP_LOT_UNIQUE_ID = "kotiakku_goe_direct_group_lot_a"
 EID_SOLAR_ENOUGH_KWH = "number.kotiakku_goe_direct_solar_enough_kwh"
 EID_OFFSUN_HOUR_KWH = "number.kotiakku_goe_direct_offsun_hour_kwh"
+EID_KEEP_AMP = "number.kotiakku_goe_direct_after_charge_complete_keep_a"
+EID_KEEP_PHASE = "select.kotiakku_goe_direct_after_charge_complete_keep_phase"
+
+KEEP_PHASE_1 = "1-phase"
+KEEP_PHASE_3 = "3-phase"
+KEEP_PHASE_OPTIONS = (KEEP_PHASE_1, KEEP_PHASE_3)
+DEFAULT_KEEP_AMP = 6
+DEFAULT_KEEP_PHASE = KEEP_PHASE_3
+CONF_KEEP_AMP = "after_charge_complete_keep_a"
 
 WINDOW_EIDS = (EID_MIN, EID_MAX, EID_CEILING, EID_FLEX_PCT, EID_FLEX_EUR, EID_PRICE)
 SURPLUS_EIDS = (
@@ -139,6 +148,8 @@ SURPLUS_EIDS = (
     EID_GROUP_LOT,
     EID_SOLAR_ENOUGH_KWH,
     EID_OFFSUN_HOUR_KWH,
+    EID_KEEP_AMP,
+    EID_KEEP_PHASE,
 )
 
 # unit: percent | W | s | min | V | A | kWh
@@ -323,6 +334,18 @@ SURPLUS_NUMBER_SPECS = (
         "unit": "kWh",
         "icon": "mdi:weather-sunny-off",
     },
+    {
+        "entity_id": EID_KEEP_AMP,
+        "unique_id": "kotiakku_goe_direct_after_charge_complete_keep_a",
+        "name": "After charge complete keep amp",
+        "conf": CONF_KEEP_AMP,
+        "default": DEFAULT_KEEP_AMP,
+        "min": 6,
+        "max": 32,
+        "step": 1,
+        "unit": "A",
+        "icon": "mdi:current-ac",
+    },
 )
 
 STORAGE_VERSION = 1
@@ -340,6 +363,21 @@ def psm_int(option):
     if option in PSM_TO_INT:
         return PSM_TO_INT[option]
     return PSM_TO_INT[PSM_AUTO]
+
+
+def keep_phase_psm(option):
+    """go-e ``psm`` for after-charge-complete keep: 1-phase → 1, 3-phase → 2."""
+    if option in (1, "1", KEEP_PHASE_1, PSM_FORCE_1):
+        return 1
+    text = str(option or "").strip().lower().replace(" ", "")
+    if text in ("1", "1-phase", "force1-phase"):
+        return 1
+    try:
+        if int(option) == 1:
+            return 1
+    except (TypeError, ValueError):
+        pass
+    return 2
 
 
 # go-e forceState: Neutral=0 charges in Basic/default; Off=1 stops; On=2 starts.
@@ -364,6 +402,10 @@ def priority_entity_id(serial) -> str:
 
 def until_unplug_entity_id(serial) -> str:
     return f"switch.kotiakku_goe_direct_until_unplug_{serial}"
+
+
+def after_charge_complete_keep_entity_id(serial) -> str:
+    return f"switch.kotiakku_goe_direct_after_charge_complete_keep_{serial}"
 
 
 _REMOVED_WINDOW_RANKS = ("cheapest", "longest", "earliest")
