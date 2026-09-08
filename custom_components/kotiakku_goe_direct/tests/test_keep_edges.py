@@ -1,9 +1,9 @@
-"""Edge-case simulation of after-charge-complete keep.
+"""After-charge-complete keep: finished pack until unplug.
 
-Mirrors the controller two-pass apply: pass 1 arms keep for a finished
-pack (Complete, including already-Complete plug-in) before leftover
-allocation, pass 2 tracks whether HA is still commanding this charger on.
-An interrupt while still WaitCar/Charging blocks later auto-on.
+Mirrors the controller two-pass apply: pass 1 arms keep at Complete
+before leftover allocation (commanded_on omitted), pass 2 tracks whether
+HA is still commanding this charger. A cut while WaitCar/Charging blocks
+later auto-on.
 """
 
 from __future__ import annotations
@@ -12,9 +12,12 @@ from harness import assert_eq, case_runner, load_mod
 
 planner = load_mod("planner", "_keep_edges")
 surplus = load_mod("surplus", "_keep_edges_s")
-step = planner.keep_min_until_unplug_step
+step = planner.keep_until_unplug_step
 role = planner.charger_mqtt_role
 cmd = planner.charger_mqtt_command
+IDLE = planner.KEEP_IDLE
+ALLOWED = planner.KEEP_ALLOWED
+CUT = planner.KEEP_CUT
 
 WINDOW = {"raw_windows": [{"start": 1000, "end": 2000}]}
 LEFTOVER = {"psm": 2, "lot": 11, "amp": 11}
@@ -26,8 +29,7 @@ class KeepSim:
     def __init__(self, enable=True):
         self.on = False
         self.seen = False
-        self.offered = False
-        self.interrupted = False
+        self.phase = IDLE
         self.enable = enable
 
     def apply(self, car, *, commanded_on, enable=None, switch=None):
@@ -37,41 +39,34 @@ class KeepSim:
         was_on = self.on
         plugged = surplus.car_plugged(car)
         finished = surplus.car_finished(car)
-        override, self.seen, self.offered, self.interrupted = step(
+        override, self.seen, self.phase = step(
             override,
             self.seen,
-            self.offered,
-            self.interrupted,
+            self.phase,
             plugged=plugged,
             finished=finished,
-            commanded_on=False,
             was_on=was_on,
-            track_command=False,
             enable=self.enable,
         )
         was_on = override
-        override, self.seen, self.offered, self.interrupted = step(
+        override, self.seen, self.phase = step(
             override,
             self.seen,
-            self.offered,
-            self.interrupted,
+            self.phase,
             plugged=plugged,
             finished=finished,
             commanded_on=commanded_on,
             was_on=was_on,
-            track_command=True,
             enable=self.enable,
         )
         self.on = override
         return self
 
-    def expect(self, on, offered, seen=None, interrupted=None, msg=""):
+    def expect(self, on, phase, seen=None, msg=""):
         assert_eq(self.on, on, "%s keep" % msg)
-        assert_eq(self.offered, offered, "%s offered" % msg)
+        assert_eq(self.phase, phase, "%s phase" % msg)
         if seen is not None:
             assert_eq(self.seen, seen, "%s seen" % msg)
-        if interrupted is not None:
-            assert_eq(self.interrupted, interrupted, "%s interrupted" % msg)
         return self
 
 
@@ -116,37 +111,41 @@ def main():
     def test_leftover_waitcar_then_complete_skips_leftover():
         sim = KeepSim()
         sim.apply("Idle", commanded_on=True).expect(
-            False, False, msg="unplugged leftover force-on"
+            False, IDLE, msg="unplugged leftover force-on"
         )
         sim.apply("WaitCar", commanded_on=True).expect(
-            False, True, seen=False, msg="leftover WaitCar"
+            False, ALLOWED, seen=False, msg="leftover WaitCar"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            True, True, seen=True, msg="Complete leftover-skip"
+            True, ALLOWED, seen=True, msg="Complete leftover-skip"
         )
 
     case("leftover_waitcar_then_complete_skips_leftover", test_leftover_waitcar_then_complete_skips_leftover)
 
     def test_leftover_charging_then_complete():
         sim = KeepSim()
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="leftover Charging")
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="Complete after leftover Charging")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="leftover Charging")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="Complete after leftover Charging"
+        )
 
     case("leftover_charging_then_complete", test_leftover_charging_then_complete)
 
     def test_leftover_waitcar_charging_complete():
         sim = KeepSim()
         sim.apply("WaitCar", commanded_on=True)
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="still leftover")
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="self-finish after leftover")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="still leftover")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="self-finish after leftover"
+        )
 
     case("leftover_waitcar_charging_complete", test_leftover_waitcar_charging_complete)
 
     def test_window_charging_complete_while_still_22kw():
         sim = KeepSim()
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="22 kW Charging")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="22 kW Charging")
         sim.apply("Complete", commanded_on=True).expect(
-            True, True, msg="Complete during cheap window"
+            True, ALLOWED, msg="Complete during cheap window"
         )
 
     case("window_charging_complete_while_still_22kw", test_window_charging_complete_while_still_22kw)
@@ -154,9 +153,11 @@ def main():
     def test_window_then_leftover_then_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="window still on")
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="leftover takes over")
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="self-finish after leftover")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="window still on")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="leftover takes over")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="self-finish after leftover"
+        )
 
     case("window_then_leftover_then_complete", test_window_then_leftover_then_complete)
 
@@ -164,7 +165,7 @@ def main():
         sim = KeepSim()
         sim.apply("Idle", commanded_on=True)
         sim.apply("Complete", commanded_on=False).expect(
-            True, False, msg="already Complete when plugged in: finished pack"
+            True, IDLE, msg="already Complete when plugged in: finished pack"
         )
 
     case("complete_without_a_charge_session", test_complete_without_a_charge_session)
@@ -172,10 +173,10 @@ def main():
     def test_leftover_on_already_finished_car():
         sim = KeepSim()
         sim.apply("Complete", commanded_on=False).expect(
-            True, False, msg="already finished: leftover skip is still a full pack"
+            True, IDLE, msg="already finished: leftover skip is still a full pack"
         )
         sim.apply("Complete", commanded_on=True).expect(
-            True, False, msg="22 kW while already Complete keeps the finished pack"
+            True, IDLE, msg="22 kW while already Complete keeps the finished pack"
         )
 
     case("leftover_on_already_finished_car", test_leftover_on_already_finished_car)
@@ -183,7 +184,7 @@ def main():
     def test_force_off_already_complete_does_not_auto_on():
         sim = KeepSim(enable=False)
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Force off / enable off never auto-on keep"
+            False, IDLE, msg="Force off / enable off never auto-on keep"
         )
 
     case(
@@ -195,10 +196,10 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Charging", commanded_on=False).expect(
-            False, False, interrupted=True, msg="leftover stopped while still Charging"
+            False, CUT, msg="leftover stopped while still Charging"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete after interrupt is not a finished pack"
+            False, CUT, msg="Complete after interrupt is not a finished pack"
         )
 
     case("leftover_interrupt_while_charging_then_complete", test_leftover_interrupt_while_charging_then_complete)
@@ -207,10 +208,10 @@ def main():
         sim = KeepSim()
         sim.apply("WaitCar", commanded_on=True)
         sim.apply("WaitCar", commanded_on=False).expect(
-            False, False, interrupted=True, msg="leftover stolen while still WaitCar"
+            False, CUT, msg="leftover stolen while still WaitCar"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete after interrupt is not a finished pack"
+            False, CUT, msg="Complete after interrupt is not a finished pack"
         )
 
     case("leftover_interrupt_while_waitcar_then_complete", test_leftover_interrupt_while_waitcar_then_complete)
@@ -219,10 +220,10 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Charging", commanded_on=False).expect(
-            False, False, interrupted=True, msg="window ended while still Charging"
+            False, CUT, msg="window ended while still Charging"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete after interrupt is not a finished pack"
+            False, CUT, msg="Complete after interrupt is not a finished pack"
         )
 
     case("window_interrupt_no_leftover_then_complete", test_window_interrupt_no_leftover_then_complete)
@@ -230,14 +231,12 @@ def main():
     def test_leftover_resume_after_interrupt_then_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Charging", commanded_on=False).expect(
-            False, False, interrupted=True, msg="interrupt"
-        )
+        sim.apply("Charging", commanded_on=False).expect(False, CUT, msg="interrupt")
         sim.apply("Charging", commanded_on=True).expect(
-            False, True, interrupted=False, msg="leftover returns"
+            False, ALLOWED, msg="leftover returns"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            True, True, msg="self-finish after leftover resumed"
+            True, ALLOWED, msg="self-finish after leftover resumed"
         )
 
     case(
@@ -249,41 +248,51 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Complete", commanded_on=False).expect(
-            True, True, msg="Complete as leftover ends is a finished surplus charge"
+            True, ALLOWED, msg="Complete as leftover ends is a finished surplus charge"
         )
 
     case("leftover_stops_same_tick_as_complete", test_leftover_stops_same_tick_as_complete)
 
     def test_error_while_leftover_then_complete():
         sim = KeepSim()
-        sim.apply("Error", commanded_on=True).expect(False, True, msg="Error while commanded on")
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="Complete after Error leftover")
+        sim.apply("Error", commanded_on=True).expect(
+            False, ALLOWED, msg="Error while commanded on"
+        )
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="Complete after Error leftover"
+        )
 
     case("error_while_leftover_then_complete", test_error_while_leftover_then_complete)
 
     def test_enable_off_skips_auto_on():
         sim = KeepSim(enable=False)
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="offered still tracked")
-        sim.apply("Complete", commanded_on=False).expect(False, True, msg="enable off no auto-on")
+        sim.apply("Charging", commanded_on=True).expect(
+            False, ALLOWED, msg="allowed still tracked"
+        )
+        sim.apply("Complete", commanded_on=False).expect(
+            False, ALLOWED, msg="enable off no auto-on"
+        )
 
     case("enable_off_skips_auto_on", test_enable_off_skips_auto_on)
 
-    def test_enable_on_after_complete_arms_from_offered():
+    def test_enable_on_after_complete_arms():
         sim = KeepSim(enable=False)
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Complete", commanded_on=False).expect(False, True, msg="waiting for enable")
+        sim.apply("Complete", commanded_on=False).expect(
+            False, ALLOWED, msg="waiting for enable"
+        )
         sim.apply("Complete", commanded_on=False, enable=True).expect(
-            True, True, msg="enable on while still Complete"
+            True, ALLOWED, msg="enable on while still Complete"
         )
 
-    case("enable_on_after_complete_arms_from_offered", test_enable_on_after_complete_arms_from_offered)
+    case("enable_on_after_complete_arms", test_enable_on_after_complete_arms)
 
     def test_enable_off_does_not_clear_keep_already_on():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="auto-on")
+        sim.apply("Complete", commanded_on=False).expect(True, ALLOWED, msg="auto-on")
         sim.apply("Complete", commanded_on=False, enable=False).expect(
-            True, True, msg="enable off leaves keep running"
+            True, ALLOWED, msg="enable off leaves keep running"
         )
 
     case("enable_off_does_not_clear_keep_already_on", test_enable_off_does_not_clear_keep_already_on)
@@ -291,55 +300,69 @@ def main():
     def test_enable_off_manual_keep_until_unplug():
         sim = KeepSim(enable=False)
         sim.apply("WaitCar", commanded_on=False, switch=True).expect(
-            True, False, seen=True, msg="manual keep"
+            True, IDLE, seen=True, msg="manual keep"
         )
-        sim.apply("Complete", commanded_on=False).expect(True, False, msg="still keep, enable off")
-        sim.apply("Idle", commanded_on=False).expect(False, False, seen=False, msg="unplug")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, IDLE, msg="still keep, enable off"
+        )
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, seen=False, msg="unplug"
+        )
 
     case("enable_off_manual_keep_until_unplug", test_enable_off_manual_keep_until_unplug)
 
     def test_manual_on_without_complete():
         sim = KeepSim()
         sim.apply("WaitCar", commanded_on=False, switch=True).expect(
-            True, False, seen=True, msg="manual on WaitCar"
+            True, IDLE, seen=True, msg="manual on WaitCar"
         )
-        sim.apply("Charging", commanded_on=False).expect(True, False, msg="manual keep during Charging")
-        sim.apply("Idle", commanded_on=False).expect(False, False, msg="unplug clears manual keep")
+        sim.apply("Charging", commanded_on=False).expect(
+            True, IDLE, msg="manual keep during Charging"
+        )
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, msg="unplug clears manual keep"
+        )
 
     case("manual_on_without_complete", test_manual_on_without_complete)
 
     def test_manual_on_while_unplugged_waits_for_plug():
         sim = KeepSim()
         sim.apply("Idle", commanded_on=False, switch=True).expect(
-            True, False, seen=False, msg="manual on unplugged waits"
+            True, IDLE, seen=False, msg="manual on unplugged waits"
         )
-        sim.apply("WaitCar", commanded_on=False).expect(True, False, seen=True, msg="plug arms seen")
-        sim.apply("Idle", commanded_on=False).expect(False, False, seen=False, msg="unplug after seen")
+        sim.apply("WaitCar", commanded_on=False).expect(
+            True, IDLE, seen=True, msg="plug arms seen"
+        )
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, seen=False, msg="unplug after seen"
+        )
 
     case("manual_on_while_unplugged_waits_for_plug", test_manual_on_while_unplugged_waits_for_plug)
 
     def test_manual_off_while_complete_does_not_rearm():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="auto-on")
+        sim.apply("Complete", commanded_on=False).expect(True, ALLOWED, msg="auto-on")
         sim.apply("Complete", commanded_on=False, switch=False).expect(
-            False, False, msg="manual off clears offered"
+            False, CUT, msg="manual off cuts"
         )
         sim.apply("Complete", commanded_on=True).expect(
-            False, False, msg="Complete does not re-arm after manual off"
+            False, CUT, msg="Complete does not re-arm after manual off"
         )
 
     case("manual_off_while_complete_does_not_rearm", test_manual_off_while_complete_does_not_rearm)
 
     def test_manual_off_while_charging_does_not_cancel_later_auto_on():
         sim = KeepSim()
-        sim.apply("Charging", commanded_on=True).expect(False, True, msg="offered")
-        sim.apply("Charging", commanded_on=True, switch=True).expect(True, True, msg="manual on")
+        sim.apply("Charging", commanded_on=True).expect(False, ALLOWED, msg="allowed")
+        sim.apply("Charging", commanded_on=True, switch=True).expect(
+            True, ALLOWED, msg="manual on"
+        )
         sim.apply("Charging", commanded_on=True, switch=False).expect(
-            False, True, msg="manual off while leftover still on: offered returns"
+            False, ALLOWED, msg="manual off while leftover still on: allowed returns"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            True, True, msg="self-finish still auto-on; use enable to skip"
+            True, ALLOWED, msg="self-finish still auto-on; use enable to skip"
         )
 
     case("manual_off_while_charging_does_not_cancel_later_auto_on", test_manual_off_while_charging_does_not_cancel_later_auto_on)
@@ -348,10 +371,10 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True, switch=True)
         sim.apply("Charging", commanded_on=True, switch=False, enable=False).expect(
-            False, True, msg="offered tracked, keep off"
+            False, ALLOWED, msg="allowed tracked, keep off"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, True, msg="enable off skips auto-on"
+            False, ALLOWED, msg="enable off skips auto-on"
         )
 
     case("enable_off_while_charging_skips_auto_on_after_manual_off", test_enable_off_while_charging_skips_auto_on_after_manual_off)
@@ -360,13 +383,21 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Complete", commanded_on=False)
-        sim.apply("Idle", commanded_on=False).expect(False, False, seen=False, msg="unplug")
-        sim.apply("Complete", commanded_on=False).expect(
-            True, False, msg="replug already Complete is a finished pack"
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, seen=False, msg="unplug"
         )
-        sim.apply("Idle", commanded_on=False).expect(False, False, seen=False, msg="unplug keep")
-        sim.apply("WaitCar", commanded_on=True).expect(False, True, msg="new leftover session")
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="new self-finish")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, IDLE, msg="replug already Complete is a finished pack"
+        )
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, seen=False, msg="unplug keep"
+        )
+        sim.apply("WaitCar", commanded_on=True).expect(
+            False, ALLOWED, msg="new leftover session"
+        )
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="new self-finish"
+        )
 
     case(
         "unplug_clears_and_replug_already_complete_auto_on",
@@ -378,10 +409,14 @@ def main():
         sim.apply("Charging", commanded_on=True)
         sim.apply("Complete", commanded_on=False)
         sim.apply("Charging", commanded_on=False).expect(
-            True, True, msg="cabin precondition Charging"
+            True, ALLOWED, msg="cabin precondition Charging"
         )
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="back to Complete")
-        sim.apply("Idle", commanded_on=False).expect(False, False, msg="unplug after precondition")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="back to Complete"
+        )
+        sim.apply("Idle", commanded_on=False).expect(
+            False, IDLE, msg="unplug after precondition"
+        )
 
     case("precondition_charging_after_keep", test_precondition_charging_after_keep)
 
@@ -389,7 +424,9 @@ def main():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Complete", commanded_on=False)
-        sim.apply("Complete", commanded_on=False).expect(True, True, msg="leftover gone, keep stays")
+        sim.apply("Complete", commanded_on=False).expect(
+            True, ALLOWED, msg="leftover gone, keep stays"
+        )
         assert_eq(
             role("SolarPriority", WINDOW, 0, keep_min=sim.on),
             planner.ROLE_KEEP,
@@ -486,30 +523,25 @@ def main():
 
     def test_numeric_car_states_leftover_self_finish():
         sim = KeepSim()
-        sim.apply("3", commanded_on=True).expect(False, True, msg="numeric WaitCar")
-        sim.apply("2", commanded_on=True).expect(False, True, msg="numeric Charging")
-        sim.apply("4", commanded_on=False).expect(True, True, msg="numeric Complete")
+        sim.apply("3", commanded_on=True).expect(False, ALLOWED, msg="numeric WaitCar")
+        sim.apply("2", commanded_on=True).expect(False, ALLOWED, msg="numeric Charging")
+        sim.apply("4", commanded_on=False).expect(True, ALLOWED, msg="numeric Complete")
 
     case("numeric_car_states_leftover_self_finish", test_numeric_car_states_leftover_self_finish)
 
     def test_pass1_arms_before_leftover_so_complete_is_not_surplus():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        plugged = surplus.car_plugged("Complete")
-        finished = surplus.car_finished("Complete")
-        on, seen, offered, interrupted = step(
+        on, seen, phase = step(
             sim.on,
             sim.seen,
-            sim.offered,
-            sim.interrupted,
-            plugged=plugged,
-            finished=finished,
-            commanded_on=False,
+            sim.phase,
+            plugged=surplus.car_plugged("Complete"),
+            finished=surplus.car_finished("Complete"),
             was_on=sim.on,
-            track_command=False,
             enable=True,
         )
-        assert_eq((on, seen, offered, interrupted), (True, True, True, False), "pass 1 keep")
+        assert_eq((on, seen, phase), (True, True, ALLOWED), "pass 1 keep")
         assert_eq(
             role("SolarPriority", WINDOW, 0, keep_min=on),
             planner.ROLE_KEEP,
@@ -519,22 +551,11 @@ def main():
     case("pass1_arms_before_leftover_so_complete_is_not_surplus", test_pass1_arms_before_leftover_so_complete_is_not_surplus)
 
     def test_pass1_already_complete_skips_leftover():
-        on, seen, offered, interrupted = step(
-            False,
-            False,
-            False,
-            False,
-            plugged=True,
-            finished=True,
-            commanded_on=False,
-            was_on=False,
-            track_command=False,
-            enable=True,
-        )
+        on, seen, phase = step(False, False, plugged=True, finished=True)
         assert_eq(
-            (on, seen, offered, interrupted),
-            (True, True, False, False),
-            "pass 1 already Complete is keep without offered",
+            (on, seen, phase),
+            (True, True, IDLE),
+            "pass 1 already Complete is keep",
         )
         assert_eq(
             role("SolarPriority", WINDOW, 0, keep_min=on),

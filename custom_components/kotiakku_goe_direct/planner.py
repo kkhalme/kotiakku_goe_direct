@@ -516,64 +516,65 @@ def until_unplug_step(override, plugged, seen):
     return True, False
 
 
-def keep_min_until_unplug_step(
+KEEP_IDLE = "idle"
+KEEP_ALLOWED = "allowed"
+KEEP_CUT = "cut"
+
+
+def restore_keep_phase(phase=None, *, offered=False, interrupted=False):
+    """Keep session phase from store. Maps the older offered/interrupted pair."""
+    if phase in (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT):
+        return phase
+    if interrupted:
+        return KEEP_CUT
+    if offered:
+        return KEEP_ALLOWED
+    return KEEP_IDLE
+
+
+def keep_until_unplug_step(
     override,
     seen,
-    offered,
-    interrupted=False,
+    phase=KEEP_IDLE,
     *,
     plugged,
     finished=False,
-    commanded_on=False,
+    commanded_on=None,
     was_on=None,
-    track_command=True,
     enable=True,
 ):
-    """Advance the after-charge-complete keep switch.
+    """Keep switch until unplug. Auto-on at Complete unless a charge was cut.
 
-    Returns ``(override, seen, offered, interrupted)``. ``override`` is
-    the keep switch: on until unplug (same lifetime as Force On Until
-    Unplug). Auto-on when the pack can be assumed finished: go-e Complete
-    while plugged. That includes leftover surplus WaitCar/Charging that
-    reaches Complete, a car that is already Complete when it plugs in,
-    and leftover surplus that starts on an already-finished car (leftover
-    skips Complete; keep holds the cable for precondition). A cheap
-    window or leftover surplus interrupt while still not Complete sets
-    ``interrupted`` so Complete later does not auto-on. Force off never
-    allows a charge, so it does not auto-on (pass ``enable`` False).
-    ``enable`` False skips auto-on; the keep switch can still be turned
-    on by hand. Manual off sets ``interrupted`` so Complete does not
-    immediately re-arm. Unplug after the switch was on while plugged
-    turns it off and clears ``offered`` / ``interrupted``.
+    Returns ``(override, seen, phase)``. Complete while plugged auto-ons
+    (already Complete included) unless ``phase`` is cut, ``enable`` is
+    off, or Force off (pass ``enable`` False). ``phase`` is idle, allowed
+    (HA commanding while WaitCar/Charging), or cut (HA stopped that
+    charge before Complete; Complete later does not auto-on). Manual off
+    cuts so Complete does not immediately re-arm. Unplug clears the
+    switch and phase.
 
-    ``track_command=False`` only applies unplug / auto-on (used before
-    leftover allocation so a finished car is already keep and does not
-    take leftover).
+    ``commanded_on`` None skips command tracking (before leftover so a
+    finished car is already keep and does not take leftover watts).
     """
     override = bool(override)
     seen = bool(seen)
-    offered = bool(offered)
-    interrupted = bool(interrupted)
+    if phase not in (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT):
+        phase = KEEP_IDLE
     if was_on is None:
         was_on = override
     if was_on and not override:
-        offered = False
-        interrupted = True
-    if track_command:
+        phase = KEEP_CUT
+    if commanded_on is not None:
         if commanded_on and plugged and not finished:
-            offered = True
-            interrupted = False
-        elif not commanded_on and not finished and not override:
-            if offered:
-                interrupted = True
-            offered = False
-    if enable and not override and finished and plugged and not interrupted:
+            phase = KEEP_ALLOWED
+        elif not commanded_on and not finished and not override and phase == KEEP_ALLOWED:
+            phase = KEEP_CUT
+    if enable and not override and finished and plugged and phase != KEEP_CUT:
         override = True
     override, seen = until_unplug_step(override, plugged, seen)
     if not plugged:
-        offered = False
-        interrupted = False
-    return override, seen, offered, interrupted
+        phase = KEEP_IDLE
+    return override, seen, phase
 
 
 def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
@@ -676,9 +677,8 @@ def charger_mqtt_command(
 
     Charge windows and leftover share this so a cheap hour ending does
     not ``frc=1`` a charger leftover is about to write. Full-power is
-    always 22 kW. Keep is the after-charge-complete switch (keep phase
-    and amp) until unplug after the car finished by itself, or when
-    that switch is turned on by hand. Leftover on only when surplus is
+    always 22 kW. Keep is keep phase/amp until unplug after Complete,
+    or when that switch is turned on by hand. Leftover on only when surplus is
     writing this serial. Otherwise off if Force off, a 22 kW session
     just ended, leftover is stopping, or leftover is on but this serial
     is not allocated. Idle SolarPriority that leftover has never started

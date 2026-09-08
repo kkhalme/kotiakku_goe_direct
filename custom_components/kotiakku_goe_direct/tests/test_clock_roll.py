@@ -490,73 +490,6 @@ def main():
         on, seen = until_unplug_tick(True, False, False)
         assert_eq((on, seen), (True, False), "unplugged start waits for a plug")
 
-    def test_keep_min_until_unplug_after_window_or_cut():
-        step = planner.keep_min_until_unplug_step
-        role = planner.charger_mqtt_role
-        cmd = planner.charger_mqtt_command
-        result = {"raw_windows": []}
-        on, seen, offered, interrupted = step(
-            False, False, False, plugged=True, commanded_on=True
-        )
-        assert_eq(offered, True, "cheap window or leftover WaitCar/Charging is offered")
-        on, seen, offered, interrupted = step(
-            False, False, True, plugged=True, finished=True, commanded_on=False
-        )
-        assert_eq(on, True, "Complete after leftover WaitCar/Charging arms keep")
-        on, seen, offered, interrupted = step(
-            False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
-        )
-        assert_eq(on, False, "enable off does not auto-on keep")
-        on, seen, offered, interrupted = step(
-            False, False, False, plugged=True, commanded_on=True
-        )
-        on, seen, offered, interrupted = step(
-            on, seen, offered, interrupted, plugged=True, finished=True, commanded_on=True
-        )
-        assert_eq(on, True, "Complete during the window arms keep")
-        assert_eq(
-            role(POLICY_SOLAR_PRIORITY, result, 0, keep_min=on),
-            planner.ROLE_KEEP,
-            "after the window: keep",
-        )
-        assert_eq(
-            cmd(planner.ROLE_KEEP, surplus_on=False),
-            ("on", 2, 50, 6),
-            "keep command defaults to 3-phase 6 A",
-        )
-        on, seen, offered, interrupted = step(
-            on, seen, offered, interrupted, plugged=True, commanded_on=False
-        )
-        assert_eq(on, True, "morning precondition Charging does not drop keep")
-        cut_on, cut_seen, cut_offered, cut_interrupted = step(
-            False, False, True, plugged=True, commanded_on=False
-        )
-        assert_eq(
-            (cut_on, cut_offered, cut_interrupted),
-            (False, False, True),
-            "window cut clears offered",
-        )
-        later_on, later_seen, later_offered, later_interrupted = step(
-            cut_on,
-            cut_seen,
-            cut_offered,
-            cut_interrupted,
-            plugged=True,
-            finished=True,
-            commanded_on=False,
-        )
-        assert_eq(
-            (later_on, later_offered, later_interrupted),
-            (False, False, True),
-            "Complete after a cut stays off",
-        )
-        on, seen, offered, interrupted = step(True, True, True, plugged=False)
-        assert_eq(
-            (on, seen, offered, interrupted),
-            (False, False, False, False),
-            "unplug clears keep",
-        )
-
     def test_min_equals_max_stays_fixed_over_time():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)
         base = day.timestamp()
@@ -704,7 +637,6 @@ def main():
     case("surplus_split_hold_over_15_min", test_surplus_split_hold_over_15_min)
     case("surplus_phase_hold_over_15_min", test_surplus_phase_hold_over_15_min)
     case("until_unplug_clears_only_that_charger", test_until_unplug_clears_only_that_charger)
-    case("keep_min_until_unplug_after_window_or_cut", test_keep_min_until_unplug_after_window_or_cut)
     case("min_equals_max_stays_fixed_over_time", test_min_equals_max_stays_fixed_over_time)
     case("boundary_exclusive_end", test_boundary_exclusive_end)
     case("horizon_grew_but_not_cheaper_keeps_today", test_horizon_grew_but_not_cheaper_keeps_today)

@@ -405,50 +405,6 @@ def main():
             ("on", 2, 50, 6),
             "keep command is 3-phase 6 A",
         )
-        step = planner.keep_min_until_unplug_step
-        on, seen, offered, interrupted = step(
-            False, False, False, plugged=True, commanded_on=True
-        )
-        on, seen, offered, interrupted = step(
-            on, seen, offered, interrupted, plugged=True, commanded_on=False
-        )
-        assert_eq(
-            (on, seen, offered, interrupted),
-            (False, False, False, True),
-            "window cut while still not Complete does not arm keep",
-        )
-        on, seen, offered, interrupted = step(
-            False, False, False, plugged=True, commanded_on=True
-        )
-        assert_eq(offered, True, "leftover WaitCar/Charging while commanded on is offered")
-        on, seen, offered, interrupted = step(
-            False, False, True, plugged=True, finished=True, commanded_on=False
-        )
-        assert_eq(
-            (on, seen, offered, interrupted),
-            (True, True, True, False),
-            "Complete after leftover WaitCar/Charging arms keep",
-        )
-        on, seen, offered, interrupted = step(
-            False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
-        )
-        assert_eq(on, False, "enable off skips auto-on")
-        on, seen, offered, interrupted = step(
-            False, False, True, plugged=True, finished=True, commanded_on=True
-        )
-        assert_eq(
-            (on, seen, offered, interrupted),
-            (True, True, True, False),
-            "Complete during the window arms keep",
-        )
-        on, seen, offered, interrupted = step(
-            True, True, True, plugged=True, commanded_on=False
-        )
-        assert_eq(
-            (on, seen, offered, interrupted),
-            (True, True, True, False),
-            "precondition after Complete stays keep",
-        )
 
     def test_charger_mqtt_needs_live_state():
         need = planner.charger_mqtt_needs_update
