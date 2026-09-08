@@ -33,6 +33,7 @@ DEFAULT_FLEX_EUR = 0.02
 POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_SOLAR_AND_GRID = "SolarAndGrid"
 POLICY_FORCE_ON = "Force on"
+POLICY_FORCE_OFF = "Force off"
 _WINDOW_SURPLUS_POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID)
 _LEGACY_POLICIES = {
     "Cheapest": POLICY_SOLAR_PRIORITY,
@@ -515,6 +516,67 @@ def until_unplug_step(override, plugged, seen):
     return True, False
 
 
+KEEP_IDLE = "idle"
+KEEP_ALLOWED = "allowed"
+KEEP_CUT = "cut"
+KEEP_PHASES = (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT)
+
+
+def restore_keep_phase(phase=None, *, offered=False, interrupted=False):
+    """Keep session phase from store. Maps the older offered/interrupted pair."""
+    if phase in KEEP_PHASES:
+        return phase
+    if interrupted:
+        return KEEP_CUT
+    if offered:
+        return KEEP_ALLOWED
+    return KEEP_IDLE
+
+
+def keep_until_unplug_step(
+    override,
+    seen,
+    phase=KEEP_IDLE,
+    *,
+    plugged,
+    finished=False,
+    commanded_on=None,
+    was_on=None,
+    enable=True,
+):
+    """Keep switch until unplug. Auto-on at Complete unless a charge was cut.
+
+    Returns ``(override, seen, phase)``. Complete while plugged auto-ons
+    (already Complete included) unless ``phase`` is cut, ``enable`` is
+    off, or Force off (pass ``enable`` False). ``phase`` is idle, allowed
+    (HA commanding while WaitCar/Charging), or cut (HA stopped that
+    charge before Complete; Complete later does not auto-on). Manual off
+    cuts so Complete does not immediately re-arm. Unplug clears the
+    switch and phase.
+
+    ``commanded_on`` None skips command tracking (before leftover so a
+    finished car is already keep and does not take leftover watts).
+    """
+    override = bool(override)
+    seen = bool(seen)
+    phase = restore_keep_phase(phase)
+    if was_on is None:
+        was_on = override
+    if was_on and not override:
+        phase = KEEP_CUT
+    if commanded_on is not None:
+        if commanded_on and plugged and not finished:
+            phase = KEEP_ALLOWED
+        elif not commanded_on and not finished and not override and phase == KEEP_ALLOWED:
+            phase = KEEP_CUT
+    if enable and not override and finished and plugged and phase != KEEP_CUT:
+        override = True
+    override, seen = until_unplug_step(override, plugged, seen)
+    if not plugged:
+        phase = KEEP_IDLE
+    return override, seen, phase
+
+
 def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
     """Whether this charger wants 22 kW right now. Pure; no Home Assistant."""
     if until_unplug:
@@ -535,13 +597,19 @@ def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unpl
     return in_window
 
 
-def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
+def charger_surplus(
+    policy, result, now_ts, *, enough_solar=False, until_unplug=False, keep_min=False
+):
     """Whether leftover surplus may write this charger.
 
     Force off never charges. Full-power (Force on, until-unplug, or a
     cheap window) is skipped so surplus does not shrink group lot.
+    After-charge-complete keep is also skipped so leftover goes to
+    other cars and precondition stays at keep amp.
     SolarPriority and SolarAndGrid take leftover when not full-power.
     """
+    if keep_min:
+        return False
     if charger_full_power(
         policy,
         result,
@@ -554,14 +622,21 @@ def charger_surplus(policy, result, now_ts, *, enough_solar=False, until_unplug=
 
 
 ROLE_FULL = "full"
+ROLE_KEEP = "keep"
 ROLE_SURPLUS = "surplus"
 ROLE_OFF = "off"
 
 
 def charger_mqtt_role(
-    policy, result, now_ts, *, enough_solar=False, until_unplug=False
+    policy,
+    result,
+    now_ts,
+    *,
+    enough_solar=False,
+    until_unplug=False,
+    keep_min=False,
 ):
-    """What this charger should be doing: 22 kW, leftover, or off."""
+    """What this charger should be doing: 22 kW, keep, leftover, or off."""
     if charger_full_power(
         policy,
         result,
@@ -570,6 +645,8 @@ def charger_mqtt_role(
         until_unplug=until_unplug,
     ):
         return ROLE_FULL
+    if keep_min:
+        return ROLE_KEEP
     if charger_surplus(
         policy,
         result,
@@ -590,21 +667,28 @@ def charger_mqtt_command(
     leftover_session=False,
     group_lot=50,
     max_amp=32,
+    min_amp=6,
+    keep_psm=2,
+    keep_amp=6,
     live_frc=None,
 ):
     """One MQTT intent for a charger. None means do not publish.
 
     Charge windows and leftover share this so a cheap hour ending does
     not ``frc=1`` a charger leftover is about to write. Full-power is
-    always 22 kW. Leftover on only when surplus is writing this serial.
-    Otherwise off if Force off, a 22 kW session just ended, leftover is
-    stopping, or leftover is on but this serial is not allocated. Idle
-    SolarPriority that leftover has never started is a no-op (do not
-    spam ``frc=1``) unless live ``frc`` is known and not force-off:
-    Neutral after unplug would start charging in Basic/default.
+    always 22 kW. Keep is keep phase/amp until unplug after Complete,
+    or when that switch is turned on by hand. Leftover on only when
+    surplus is writing this serial. Otherwise off if Force off, a 22 kW
+    session just ended, leftover is stopping, or leftover is on but this
+    serial is not allocated. Idle SolarPriority that leftover has never
+    started is a no-op (do not spam ``frc=1``) unless live ``frc`` is
+    known and not force-off: Neutral after unplug would start charging
+    in Basic/default.
     """
     if role == ROLE_FULL:
         return ("on", 2, int(group_lot), int(max_amp))
+    if role == ROLE_KEEP:
+        return ("on", int(keep_psm), int(group_lot), int(keep_amp))
     if role == ROLE_SURPLUS:
         if surplus_on and surplus_pub is not None:
             return (

@@ -4,7 +4,10 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
+    DEFAULT_KEEP_PHASE,
     DOMAIN,
+    EID_KEEP_PHASE,
+    KEEP_PHASE_OPTIONS,
     POLICIES,
     POLICY_FORCE_OFF,
     POLICY_UNTIL_UNPLUG,
@@ -16,6 +19,7 @@ from .device import hub_device_info
 async def async_setup_entry(hass, entry, async_add_entities):
     controller = hass.data[DOMAIN][entry.entry_id]
     entities = [PolicySelect(controller, serial) for serial in controller.chargers]
+    entities.append(KeepPhaseSelect(controller))
     async_add_entities(entities)
 
 
@@ -73,6 +77,22 @@ class PolicySelect(_HubSelect):
         last = await self.async_get_last_state()
         if last is not None and last.state == POLICY_UNTIL_UNPLUG:
             self._controller.legacy_until_unplug.add(self._serial)
+
+    async def _on_changed(self):
+        self._controller._schedule_apply()
+
+
+class KeepPhaseSelect(_HubSelect):
+    def __init__(self, controller):
+        super().__init__(
+            controller,
+            options=KEEP_PHASE_OPTIONS,
+            default=DEFAULT_KEEP_PHASE,
+            entity_id=EID_KEEP_PHASE,
+            unique_id="kotiakku_goe_direct_after_charge_complete_keep_phase",
+            name="After charge complete keep phase",
+            icon="mdi:numeric-3-circle-outline",
+        )
 
     async def _on_changed(self):
         self._controller._schedule_apply()

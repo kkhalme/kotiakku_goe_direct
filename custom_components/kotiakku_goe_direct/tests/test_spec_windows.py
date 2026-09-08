@@ -288,6 +288,11 @@ def main():
             False,
             "until-unplug is full-power, not surplus",
         )
+        assert_eq(
+            charger_surplus("SolarPriority", result, 0, keep_min=True),
+            False,
+            "6 A keep after self-finish is not leftover",
+        )
         assert_eq(charger_full_power("Force on", result, 0), True, "force on")
         assert_eq(
             charger_full_power("SolarPriority", result, 0, until_unplug=True),
@@ -389,6 +394,16 @@ def main():
             cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=None, had_full=True),
             ("off",),
             "leftover on other cars: this serial is off",
+        )
+        assert_eq(
+            role("SolarPriority", result, 4000, keep_min=True),
+            planner.ROLE_KEEP,
+            "self-finish after the window is 6 A keep, not leftover",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),
+            ("on", 2, 50, 6),
+            "keep command is 3-phase 6 A",
         )
 
     def test_charger_mqtt_needs_live_state():

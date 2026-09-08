@@ -35,6 +35,10 @@ FINISHED_STATES = {
 # Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
+# Below this, leftover still offers (nrg often 0 at start). Surplus treats that
+# as "this charger is taking". Keep take below this is idle (finished pack).
+TAKE_MIN_W = 100
+
 
 def watts(state, in_kw, default=0):
     try:
@@ -86,6 +90,34 @@ def leftover_w(solar_w, house_w, ev_w):
     if ev_w > 0 and not house_includes_ev(house_w, ev_w):
         return solar_w - house_w
     return solar_w - house_w + ev_w
+
+
+def keep_take_w(power_w):
+    """Watts a keep charger is pulling from the house pool. 0 if idle."""
+    if power_w is None:
+        return 0
+    try:
+        power_w = int(power_w)
+    except (TypeError, ValueError):
+        return 0
+    if power_w < TAKE_MIN_W:
+        return 0
+    return power_w
+
+
+def leftover_for_surplus(leftover_w, *keep_power_w):
+    """Leftover still free for surplus chargers after keep take.
+
+    Pass each keep charger's ``nrg``. Idle keep (< TAKE_MIN_W) does not
+    count. Keep MQTT stays at keep amp so leftover does not charge that
+    pack, but keep and leftover are the same house pool. A keep car
+    preconditioning at 3 kW during 2 kW leftover has already used that
+    leftover (and 1 kW from the grid). Surplus chargers only get the
+    remainder; a negative remainder is a deficit.
+    """
+    leftover_w = int(leftover_w)
+    take = sum(keep_take_w(power_w) for power_w in keep_power_w)
+    return leftover_w - take
 
 
 UNUSABLE_STATES = ("", "unknown", "unavailable", "none", "nan")
@@ -608,11 +640,12 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     HA leftover split uses HA priority numbers, not app ``lop``. HA does
     not write ``lop``.
 
-    Mixed (another charger is full-power): do not write leftover ``lot`` —
-    last writer would shrink the shared group. Keep ``lot`` at group_lot
-    and keep leftover ``amp`` / ``psm`` as that charger's leftover cap.
-    Combined demand may exceed the group; app priorities split it. Do not
-    reserve current for the full-power charger by capping surplus ``amp``.
+    Mixed (another charger is full-power or 6 A keep): do not write leftover
+    ``lot`` — last writer would shrink the shared group. Keep ``lot`` at
+    group_lot and keep leftover ``amp`` / ``psm`` as that charger's leftover
+    cap. Combined demand may exceed the group; app priorities split it. Do
+    not reserve current for the full-power charger by capping surplus
+    ``amp``.
     """
     lot = int(lot)
     psm = int(psm)
@@ -740,7 +773,7 @@ def charger_take_w(state, power_w, leftover_w, charger_max_w):
         return 0
     if not car_charging(state):
         return 0
-    if power_w is None or int(power_w) < 100:
+    if power_w is None or int(power_w) < TAKE_MIN_W:
         return cap
     return min(max(int(power_w), 0), cap)
 
@@ -762,7 +795,7 @@ def surplus_want_w(
     MQTT ``amp`` must track leftover, not stick at the last take. If the
     car is at the published amp cap and leftover would budget a higher
     amp (or switch 1-phase → 3-phase), treat it as wanting all leftover so
-    3-phase is not locked at 6 A. A take below 100 W is not accepting.
+    3-phase is not locked at 6 A. A take below TAKE_MIN_W is not accepting.
     Unknown take (None) wants leftover.
     """
     leftover_w = max(int(leftover_w), 0)
@@ -772,7 +805,7 @@ def surplus_want_w(
         take_w = int(take_w)
     except (TypeError, ValueError):
         return leftover_w
-    if take_w < 100:
+    if take_w < TAKE_MIN_W:
         return take_w
     take_w = min(take_w, leftover_w)
     _lot, offer_psm, offer_amp = budget(
@@ -918,7 +951,7 @@ def surplus_allocation_plan(
         return _serial_take(serial, remaining, charger_max_w, take_w, states)
 
     def _is_taking(serial, remaining=leftover_w):
-        return _take_of(serial, remaining) >= 100
+        return _take_of(serial, remaining) >= TAKE_MIN_W
 
     def _backfill_higher(out):
         """Keep every better HA priority on leftover MQTT if a lower one is allocated."""
@@ -1030,7 +1063,7 @@ def surplus_allocation_plan(
         in_dead = remaining <= split_floor_w
         want_steal = (
             leftover_w >= 2 * split_min_w
-            and prev_take >= 100
+            and prev_take >= TAKE_MIN_W
             and ((not in_dead) or (split_hold and not split_expired))
             and not _is_pending(serial)
             and not overdraw_serials

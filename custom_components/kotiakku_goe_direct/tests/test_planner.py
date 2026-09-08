@@ -511,6 +511,103 @@ def main():
     case("string_params_from_templates", test_string_params_from_templates)
     case("restore_policy_maps_legacy_names", test_restore_policy_maps_legacy_names)
     case("until_unplug_overrides_policy", test_until_unplug_overrides_policy)
+
+    def test_keep_until_unplug():
+        step = planner.keep_until_unplug_step
+        role = planner.charger_mqtt_role
+        cmd = planner.charger_mqtt_command
+        idle, allowed, cut = planner.KEEP_IDLE, planner.KEEP_ALLOWED, planner.KEEP_CUT
+        result = {"raw_windows": [{"start": 1000, "end": 2000}]}
+        leftover = {"psm": 2, "lot": 11, "amp": 11}
+
+        on, seen, phase = step(False, False, plugged=True, commanded_on=True)
+        assert_eq((on, phase), (False, allowed), "commanded WaitCar/Charging is allowed")
+        on, seen, phase = step(
+            False, False, allowed, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((on, seen, phase), (True, True, allowed), "Complete auto-on")
+        on, seen, phase = step(False, False, plugged=True, finished=True)
+        assert_eq((on, phase), (True, idle), "already Complete auto-on")
+        on, seen, phase = step(
+            False, False, allowed, plugged=True, commanded_on=False
+        )
+        on, seen, phase = step(
+            on, seen, phase, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((on, phase), (False, cut), "Complete after a cut stays off")
+        on, seen, phase = step(
+            False, False, plugged=True, finished=True, enable=False
+        )
+        assert_eq(on, False, "enable off / Force off does not auto-on")
+        on, seen, phase = step(True, True, allowed, plugged=False)
+        assert_eq((on, seen, phase), (False, False, idle), "unplug clears keep")
+        on, seen, phase = step(
+            False, True, allowed, plugged=True, finished=True, was_on=True
+        )
+        assert_eq((on, phase), (False, cut), "manual off does not re-arm")
+        assert_eq(
+            planner.restore_keep_phase(None, offered=True),
+            allowed,
+            "store offered maps to allowed",
+        )
+        assert_eq(
+            planner.restore_keep_phase(None, interrupted=True),
+            cut,
+            "store interrupted maps to cut",
+        )
+        assert_eq(
+            planner.restore_keep_phase("allowed"),
+            allowed,
+            "stored phase is kept",
+        )
+        assert_eq(
+            planner.restore_keep_phase("bogus", offered=True),
+            allowed,
+            "unknown stored phase maps offered",
+        )
+
+        assert_eq(
+            role("SolarPriority", result, 0, keep_min=True),
+            planner.ROLE_KEEP,
+            "outside window after Complete is keep",
+        )
+        assert_eq(
+            role("SolarPriority", result, 1500, keep_min=True),
+            planner.ROLE_FULL,
+            "cheap window still 22 kW over keep",
+        )
+        assert_eq(
+            role("Force off", result, 0, keep_min=True),
+            planner.ROLE_KEEP,
+            "keep switch overrides Force off like 22 kW until-unplug",
+        )
+        assert_eq(
+            planner.charger_surplus("SolarPriority", result, 0, keep_min=True),
+            False,
+            "keep is not leftover",
+        )
+        assert_eq(
+            role("SolarPriority", result, 0, until_unplug=True, keep_min=True),
+            planner.ROLE_FULL,
+            "22 kW until-unplug wins over keep",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=False),
+            ("on", 2, 50, 6),
+            "keep command defaults to 3-phase 6 A with group lot 50",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),
+            ("on", 2, 50, 6),
+            "keep wins over leftover watts",
+        )
+        assert_eq(
+            cmd(planner.ROLE_KEEP, surplus_on=False, keep_psm=1, keep_amp=8),
+            ("on", 1, 50, 8),
+            "keep amp and phase follow the knobs",
+        )
+
+    case("keep_until_unplug", test_keep_until_unplug)
     case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
     case("current_or_next_and_flex_attrs", test_current_or_next_and_flex_attrs)
     case("horizon_tomorrow_only_and_zero_today", test_horizon_tomorrow_only_and_zero_today)
