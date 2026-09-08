@@ -154,63 +154,67 @@ def main():
 
     case("window_then_leftover_then_complete", test_window_then_leftover_then_complete)
 
-    def test_plug_already_complete_does_not_arm():
+    def test_complete_without_a_charge_session():
         sim = KeepSim()
         sim.apply("Idle", commanded_on=True)
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="plug in already Complete"
+            False, False, msg="already finished when plugged in: not a finished charge"
         )
 
-    case("plug_already_complete_does_not_arm", test_plug_already_complete_does_not_arm)
+    case("complete_without_a_charge_session", test_complete_without_a_charge_session)
 
-    def test_leftover_starts_on_already_complete():
+    def test_leftover_on_already_finished_car():
         sim = KeepSim()
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete with leftover skip, never offered"
+            False, False, msg="already finished: leftover skip is not a surplus finish"
         )
         sim.apply("Complete", commanded_on=True).expect(
-            False, False, msg="22 kW while already Complete still needs prior offered"
+            False, False, msg="22 kW while already Complete is not a finished charge"
         )
 
-    case("leftover_starts_on_already_complete", test_leftover_starts_on_already_complete)
+    case("leftover_on_already_finished_car", test_leftover_on_already_finished_car)
 
-    def test_leftover_cut_while_charging_then_complete():
+    def test_leftover_interrupt_while_charging_then_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Charging", commanded_on=False).expect(
-            False, False, msg="leftover cut while Charging"
+            False, False, msg="leftover stopped while still Charging"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete after leftover cut"
+            False, False, msg="Complete after interrupt is not a finished pack"
         )
 
-    case("leftover_cut_while_charging_then_complete", test_leftover_cut_while_charging_then_complete)
+    case("leftover_interrupt_while_charging_then_complete", test_leftover_interrupt_while_charging_then_complete)
 
-    def test_leftover_cut_while_waitcar_then_complete():
+    def test_leftover_interrupt_while_waitcar_then_complete():
         sim = KeepSim()
         sim.apply("WaitCar", commanded_on=True)
         sim.apply("WaitCar", commanded_on=False).expect(
-            False, False, msg="leftover stolen/cut while WaitCar"
+            False, False, msg="leftover stolen while still WaitCar"
         )
         sim.apply("Complete", commanded_on=False).expect(
-            False, False, msg="Complete after WaitCar cut"
+            False, False, msg="Complete after interrupt is not a finished pack"
         )
 
-    case("leftover_cut_while_waitcar_then_complete", test_leftover_cut_while_waitcar_then_complete)
+    case("leftover_interrupt_while_waitcar_then_complete", test_leftover_interrupt_while_waitcar_then_complete)
 
-    def test_window_cut_no_leftover_then_complete():
+    def test_window_interrupt_no_leftover_then_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
-        sim.apply("Charging", commanded_on=False).expect(False, False, msg="window ended, leftover not writing")
-        sim.apply("Complete", commanded_on=False).expect(False, False, msg="Complete after window cut")
+        sim.apply("Charging", commanded_on=False).expect(
+            False, False, msg="window ended while still Charging"
+        )
+        sim.apply("Complete", commanded_on=False).expect(
+            False, False, msg="Complete after interrupt is not a finished pack"
+        )
 
-    case("window_cut_no_leftover_then_complete", test_window_cut_no_leftover_then_complete)
+    case("window_interrupt_no_leftover_then_complete", test_window_interrupt_no_leftover_then_complete)
 
     def test_leftover_stops_same_tick_as_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)
         sim.apply("Complete", commanded_on=False).expect(
-            True, True, msg="Complete as leftover stops is still a self-finish"
+            True, True, msg="Complete as leftover ends is a finished surplus charge"
         )
 
     case("leftover_stops_same_tick_as_complete", test_leftover_stops_same_tick_as_complete)

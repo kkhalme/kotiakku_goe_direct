@@ -532,13 +532,15 @@ def keep_min_until_unplug_step(
 
     Returns ``(override, seen, offered)``. ``override`` is the keep
     switch: on until unplug (same lifetime as Force On Until Unplug).
-    Auto-on when Complete after HA commanded this charger on while the
-    car was plugged and not yet finished (WaitCar or Charging). A cheap
-    window or leftover surplus cut while still not Complete clears
-    ``offered``. ``enable`` False skips auto-on; the keep switch can
-    still be turned on by hand. Manual off clears ``offered`` so
-    Complete does not immediately re-arm. Unplug after the switch was
-    on while plugged turns it off.
+    Auto-on when the pack can be assumed finished: Complete after HA
+    commanded this charger on while the car was plugged and not yet
+    finished (WaitCar or Charging), including leftover surplus. A cheap
+    window or leftover surplus interrupt while still not Complete clears
+    ``offered``. Force off never allows a charge, so it does not auto-on.
+    ``enable`` False skips auto-on; the keep switch can still be turned
+    on by hand. Manual off clears ``offered`` so Complete does not
+    immediately re-arm. Unplug after the switch was on while plugged
+    turns it off.
 
     ``track_command=False`` only applies unplug / auto-on from an
     existing ``offered`` (used before leftover allocation so a newly
