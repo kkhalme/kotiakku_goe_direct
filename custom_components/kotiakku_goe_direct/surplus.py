@@ -88,6 +88,38 @@ def leftover_w(solar_w, house_w, ev_w):
     return solar_w - house_w + ev_w
 
 
+def keep_take_w(power_w):
+    """Watts a keep charger is pulling from the house pool. 0 if idle."""
+    if power_w is None:
+        return 0
+    try:
+        power_w = int(power_w)
+    except (TypeError, ValueError):
+        return 0
+    if power_w < 100:
+        return 0
+    return power_w
+
+
+def leftover_for_surplus(leftover_w, take_w=0):
+    """Leftover still free for surplus chargers after keep take.
+
+    Keep MQTT stays at keep amp so leftover does not charge that pack,
+    but keep and leftover are the same house pool. A keep car
+    preconditioning at 3 kW during 2 kW leftover has already used that
+    leftover (and 1 kW from the grid). Surplus chargers only get the
+    remainder; a negative remainder is a deficit.
+    """
+    leftover_w = int(leftover_w)
+    try:
+        take_w = int(take_w or 0)
+    except (TypeError, ValueError):
+        take_w = 0
+    if take_w < 0:
+        take_w = 0
+    return leftover_w - take_w
+
+
 UNUSABLE_STATES = ("", "unknown", "unavailable", "none", "nan")
 
 

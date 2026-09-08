@@ -131,6 +131,8 @@ from .surplus import (
     last_sun_end_ts as forecast_last_sun_end,
     last_usable_solar_end_ts as forecast_last_usable_end,
     leftover_w,
+    leftover_for_surplus,
+    keep_take_w,
     group_lot_for_allocations,
     group_lot_for_amps,
     group_surplus_setpoint,
@@ -1331,6 +1333,12 @@ class KotiakkuGoeDirectController:
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
         snap = self._snapshot()
+        keep_take = 0
+        for serial in self.chargers:
+            if roles[serial] != ROLE_KEEP:
+                continue
+            keep_take += keep_take_w(self.charger_power_w(serial))
+        snap["available_w"] = leftover_for_surplus(snap["available_w"], keep_take)
         dec = surplus_decision(
             self.session,
             snap["available_w"],

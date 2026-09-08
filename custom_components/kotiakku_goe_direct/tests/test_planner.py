@@ -757,6 +757,8 @@ def main():
             300,
             "Controller still has an unplugged car: do not add 12 kW",
         )
+        assert_eq(surplus.leftover_for_surplus(2000, 3000), -1000, "keep 3 kW uses 2 kW leftover")
+        assert_eq(surplus.keep_take_w(3000), 3000, "keep take")
         assert_eq(surplus.effective_ev_w(12000, 3000), 3000, "nrg beats lagged Controller")
         assert_eq(surplus.effective_ev_w(0, 3000, controller_usable=False), 3000, "unknown Controller uses nrg")
         assert_eq(surplus.effective_ev_w(3000, None), 3000, "no nrg keeps Controller")

@@ -107,6 +107,27 @@ def main():
         assert_eq(surplus.watts(-3.2, True), 3200, "kW magnitude")
         assert_eq(surplus.watts(-1500, False), 1500, "inverted CT watts")
         assert_eq(surplus.watts("unknown", False, 0), 0, "unusable → default")
+        pool = leftover_w(5000, 6000, 3000)
+        assert_eq(pool, 2000, "house includes 3 kW keep: leftover still 2 kW")
+        assert_eq(surplus.keep_take_w(3000), 3000, "keep precondition take")
+        assert_eq(surplus.keep_take_w(80), 0, "keep idle / Complete trickle")
+        assert_eq(surplus.keep_take_w(None), 0, "unknown nrg")
+        assert_eq(
+            surplus.leftover_for_surplus(pool, 3000),
+            -1000,
+            "3 kW keep during 2 kW leftover: all surplus used, 1 kW grid",
+        )
+        assert_eq(
+            surplus.leftover_for_surplus(8000, 3000),
+            5000,
+            "keep 3 kW during 8 kW leftover: 5 kW left for surplus cars",
+        )
+        assert_eq(surplus.leftover_for_surplus(2000, 0), 2000, "keep not taking")
+        assert_eq(
+            surplus.surplus_decision(False, -1000, 92, window_ok=True)["write_on"],
+            False,
+            "deficit after keep does not start leftover on other cars",
+        )
 
     def test_ev_prefers_nrg_over_lagged_controller():
         ev = surplus.effective_ev_w
