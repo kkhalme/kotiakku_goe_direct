@@ -22,11 +22,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(entities)
 
 
-class UntilUnplugSwitch(SwitchEntity, RestoreEntity):
-    """Temporary 22 kW override. Turns off when that charger’s car unplugs."""
-
+class _RestoreSwitch(SwitchEntity, RestoreEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
+
+    async def async_turn_on(self, **kwargs):
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        self._attr_is_on = False
+        self.async_write_ha_state()
+
+
+class UntilUnplugSwitch(_RestoreSwitch):
+    """Temporary 22 kW override. Turns off when that charger’s car unplugs."""
+
     _attr_icon = "mdi:power-plug"
 
     def __init__(self, controller, serial):
@@ -46,20 +57,10 @@ class UntilUnplugSwitch(SwitchEntity, RestoreEntity):
         elif self._serial in self._controller.legacy_until_unplug:
             self._attr_is_on = True
 
-    async def async_turn_on(self, **kwargs):
-        self._attr_is_on = True
-        self.async_write_ha_state()
 
-    async def async_turn_off(self, **kwargs):
-        self._attr_is_on = False
-        self.async_write_ha_state()
+class AfterChargeCompleteKeepEnableSwitch(_RestoreSwitch):
+    """Allow auto-on of after-charge-complete keep for this charger."""
 
-
-class AfterChargeCompleteKeepEnableSwitch(SwitchEntity, RestoreEntity):
-    """Allow HA to auto-on after-charge-complete keep for this charger."""
-
-    _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_icon = "mdi:ev-station"
 
     def __init__(self, controller, serial):
@@ -79,20 +80,10 @@ class AfterChargeCompleteKeepEnableSwitch(SwitchEntity, RestoreEntity):
         if last is not None and last.state in ("on", "off"):
             self._attr_is_on = last.state == "on"
 
-    async def async_turn_on(self, **kwargs):
-        self._attr_is_on = True
-        self.async_write_ha_state()
 
-    async def async_turn_off(self, **kwargs):
-        self._attr_is_on = False
-        self.async_write_ha_state()
-
-
-class AfterChargeCompleteKeepSwitch(SwitchEntity, RestoreEntity):
+class AfterChargeCompleteKeepSwitch(_RestoreSwitch):
     """Keep charging allowed at keep amp/phase until that car unplugs."""
 
-    _attr_has_entity_name = True
-    _attr_should_poll = False
     _attr_icon = "mdi:ev-plug-type2"
 
     def __init__(self, controller, serial):
@@ -109,11 +100,3 @@ class AfterChargeCompleteKeepSwitch(SwitchEntity, RestoreEntity):
         last = await self.async_get_last_state()
         if last is not None and last.state == "on":
             self._attr_is_on = True
-
-    async def async_turn_on(self, **kwargs):
-        self._attr_is_on = True
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs):
-        self._attr_is_on = False
-        self.async_write_ha_state()

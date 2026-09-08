@@ -523,7 +523,6 @@ def keep_min_until_unplug_step(
     *,
     plugged,
     finished=False,
-    charging=False,
     commanded_on=False,
     was_on=None,
     track_command=True,
@@ -531,23 +530,19 @@ def keep_min_until_unplug_step(
 ):
     """Advance the after-charge-complete keep switch.
 
-    Returns ``(override, seen, offered)``. ``override`` is the visible
-    switch: manual on stays until unplug (same lifetime as Force On
-    Until Unplug). Auto-on when Complete after HA commanded this charger
-    on while the car was plugged and not yet finished (Charging or
-    WaitCar — cheap window, Force on, leftover, or 22 kW until-unplug).
-    A cheap-window or leftover cut while still not Complete clears
+    Returns ``(override, seen, offered)``. ``override`` is the keep
+    switch: on until unplug (same lifetime as Force On Until Unplug).
+    Auto-on when Complete after HA commanded this charger on while the
+    car was plugged and not yet finished (WaitCar or Charging). A cheap
+    window or leftover surplus cut while still not Complete clears
     ``offered``. ``enable`` False skips auto-on; the keep switch can
     still be turned on by hand. Manual off clears ``offered`` so
     Complete does not immediately re-arm. Unplug after the switch was
-    on while plugged turns it off. Car SoC is not available, so this is
-    not a hard full-battery guarantee.
+    on while plugged turns it off.
 
     ``track_command=False`` only applies unplug / auto-on from an
     existing ``offered`` (used before leftover allocation so a newly
-    finished car is already KEEP and does not take leftover).
-    ``charging`` is accepted for callers; offered follows plugged and
-    not finished while commanded on.
+    finished car is already keep and does not take leftover).
     """
     override = bool(override)
     seen = bool(seen)
@@ -596,8 +591,8 @@ def charger_surplus(
 
     Force off never charges. Full-power (Force on, until-unplug, or a
     cheap window) is skipped so surplus does not shrink group lot.
-    3-phase 6 A until-unplug after a self-finish is also skipped so
-    leftover goes to other cars and precondition stays at keep amp.
+    After-charge-complete keep is also skipped so leftover goes to
+    other cars and precondition stays at keep amp.
     SolarPriority and SolarAndGrid take leftover when not full-power.
     """
     if keep_min:
@@ -669,8 +664,8 @@ def charger_mqtt_command(
 
     Charge windows and leftover share this so a cheap hour ending does
     not ``frc=1`` a charger leftover is about to write. Full-power is
-    always 22 kW. Keep is the after-charge-complete switch (default
-    3-phase 6 A) until unplug after the car finished by itself, or when
+    always 22 kW. Keep is the after-charge-complete switch (keep phase
+    and amp) until unplug after the car finished by itself, or when
     that switch is turned on by hand. Leftover on only when surplus is
     writing this serial. Otherwise off if Force off, a 22 kW session
     just ended, leftover is stopping, or leftover is on but this serial

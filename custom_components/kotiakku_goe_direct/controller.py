@@ -118,7 +118,6 @@ from .surplus import (
     DEFAULT_LON,
     OFFER_WAIT_S,
     budget,
-    car_charging,
     car_finished,
     car_plugged,
     charger_take_w,
@@ -260,6 +259,9 @@ class KotiakkuGoeDirectController:
         self._car_ids = {self.car_entity(s) for s in self.chargers}
         self._priority_ids = {self.priority_entity(s) for s in self.chargers}
         self._power_ids = {self.power_entity(s) for s in self.chargers}
+        self._until_unplug_ids = {self.until_unplug_entity(s) for s in self.chargers}
+        self._keep_enable_ids = {self.keep_min_enable_entity(s) for s in self.chargers}
+        self._keep_ids = {self.keep_min_entity(s) for s in self.chargers}
 
     def listen(self, callback):
         self._listeners.append(callback)
@@ -294,10 +296,8 @@ class KotiakkuGoeDirectController:
 
     def keep_min_enable(self, serial):
         """True unless the per-charger enable switch is explicitly off."""
-        state = self._state(self.keep_min_enable_entity(serial))
-        if state is None:
-            return True
-        return str(state).lower() != "off"
+        state = str(self._state(self.keep_min_enable_entity(serial)) or "on").lower()
+        return state != "off"
 
     def car_entity(self, serial):
         return self._car_entities.get(serial) or f"sensor.go_echarger_{serial}_car_state"
@@ -754,17 +754,10 @@ class KotiakkuGoeDirectController:
             serial = entity.rsplit("_", 1)[-1]
             await self._on_policy(serial, event)
             return
-        if entity and entity.startswith("switch.kotiakku_goe_direct_until_unplug_"):
+        if entity in self._until_unplug_ids:
             self._schedule_apply()
             return
-        if entity and entity.startswith(
-            "switch.kotiakku_goe_direct_after_charge_complete_keep_enable_"
-        ):
-            self._schedule_apply()
-            return
-        if entity and entity.startswith(
-            "switch.kotiakku_goe_direct_after_charge_complete_keep_"
-        ):
+        if entity in self._keep_enable_ids or entity in self._keep_ids:
             self._schedule_apply()
             return
         if entity == EID_KEEP_PHASE:
@@ -1149,7 +1142,6 @@ class KotiakkuGoeDirectController:
                 self._keep_min_offered.get(serial),
                 plugged=car_plugged(car_state),
                 finished=car_finished(car_state),
-                charging=car_charging(car_state),
                 commanded_on=bool(commanded.get(serial)),
                 was_on=was_on,
                 track_command=track_command,
@@ -1355,7 +1347,7 @@ class KotiakkuGoeDirectController:
         self._arm_floor(dec["arm_floor"])
         surplus = [serial for serial in self.chargers if roles[serial] == ROLE_SURPLUS]
         was_session = self.session
-        was_surplus_mqtt = set(self._surplus_amp)
+        had_leftover_setpoint = set(self._surplus_amp)
         surplus_on = False
         pubs = {}
         n_held = sum(
@@ -1373,7 +1365,7 @@ class KotiakkuGoeDirectController:
                 split_expired,
                 n_full=n_held,
             )
-        elif dec["write_on"] or dec["write_off"] or was_session or was_surplus_mqtt:
+        elif dec["write_on"] or dec["write_off"] or was_session or had_leftover_setpoint:
             self._clear_surplus_session()
         commanded = {
             serial: roles[serial] == ROLE_FULL or serial in pubs
@@ -1387,7 +1379,7 @@ class KotiakkuGoeDirectController:
         for serial in self.chargers:
             role = roles[serial]
             had_full = bool(self._charge_session.get(serial))
-            leftover_live = serial in was_surplus_mqtt or (
+            leftover_was_writing = serial in had_leftover_setpoint or (
                 was_session and role == ROLE_SURPLUS
             )
             cmd = charger_mqtt_command(
@@ -1395,7 +1387,7 @@ class KotiakkuGoeDirectController:
                 surplus_on=surplus_on,
                 surplus_pub=pubs.get(serial),
                 had_full=had_full,
-                leftover_session=leftover_live,
+                leftover_session=leftover_was_writing,
                 group_lot=self.group_lot,
                 max_amp=self.max_amp,
                 min_amp=self.min_amp,
@@ -1416,7 +1408,9 @@ class KotiakkuGoeDirectController:
                     self._arm_phase(serial, False)
             if cmd is None:
                 continue
-            published = await self._publish_cmd(serial, cmd, force=force)
+            published = await self._publish_cmd(
+                serial, cmd, force=force, leftover=role == ROLE_SURPLUS
+            )
             if published:
                 changed = True
         if changed:
@@ -1471,7 +1465,8 @@ class KotiakkuGoeDirectController:
             blocking=True,
         )
 
-    def _remember_cmd(self, serial, cmd):
+    def _remember_leftover(self, serial, cmd):
+        """Store last leftover surplus phase/amp. Not used for 22 kW or keep."""
         if cmd[0] == "off":
             self._arm_phase(serial, False)
             self._surplus_psm.pop(serial, None)
@@ -1480,36 +1475,37 @@ class KotiakkuGoeDirectController:
         self._surplus_psm[serial] = int(cmd[1])
         self._surplus_amp[serial] = int(cmd[3])
 
-    async def _publish_cmd(self, serial, cmd, force=False):
+    async def _publish_cmd(self, serial, cmd, force=False, leftover=False):
         if not serial or cmd is None:
             return False
         live = self._charger_mqtt.get(serial)
         if not charger_mqtt_needs_update(cmd, live):
-            self._remember_cmd(serial, cmd)
+            if leftover or cmd[0] == "off":
+                self._remember_leftover(serial, cmd)
             return False
         if (
             not force
             and not charger_mqtt_live_complete(cmd, live)
             and self._last_mqtt.get(serial) == cmd
         ):
-            self._remember_cmd(serial, cmd)
+            if leftover or cmd[0] == "off":
+                self._remember_leftover(serial, cmd)
             return False
         if cmd[0] == "off":
             await self._publish_off(serial)
         else:
             await self._publish_on(serial, cmd[1], cmd[2], cmd[3])
         self._last_mqtt[serial] = cmd
+        if leftover or cmd[0] == "off":
+            self._remember_leftover(serial, cmd)
         return True
 
     async def _publish_on(self, serial, psm, lot, amp):
         await self._mqtt_many(serial, charger_on_mqtt(psm, lot, amp))
-        if serial:
-            self._remember_cmd(serial, ("on", psm, lot, amp))
 
     async def _publish_off(self, serial):
         await self._mqtt_many(serial, charger_off_mqtt())
         if serial:
-            self._remember_cmd(serial, ("off",))
             self._last_mqtt[serial] = ("off",)
 
     async def _mqtt_many(self, serial, pairs):

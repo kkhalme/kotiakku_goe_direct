@@ -520,16 +520,12 @@ def main():
         leftover = {"psm": 2, "lot": 11, "amp": 11}
 
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=True, commanded_on=True
-        )
-        assert_eq((on, seen, offered), (False, False, True), "charging while commanded on arms offered")
-        on, seen, offered = step(
-            False, False, False, plugged=True, charging=False, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
         assert_eq(
             (on, seen, offered),
             (False, False, True),
-            "WaitCar leftover (plugged, commanded on) arms offered",
+            "plugged WaitCar/Charging while commanded on arms offered",
         )
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=False
@@ -537,7 +533,7 @@ def main():
         assert_eq(
             (on, seen, offered),
             (True, True, True),
-            "Complete after leftover WaitCar/Charging (not in leftover_pubs) arms keep",
+            "Complete after leftover skip still arms keep from offered",
         )
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=True
@@ -560,19 +556,19 @@ def main():
             "enable off still keeps a manual keep switch until unplug",
         )
         on, seen, offered = step(
-            False, False, False, plugged=False, charging=False, commanded_on=True
+            False, False, False, plugged=False, commanded_on=True
         )
         assert_eq(
             (on, seen, offered),
             (False, False, False),
-            "unplugged leftover Idle MQTT does not arm offered",
+            "unplugged leftover force-on does not arm offered",
         )
         on, seen, offered = step(
             True, True, True, plugged=True, finished=True, commanded_on=False
         )
         assert_eq((on, seen, offered), (True, True, True), "window end after Complete keeps until unplug")
         on, seen, offered = step(
-            True, True, True, plugged=True, charging=True, commanded_on=False
+            True, True, True, plugged=True, commanded_on=False
         )
         assert_eq((on, seen, offered), (True, True, True), "precondition Charging stays keep")
         on, seen, offered = step(
@@ -581,19 +577,15 @@ def main():
         assert_eq((on, seen, offered), (False, False, False), "unplug clears the switch")
 
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=True, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
         on, seen, offered = step(
-            False, False, True, plugged=True, charging=True, commanded_on=False
-        )
-        assert_eq((on, seen, offered), (False, False, False), "window cut while Charging clears offered")
-        on, seen, offered = step(
-            False, False, True, plugged=True, charging=False, commanded_on=False
+            False, False, True, plugged=True, commanded_on=False
         )
         assert_eq(
             (on, seen, offered),
             (False, False, False),
-            "leftover cut while WaitCar clears offered",
+            "window or leftover cut while still not Complete clears offered",
         )
         on, seen, offered = step(
             False, False, False, plugged=True, finished=True, commanded_on=False
@@ -651,7 +643,7 @@ def main():
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=False),
             ("on", 2, 50, 6),
-            "keep MQTT defaults to 3-phase 6 A with group lot 50",
+            "keep command defaults to 3-phase 6 A with group lot 50",
         )
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),

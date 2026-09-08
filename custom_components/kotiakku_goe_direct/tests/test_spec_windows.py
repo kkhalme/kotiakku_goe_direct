@@ -403,24 +403,24 @@ def main():
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=leftover),
             ("on", 2, 50, 6),
-            "keep MQTT is 3-phase 6 A",
+            "keep command is 3-phase 6 A",
         )
         step = planner.keep_min_until_unplug_step
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=True, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
         on, seen, offered = step(
-            False, False, True, plugged=True, charging=True, commanded_on=False
+            False, False, True, plugged=True, commanded_on=False
         )
-        assert_eq((on, seen, offered), (False, False, False), "window cut while Charging does not arm keep")
+        assert_eq((on, seen, offered), (False, False, False), "window cut while still not Complete does not arm keep")
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=False, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
-        assert_eq(offered, True, "leftover WaitCar while commanded on is offered")
+        assert_eq(offered, True, "leftover WaitCar/Charging while commanded on is offered")
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=False
         )
-        assert_eq((on, seen, offered), (True, True, True), "Complete after leftover WaitCar arms keep")
+        assert_eq((on, seen, offered), (True, True, True), "Complete after leftover WaitCar/Charging arms keep")
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
         )
@@ -430,7 +430,7 @@ def main():
         )
         assert_eq((on, seen, offered), (True, True, True), "Complete during the window arms keep")
         on, seen, offered = step(
-            True, True, True, plugged=True, charging=True, commanded_on=False
+            True, True, True, plugged=True, commanded_on=False
         )
         assert_eq((on, seen, offered), (True, True, True), "precondition after Complete stays keep")
 

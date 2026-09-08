@@ -496,23 +496,19 @@ def main():
         cmd = planner.charger_mqtt_command
         result = {"raw_windows": []}
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=True, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
-        assert_eq(offered, True, "cheap window charging is offered")
-        on, seen, offered = step(
-            False, False, False, plugged=True, charging=False, commanded_on=True
-        )
-        assert_eq(offered, True, "leftover WaitCar is offered")
+        assert_eq(offered, True, "cheap window or leftover WaitCar/Charging is offered")
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=False
         )
-        assert_eq(on, True, "Complete after leftover WaitCar arms keep")
+        assert_eq(on, True, "Complete after leftover WaitCar/Charging arms keep")
         on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
         )
         assert_eq(on, False, "enable off does not auto-on keep")
         on, seen, offered = step(
-            False, False, False, plugged=True, charging=True, commanded_on=True
+            False, False, False, plugged=True, commanded_on=True
         )
         on, seen, offered = step(
             on, seen, offered, plugged=True, finished=True, commanded_on=True
@@ -526,14 +522,14 @@ def main():
         assert_eq(
             cmd(planner.ROLE_KEEP, surplus_on=False),
             ("on", 2, 50, 6),
-            "keep MQTT defaults to 3-phase 6 A",
+            "keep command defaults to 3-phase 6 A",
         )
         on, seen, offered = step(
-            on, seen, offered, plugged=True, charging=True, commanded_on=False
+            on, seen, offered, plugged=True, commanded_on=False
         )
         assert_eq(on, True, "morning precondition Charging does not drop keep")
         cut_on, cut_seen, cut_offered = step(
-            False, False, True, plugged=True, charging=True, commanded_on=False
+            False, False, True, plugged=True, commanded_on=False
         )
         assert_eq((cut_on, cut_offered), (False, False), "window cut clears offered")
         later_on, later_seen, later_offered = step(
