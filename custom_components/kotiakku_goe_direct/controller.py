@@ -73,6 +73,7 @@ from .const import (
     EID_VOLTS,
     EID_KEEP_AMP,
     EID_KEEP_PHASE,
+    POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
     POLICIES,
     DEFAULT_KEEP_AMP,
@@ -109,6 +110,7 @@ from .planner import (
     restore_keep_phase,
     until_unplug_step,
     KEEP_IDLE,
+    KEEP_CUT,
     ROLE_FULL,
     ROLE_KEEP,
     ROLE_SURPLUS,
@@ -150,6 +152,30 @@ from .surplus import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _mqtt_cmd_text(cmd):
+    if cmd is None:
+        return "noop"
+    if not cmd or cmd[0] == "off":
+        return "off frc=1"
+    if cmd[0] == "on" and len(cmd) >= 4:
+        return "on psm=%s lot=%s amp=%s" % (cmd[1], cmd[2], cmd[3])
+    return str(cmd)
+
+
+def _roles_text(roles):
+    if not roles:
+        return "-"
+    return " ".join("%s=%s" % item for item in roles.items())
+
+
+def _event_states(event):
+    old = event.data.get("old_state")
+    new = event.data.get("new_state")
+    old_s = None if old is None else old.state
+    new_s = None if new is None else new.state
+    return old_s, new_s
 
 
 def _int_prop(eid, default):
@@ -240,6 +266,11 @@ class KotiakkuGoeDirectController:
         self._price_unsub = None
         self._tracked_price = None
         self._logged_kotiakku_unusable = False
+        self._last_roles = {}
+        self._last_window_active = None
+        self._last_enough_solar = None
+        self._last_gating_day = None
+        self._last_surplus_w = None
         self._refreshing = False
         self._surplus_amp = {}
         self._surplus_psm = {}
@@ -333,6 +364,41 @@ class KotiakkuGoeDirectController:
         if unit == "kw" or unit == "kwatt":
             return parsed * 1000
         return parsed
+
+    def _charger_log(self, serial):
+        nrg = self.charger_power_w(serial)
+        nrg_s = "unknown" if nrg is None else "%sW" % nrg
+        return "policy=%s car=%s nrg=%s" % (
+            self.policy(serial),
+            self._state(self.car_entity(serial)),
+            nrg_s,
+        )
+
+    def _log_gate_changes(self):
+        active = self.window_active()
+        if self._last_window_active is not None and active != self._last_window_active:
+            _LOGGER.info(
+                "kotiakku_goe_direct: cheap window %s",
+                "started" if active else "ended",
+            )
+        self._last_window_active = active
+        enough = self.enough_solar
+        if self._last_enough_solar is not None and enough != self._last_enough_solar:
+            _LOGGER.info(
+                "kotiakku_goe_direct: enough-solar %s (gating %s %s kWh)",
+                "on" if enough else "off",
+                self.gating_solar_day,
+                self.gating_solar_kwh,
+            )
+        self._last_enough_solar = enough
+        day = self.gating_solar_day
+        if self._last_gating_day is not None and day != self._last_gating_day:
+            _LOGGER.info(
+                "kotiakku_goe_direct: solar gate now %s (%s kWh)",
+                day,
+                self.gating_solar_kwh,
+            )
+        self._last_gating_day = day
 
     def _charger_nrg_sum(self):
         total = 0
@@ -617,6 +683,7 @@ class KotiakkuGoeDirectController:
             self._refreshing = False
 
     async def _on_hass_started(self, _event=None):
+        _LOGGER.debug("kotiakku_goe_direct: Home Assistant started, refresh and replan")
         await self._refresh_source_entities()
         await self.async_plan()
         self._schedule_apply()
@@ -679,7 +746,24 @@ class KotiakkuGoeDirectController:
         await self._subscribe_charger_mqtt()
         await self._migrate_legacy_until_unplug()
         await self._migrate_keep_min_switch()
+        keep_on = ",".join(s for s, on in self._keep_min.items() if on) or "none"
+        _LOGGER.info(
+            "kotiakku_goe_direct: loaded chargers=%s leftover_session=%s keep=%s",
+            ",".join(self.chargers) or "none",
+            self.session,
+            keep_on,
+        )
         await self.async_plan()
+        self._last_window_active = self.window_active()
+        self._last_enough_solar = self.enough_solar
+        self._last_gating_day = self.gating_solar_day
+        _LOGGER.info(
+            "kotiakku_goe_direct: cheap window %s enough-solar=%s gating=%s %s kWh",
+            "active" if self._last_window_active else "inactive",
+            self._last_enough_solar,
+            self._last_gating_day,
+            self.gating_solar_kwh,
+        )
         self._schedule_apply()
         if self.hass.state is not CoreState.running:
             self._unsubs.append(
@@ -695,6 +779,7 @@ class KotiakkuGoeDirectController:
             setattr(self, attr, None)
 
     async def async_unload(self):
+        _LOGGER.debug("kotiakku_goe_direct: unloading")
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -744,6 +829,13 @@ class KotiakkuGoeDirectController:
             self._schedule_apply()
             return
         if entity in self._forecast_ids:
+            old_s, new_s = _event_states(event)
+            _LOGGER.debug(
+                "kotiakku_goe_direct: forecast %s %s → %s",
+                entity,
+                old_s,
+                new_s,
+            )
             await self.async_plan()
             self._schedule_apply()
             return
@@ -762,15 +854,51 @@ class KotiakkuGoeDirectController:
             await self._on_policy(serial, event)
             return
         if entity in self._until_unplug_ids:
+            old_s, new_s = _event_states(event)
+            if old_s != new_s:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s until-unplug %s → %s",
+                    entity.rsplit("_", 1)[-1],
+                    old_s,
+                    new_s,
+                )
             self._schedule_apply()
             return
         if entity in self._keep_enable_ids or entity in self._keep_ids:
+            old_s, new_s = _event_states(event)
+            if old_s != new_s:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s %s → %s",
+                    entity,
+                    old_s,
+                    new_s,
+                )
             self._schedule_apply()
             return
         if entity == EID_KEEP_PHASE:
+            old_s, new_s = _event_states(event)
+            if old_s != new_s:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: keep phase %s → %s",
+                    old_s,
+                    new_s,
+                )
             self._schedule_apply()
             return
         if entity in self._car_ids:
+            old_s, new_s = _event_states(event)
+            if old_s != new_s:
+                serial = None
+                for cand in self.chargers:
+                    if self.car_entity(cand) == entity:
+                        serial = cand
+                        break
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s car %s → %s",
+                    serial or entity,
+                    old_s,
+                    new_s,
+                )
             self._schedule_apply()
             return
         if entity in self._priority_ids or entity in self._power_ids:
@@ -783,10 +911,19 @@ class KotiakkuGoeDirectController:
         self._schedule_apply()
 
     async def _on_interval(self, _now=None):
+        _LOGGER.debug("kotiakku_goe_direct: safety interval apply")
         await self.async_plan()
         self._schedule_apply(force=True)
 
     async def _on_policy(self, serial, event):
+        old_s, new_s = _event_states(event)
+        if old_s != new_s:
+            _LOGGER.info(
+                "kotiakku_goe_direct: %s policy %s → %s",
+                serial,
+                old_s,
+                new_s,
+            )
         self._schedule_apply()
 
     def _schedule_apply(self, floor_expired=False, split_expired=False, force=False):
@@ -812,26 +949,38 @@ class KotiakkuGoeDirectController:
         self._apply_unsub = None
         await self._async_apply()
 
-    def _arm_hold(self, attr, fire, need):
+    def _arm_hold(self, attr, fire, need, *, name):
+        active = getattr(self, attr)
         if not need:
+            if active:
+                _LOGGER.info("kotiakku_goe_direct: %s hold cancelled", name)
             self._cancel(attr)
             return
-        if getattr(self, attr):
+        if active:
             return
+        _LOGGER.info(
+            "kotiakku_goe_direct: %s hold for %s min",
+            name,
+            self.hold_min,
+        )
         setattr(self, attr, async_call_later(self.hass, self.hold_min * 60, fire))
 
     def _arm_floor(self, need):
-        self._arm_hold("_floor_unsub", self._floor_fire, need)
+        self._arm_hold("_floor_unsub", self._floor_fire, need, name="leftover 6 A")
 
     async def _floor_fire(self, _now=None):
         self._floor_unsub = None
+        _LOGGER.info("kotiakku_goe_direct: leftover 6 A hold expired")
         self._schedule_apply(floor_expired=True)
 
     def _arm_split(self, need):
-        self._arm_hold("_split_unsub", self._split_fire, need)
+        self._arm_hold(
+            "_split_unsub", self._split_fire, need, name="second-car leftover steal"
+        )
 
     async def _split_fire(self, _now=None):
         self._split_unsub = None
+        _LOGGER.info("kotiakku_goe_direct: second-car leftover steal hold expired")
         self._schedule_apply(split_expired=True)
 
     def _arm_phase(self, serial, need):
@@ -854,6 +1003,10 @@ class KotiakkuGoeDirectController:
         async def _fire(_now=None, serial=serial):
             self._phase_unsub.pop(serial, None)
             self._phase_expired.add(serial)
+            _LOGGER.info(
+                "kotiakku_goe_direct: psm hold expired on %s, applying wanted phase",
+                serial,
+            )
             self._schedule_apply()
 
         self._phase_unsub[serial] = async_call_later(
@@ -867,6 +1020,11 @@ class KotiakkuGoeDirectController:
             unsub = self._offer_unsub.pop(serial, None)
             if unsub:
                 unsub()
+                _LOGGER.debug(
+                    "kotiakku_goe_direct: %s leftover take ≥%s W, offer wait done",
+                    serial,
+                    int(TAKE_MIN_W),
+                )
             self._offer_expired.discard(serial)
             return
         if not need:
@@ -885,6 +1043,10 @@ class KotiakkuGoeDirectController:
         async def _fire(_now=None, serial=serial):
             self._offer_unsub.pop(serial, None)
             self._offer_expired.add(serial)
+            _LOGGER.info(
+                "kotiakku_goe_direct: leftover offer wait expired on %s",
+                serial,
+            )
             self._schedule_apply()
 
         self._offer_unsub[serial] = async_call_later(
@@ -944,10 +1106,24 @@ class KotiakkuGoeDirectController:
             today_kwh=self.today_kwh,
             tomorrow_kwh=self.tomorrow_kwh,
         )
+        windows = self.window_result.get("raw_windows") or []
+        first = windows[0] if windows else {}
         _LOGGER.info(
-            "kotiakku_goe_direct plan reason=%s count=%s",
-            self.window_result["reason"],
-            self.window_result["count"],
+            "kotiakku_goe_direct: plan reason=%s count=%s start=%s end=%s tomorrow_ok=%s",
+            self.window_result.get("reason"),
+            self.window_result.get("count"),
+            first.get("start"),
+            first.get("end"),
+            self.window_result.get("tomorrow_ok"),
+        )
+        _LOGGER.debug(
+            "kotiakku_goe_direct: plan source=%s slots=%s blocked=%s enough_solar=%s gating=%s %s kWh",
+            self.window_result.get("source_entity"),
+            self.window_result.get("slot_count"),
+            len(self.window_result.get("blocked") or []),
+            self.enough_solar,
+            self.gating_solar_day,
+            self.gating_solar_kwh,
         )
         self._schedule_boundaries()
         self.notify()
@@ -1036,6 +1212,15 @@ class KotiakkuGoeDirectController:
         value = nrg_total_w(payload)
         old = self._nrg_w.get(serial)
         self._nrg_w[serial] = value
+        old_take = old is not None and old >= TAKE_MIN_W
+        new_take = value is not None and value >= TAKE_MIN_W
+        if old_take != new_take:
+            _LOGGER.debug(
+                "kotiakku_goe_direct: %s nrg %s → %s W",
+                serial,
+                old,
+                value,
+            )
         if old != value:
             self._schedule_apply()
 
@@ -1054,6 +1239,12 @@ class KotiakkuGoeDirectController:
         old = bucket.get(key)
         bucket[key] = value
         if key == "frc" and old != value:
+            _LOGGER.debug(
+                "kotiakku_goe_direct: %s live frc %s → %s",
+                serial,
+                old,
+                value,
+            )
             self._schedule_apply()
 
     def _snapshot(self):
@@ -1129,6 +1320,12 @@ class KotiakkuGoeDirectController:
                 changed = True
             self.seen[serial] = new_seen
             if new_on != override:
+                if not new_on:
+                    _LOGGER.info(
+                        "kotiakku_goe_direct: %s until-unplug off (unplug, car=%s)",
+                        serial,
+                        car_state,
+                    )
                 await self._turn_until_unplug(serial, new_on)
                 changed = True
             until_on[serial] = new_on
@@ -1142,34 +1339,63 @@ class KotiakkuGoeDirectController:
             car_state = self._state(self.car_entity(serial))
             override = self.keep_min(serial)
             was_on = bool(self._keep_min.get(serial))
+            old_phase = self._keep_min_phase.get(serial, KEEP_IDLE)
+            plugged = car_plugged(car_state)
+            finished = car_finished(car_state)
+            enable = (
+                self.keep_min_enable(serial)
+                and self.policy(serial) != POLICY_FORCE_OFF
+            )
             new_on, new_seen, new_phase = keep_until_unplug_step(
                 override,
                 self._keep_min_seen.get(serial),
-                self._keep_min_phase.get(serial, KEEP_IDLE),
-                plugged=car_plugged(car_state),
-                finished=car_finished(car_state),
+                old_phase,
+                plugged=plugged,
+                finished=finished,
                 commanded_on=(
                     None if commanded is None else bool(commanded.get(serial))
                 ),
                 was_on=was_on,
-                enable=(
-                    self.keep_min_enable(serial)
-                    and self.policy(serial) != POLICY_FORCE_OFF
-                ),
+                enable=enable,
             )
             if (
                 was_on != new_on
                 or bool(self._keep_min_seen.get(serial)) != new_seen
-                or self._keep_min_phase.get(serial) != new_phase
+                or old_phase != new_phase
             ):
                 changed = True
             if new_on and not was_on:
                 _LOGGER.info(
-                    "kotiakku_goe_direct: %s after_charge_complete_keep on (%s-phase %s A until unplug)",
+                    "kotiakku_goe_direct: %s after_charge_complete_keep on (%s-phase %s A until unplug, car=%s)",
                     serial,
                     3 if self.keep_psm == 2 else 1,
                     self.keep_amp,
+                    car_state,
                 )
+            elif was_on and not new_on:
+                why = "unplug" if not plugged else "switch off"
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s after_charge_complete_keep off (%s, car=%s)",
+                    serial,
+                    why,
+                    car_state,
+                )
+            if old_phase != new_phase:
+                if new_phase == KEEP_CUT:
+                    _LOGGER.info(
+                        "kotiakku_goe_direct: %s keep cut (HA stopped charge before Complete, car=%s)",
+                        serial,
+                        car_state,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "kotiakku_goe_direct: %s keep phase %s → %s (on=%s car=%s)",
+                        serial,
+                        old_phase,
+                        new_phase,
+                        new_on,
+                        car_state,
+                    )
             self._keep_min[serial] = new_on
             self._keep_min_seen[serial] = new_seen
             self._keep_min_phase[serial] = new_phase
@@ -1262,7 +1488,14 @@ class KotiakkuGoeDirectController:
             offer_pending=offer_pending,
         )
         taking = allocations.get("taking") or []
+        was_split = self.split_session
         self.split_session = len(taking) >= 2
+        if self.split_session and not was_split:
+            _LOGGER.info(
+                "kotiakku_goe_direct: leftover split taking=%s remainder=%sW",
+                ",".join(taking),
+                allocations.get("remainder_w"),
+            )
         self._arm_split(allocations["arm_split_hold"])
         allocated = allocations["allocations"]
         for serial in surplus:
@@ -1293,6 +1526,10 @@ class KotiakkuGoeDirectController:
             if watts_i is None:
                 if surplus_higher_keep_on(serial, allocated, lops, states):
                     watts_i = alloc_w
+                    _LOGGER.debug(
+                        "kotiakku_goe_direct: %s leftover stays armed (lower-priority car has leftover)",
+                        serial,
+                    )
                 else:
                     continue
             source_w = target_w if dec["use_floor_budget"] else min(
@@ -1324,23 +1561,55 @@ class KotiakkuGoeDirectController:
             )
         for pub in targets.values():
             pub["lot"] = lot
+        _LOGGER.debug(
+            "kotiakku_goe_direct: leftover alloc %sW floor=%s taking=%s remainder=%sW overdraw=%s pending=%s pubs=%s",
+            snap["available_w"],
+            dec["use_floor_budget"],
+            ",".join(taking) or "none",
+            allocations.get("remainder_w"),
+            overdraw,
+            ",".join(sorted(offer_pending)) or "none",
+            ",".join(
+                "%s=%sA/%s" % (s, pub["amp"], "3p" if pub["psm"] == 2 else "1p")
+                for s, pub in targets.items()
+            )
+            or "none",
+        )
         return targets
 
     async def _apply_chargers(self, floor_expired=False, split_expired=False, force=False):
+        self._log_gate_changes()
         changed, until_on = await self._sync_until_unplug()
         keep_changed, keep_on = await self._sync_keep_min()
         changed = changed or keep_changed
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
         snap = self._snapshot()
-        snap["available_w"] = leftover_for_surplus(
-            snap["available_w"],
-            *(
-                self.charger_power_w(serial)
-                for serial in self.chargers
-                if roles[serial] == ROLE_KEEP
-            ),
-        )
+        raw_w = snap["available_w"]
+        keep_serials = [s for s in self.chargers if roles[s] == ROLE_KEEP]
+        keep_powers = [self.charger_power_w(s) for s in keep_serials]
+        snap["available_w"] = leftover_for_surplus(raw_w, *keep_powers)
+        if keep_serials:
+            parts = ",".join(
+                "%s=%sW" % (s, "unknown" if p is None else p)
+                for s, p in zip(keep_serials, keep_powers)
+            )
+            _LOGGER.debug(
+                "kotiakku_goe_direct: keep nrg %s leftover %s W → %s W",
+                parts,
+                raw_w,
+                snap["available_w"],
+            )
+            if snap["available_w"] < 0 and (
+                self._last_surplus_w is None or self._last_surplus_w >= 0
+            ):
+                _LOGGER.info(
+                    "kotiakku_goe_direct: keep using leftover pool (%s); leftover %s W → %s W (deficit)",
+                    parts,
+                    raw_w,
+                    snap["available_w"],
+                )
+        self._last_surplus_w = snap["available_w"]
         dec = surplus_decision(
             self.session,
             snap["available_w"],
@@ -1353,6 +1622,23 @@ class KotiakkuGoeDirectController:
             floor_expired=floor_expired,
             hold_active=self._floor_unsub is not None,
             hold_exit_w=self.start_min_w,
+        )
+        _LOGGER.debug(
+            "kotiakku_goe_direct: apply leftover=%sW soc=%s window_ok=%s session=%s "
+            "write_on=%s write_off=%s floor=%s roles=%s floor_exp=%s split_exp=%s force=%s solar=%sW house=%sW",
+            snap["available_w"],
+            snap["soc"],
+            snap["window_ok"],
+            self.session,
+            dec["write_on"],
+            dec["write_off"],
+            dec["arm_floor"],
+            _roles_text(roles),
+            floor_expired,
+            split_expired,
+            force,
+            snap["solar_w"],
+            snap["house_w"],
         )
         unusable = not snap["window_ok"]
         if unusable and (self.session or dec["write_on"] or dec["write_off"]):
@@ -1383,7 +1669,40 @@ class KotiakkuGoeDirectController:
                 split_expired,
                 n_full=n_held,
             )
+            if not was_session:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: leftover surplus on leftover=%sW soc=%s chargers=%s",
+                    snap["available_w"],
+                    snap["soc"],
+                    ",".join(surplus),
+                )
+            if not pubs:
+                _LOGGER.debug(
+                    "kotiakku_goe_direct: leftover on but no setpoint (chargers=%s)",
+                    ",".join(surplus),
+                )
         elif dec["write_on"] or dec["write_off"] or was_session or had_leftover_setpoint:
+            if was_session or had_leftover_setpoint:
+                if dec["write_off"] and floor_expired:
+                    why = "6 A hold expired"
+                elif not surplus:
+                    why = "no surplus chargers"
+                elif not dec["write_on"]:
+                    why = "leftover/SoC stop"
+                else:
+                    why = "leftover off"
+                _LOGGER.info(
+                    "kotiakku_goe_direct: leftover surplus off (%s, leftover=%sW soc=%s)",
+                    why,
+                    snap["available_w"],
+                    snap["soc"],
+                )
+            elif dec["write_on"] and not surplus:
+                _LOGGER.debug(
+                    "kotiakku_goe_direct: leftover %sW but no surplus chargers roles=%s",
+                    snap["available_w"],
+                    _roles_text(roles),
+                )
             self._clear_surplus_session()
         commanded = {
             serial: roles[serial] == ROLE_FULL or serial in pubs
@@ -1392,6 +1711,29 @@ class KotiakkuGoeDirectController:
         keep_changed, keep_on = await self._sync_keep_min(commanded)
         changed = changed or keep_changed
         roles = self._charger_roles(now_ts, until_on, keep_on)
+        for serial, role in roles.items():
+            old = self._last_roles.get(serial)
+            if old == role:
+                continue
+            why = ""
+            if role == ROLE_FULL:
+                if until_on.get(serial):
+                    why = " (until-unplug)"
+                elif self.policy(serial) == POLICY_FORCE_ON:
+                    why = " (Force on)"
+                else:
+                    why = " (cheap window)"
+            elif role == ROLE_KEEP:
+                why = " (after-charge keep)"
+            _LOGGER.info(
+                "kotiakku_goe_direct: %s role %s → %s%s (%s)",
+                serial,
+                old or "none",
+                role,
+                why,
+                self._charger_log(serial),
+            )
+        self._last_roles = dict(roles)
         for serial in self.chargers:
             role = roles[serial]
             had_full = bool(self._charge_session.get(serial))
@@ -1438,6 +1780,11 @@ class KotiakkuGoeDirectController:
             restore_to = self.restore.get(serial, POLICY_FORCE_OFF)
             if restore_to not in POLICIES:
                 restore_to = POLICY_FORCE_OFF
+            _LOGGER.info(
+                "kotiakku_goe_direct: %s migrate Force on until unplug → switch, policy %s",
+                serial,
+                restore_to,
+            )
             if self.policy(serial) != restore_to:
                 await self._select_policy(serial, restore_to)
             if not self.until_unplug(serial):
@@ -1446,6 +1793,10 @@ class KotiakkuGoeDirectController:
     async def _migrate_keep_min_switch(self):
         for serial in self.chargers:
             if self._keep_min.get(serial) and not self.keep_min(serial):
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s restore after_charge_complete_keep switch on",
+                    serial,
+                )
                 await self._turn_keep_min(serial, True)
 
     async def _turn_until_unplug(self, serial, on):
@@ -1495,6 +1846,7 @@ class KotiakkuGoeDirectController:
         if not serial or cmd is None:
             return False
         live = self._charger_mqtt.get(serial)
+        text = _mqtt_cmd_text(cmd)
         if not charger_mqtt_needs_update(cmd, live):
             if leftover or cmd[0] == "off":
                 self._remember_leftover(serial, cmd)
@@ -1504,9 +1856,19 @@ class KotiakkuGoeDirectController:
             and not charger_mqtt_live_complete(cmd, live)
             and self._last_mqtt.get(serial) == cmd
         ):
+            _LOGGER.debug(
+                "kotiakku_goe_direct: %s mqtt skip waiting-live %s",
+                serial,
+                text,
+            )
             if leftover or cmd[0] == "off":
                 self._remember_leftover(serial, cmd)
             return False
+        starting = leftover and cmd[0] == "on" and serial not in self._surplus_amp
+        if leftover and cmd[0] == "on" and not starting:
+            _LOGGER.debug("kotiakku_goe_direct: %s leftover mqtt %s", serial, text)
+        else:
+            _LOGGER.info("kotiakku_goe_direct: %s mqtt %s", serial, text)
         if cmd[0] == "off":
             await self._publish_off(serial)
         else:

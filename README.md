@@ -133,6 +133,8 @@ Policy pickers start at **Force off**. That charger does not charge until you pi
 
 On load — and again when Home Assistant has finished starting — the integration asks every wired sensor (Kotiakku, Forecast.Solar, Nordpool, charger car/power) to update before it plans, so restored leftover values are not used.
 
+Logs are under `custom_components.kotiakku_goe_direct`. **Info** is keep / leftover / 22 kW / MQTT writes / holds. Set that logger to **debug** for each apply tick (leftover watts, roles, leftover allocation, leftover amp follow).
+
 After it exists, **Configure** edits charger entities/serials/priorities and Controller / Kotiakku wiring. Surplus numbers, group lot, window bounds, the price text, leftover priorities, policies, Force On Until Unplug, and After charge complete keep (enable, keep switch, phase, amp) are entities on the **Kotiakku go-e Direct** device so they can go on a dashboard.
 
 YAML import is optional. The ids below are **placeholders** — use your own entities and the MQTT serials from the go-e app (`111111` / `222222` are fake). Charger 1 is required; chargers 2–4 may be omitted. `priority` is 1–99 (1 is highest); omit it to default by slot (1, 2, 3, 4):
