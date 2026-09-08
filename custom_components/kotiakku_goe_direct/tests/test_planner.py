@@ -519,80 +519,112 @@ def main():
         result = {"raw_windows": [{"start": 1000, "end": 2000}]}
         leftover = {"psm": 2, "lot": 11, "amp": 11}
 
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=True, commanded_on=True
         )
         assert_eq(
-            (on, seen, offered),
-            (False, False, True),
+            (on, seen, offered, interrupted),
+            (False, False, True, False),
             "plugged WaitCar/Charging while commanded on arms offered",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, True, plugged=True, finished=True, commanded_on=False
         )
         assert_eq(
-            (on, seen, offered),
-            (True, True, True),
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
             "Complete after leftover skip still arms keep from offered",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, True, plugged=True, finished=True, commanded_on=True
         )
-        assert_eq((on, seen, offered), (True, True, True), "Complete after offered turns the switch on")
-        on, seen, offered = step(
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
+            "Complete after offered turns the switch on",
+        )
+        on, seen, offered, interrupted = step(
             False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
         )
         assert_eq(
-            (on, seen, offered),
-            (False, False, True),
+            (on, seen, offered, interrupted),
+            (False, False, True, False),
             "enable off skips auto-on after a self-finish",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             True, True, True, plugged=True, finished=True, commanded_on=False, enable=False
         )
         assert_eq(
-            (on, seen, offered),
-            (True, True, True),
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
             "enable off still keeps a manual keep switch until unplug",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=False, commanded_on=True
         )
         assert_eq(
-            (on, seen, offered),
-            (False, False, False),
+            (on, seen, offered, interrupted),
+            (False, False, False, False),
             "unplugged leftover force-on does not arm offered",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             True, True, True, plugged=True, finished=True, commanded_on=False
         )
-        assert_eq((on, seen, offered), (True, True, True), "window end after Complete keeps until unplug")
-        on, seen, offered = step(
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
+            "window end after Complete keeps until unplug",
+        )
+        on, seen, offered, interrupted = step(
             True, True, True, plugged=True, commanded_on=False
         )
-        assert_eq((on, seen, offered), (True, True, True), "precondition Charging stays keep")
-        on, seen, offered = step(
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
+            "precondition Charging stays keep",
+        )
+        on, seen, offered, interrupted = step(
             True, True, True, plugged=False, finished=False, commanded_on=False
         )
-        assert_eq((on, seen, offered), (False, False, False), "unplug clears the switch")
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (False, False, False, False),
+            "unplug clears the switch",
+        )
 
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=True, commanded_on=True
         )
-        on, seen, offered = step(
-            False, False, True, plugged=True, commanded_on=False
+        on, seen, offered, interrupted = step(
+            on, seen, offered, interrupted, plugged=True, commanded_on=False
         )
         assert_eq(
-            (on, seen, offered),
-            (False, False, False),
+            (on, seen, offered, interrupted),
+            (False, False, False, True),
             "window or leftover cut while still not Complete clears offered",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
+            on, seen, offered, interrupted, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (False, False, False, True),
+            "Complete after a cut does not arm keep",
+        )
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=True, finished=True, commanded_on=False
         )
-        assert_eq((on, seen, offered), (False, False, False), "Complete after a cut does not arm keep")
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (True, True, False, False),
+            "already Complete when plugged in arms keep",
+        )
+        on, seen, offered, interrupted = step(
+            False, False, False, plugged=True, finished=True, commanded_on=False, enable=False
+        )
+        assert_eq(on, False, "Force off / enable off does not auto-on already Complete")
 
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False,
             False,
             True,
@@ -602,17 +634,25 @@ def main():
             track_command=False,
         )
         assert_eq(
-            (on, seen, offered),
-            (True, True, True),
+            (on, seen, offered, interrupted),
+            (True, True, True, False),
             "leftover skipped Complete still arms from offered (pass 1)",
         )
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, True, True, plugged=True, finished=True, was_on=True
         )
-        assert_eq((on, seen, offered), (False, False, False), "manual off does not re-arm")
-        on, seen, offered = step(True, False, False, plugged=True)
-        assert_eq((on, seen, offered), (True, True, False), "manual on stays until unplug")
-        on, seen, offered = step(True, True, True, plugged=True, finished=True)
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (False, False, False, True),
+            "manual off does not re-arm",
+        )
+        on, seen, offered, interrupted = step(True, False, False, plugged=True)
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (True, True, False, False),
+            "manual on stays until unplug",
+        )
+        on, seen, offered, interrupted = step(True, True, True, plugged=True, finished=True)
         assert_eq(on, True, "Force off policy does not clear a keep switch")
 
         assert_eq(

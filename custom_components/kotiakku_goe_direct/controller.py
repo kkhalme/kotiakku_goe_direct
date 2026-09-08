@@ -215,6 +215,7 @@ class KotiakkuGoeDirectController:
         self._keep_min = {s: False for s in self.chargers}
         self._keep_min_offered = {s: False for s in self.chargers}
         self._keep_min_seen = {s: False for s in self.chargers}
+        self._keep_min_interrupted = {s: False for s in self.chargers}
         self._charging = False
         self._apply_again = False
         self._pending_floor = False
@@ -637,6 +638,12 @@ class KotiakkuGoeDirectController:
             self._keep_min_seen.update(
                 {k: bool(v) for k, v in (stored.get("keep_min_seen") or {}).items()}
             )
+            self._keep_min_interrupted.update(
+                {
+                    k: bool(v)
+                    for k, v in (stored.get("keep_min_interrupted") or {}).items()
+                }
+            )
         await self._refresh_source_entities()
         track = [
             self.soc_entity,
@@ -715,6 +722,7 @@ class KotiakkuGoeDirectController:
                 "keep_min": {s: self.keep_min(s) for s in self.chargers},
                 "keep_min_offered": self._keep_min_offered,
                 "keep_min_seen": self._keep_min_seen,
+                "keep_min_interrupted": self._keep_min_interrupted,
             }
         )
 
@@ -1128,7 +1136,7 @@ class KotiakkuGoeDirectController:
         return changed, until_on
 
     async def _sync_keep_min(self, *, track_command, commanded=None):
-        """Arm after-charge-complete keep until unplug after a self-finish."""
+        """Arm after-charge-complete keep until unplug for a finished pack."""
         changed = False
         keep_on = {}
         commanded = commanded or {}
@@ -1136,21 +1144,26 @@ class KotiakkuGoeDirectController:
             car_state = self._state(self.car_entity(serial))
             override = self.keep_min(serial)
             was_on = bool(self._keep_min.get(serial))
-            new_on, new_seen, new_offered = keep_min_until_unplug_step(
+            new_on, new_seen, new_offered, new_interrupted = keep_min_until_unplug_step(
                 override,
                 self._keep_min_seen.get(serial),
                 self._keep_min_offered.get(serial),
+                self._keep_min_interrupted.get(serial),
                 plugged=car_plugged(car_state),
                 finished=car_finished(car_state),
                 commanded_on=bool(commanded.get(serial)),
                 was_on=was_on,
                 track_command=track_command,
-                enable=self.keep_min_enable(serial),
+                enable=(
+                    self.keep_min_enable(serial)
+                    and self.policy(serial) != POLICY_FORCE_OFF
+                ),
             )
             if (
                 was_on != new_on
                 or bool(self._keep_min_seen.get(serial)) != new_seen
                 or bool(self._keep_min_offered.get(serial)) != new_offered
+                or bool(self._keep_min_interrupted.get(serial)) != new_interrupted
             ):
                 changed = True
             if new_on and not was_on:
@@ -1163,6 +1176,7 @@ class KotiakkuGoeDirectController:
             self._keep_min[serial] = new_on
             self._keep_min_seen[serial] = new_seen
             self._keep_min_offered[serial] = new_offered
+            self._keep_min_interrupted[serial] = new_interrupted
             if new_on != override:
                 await self._turn_keep_min(serial, new_on)
                 changed = True

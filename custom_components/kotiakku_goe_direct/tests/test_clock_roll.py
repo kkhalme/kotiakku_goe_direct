@@ -495,23 +495,23 @@ def main():
         role = planner.charger_mqtt_role
         cmd = planner.charger_mqtt_command
         result = {"raw_windows": []}
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=True, commanded_on=True
         )
         assert_eq(offered, True, "cheap window or leftover WaitCar/Charging is offered")
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, True, plugged=True, finished=True, commanded_on=False
         )
         assert_eq(on, True, "Complete after leftover WaitCar/Charging arms keep")
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
         )
         assert_eq(on, False, "enable off does not auto-on keep")
-        on, seen, offered = step(
+        on, seen, offered, interrupted = step(
             False, False, False, plugged=True, commanded_on=True
         )
-        on, seen, offered = step(
-            on, seen, offered, plugged=True, finished=True, commanded_on=True
+        on, seen, offered, interrupted = step(
+            on, seen, offered, interrupted, plugged=True, finished=True, commanded_on=True
         )
         assert_eq(on, True, "Complete during the window arms keep")
         assert_eq(
@@ -524,20 +524,38 @@ def main():
             ("on", 2, 50, 6),
             "keep command defaults to 3-phase 6 A",
         )
-        on, seen, offered = step(
-            on, seen, offered, plugged=True, commanded_on=False
+        on, seen, offered, interrupted = step(
+            on, seen, offered, interrupted, plugged=True, commanded_on=False
         )
         assert_eq(on, True, "morning precondition Charging does not drop keep")
-        cut_on, cut_seen, cut_offered = step(
+        cut_on, cut_seen, cut_offered, cut_interrupted = step(
             False, False, True, plugged=True, commanded_on=False
         )
-        assert_eq((cut_on, cut_offered), (False, False), "window cut clears offered")
-        later_on, later_seen, later_offered = step(
-            cut_on, cut_seen, cut_offered, plugged=True, finished=True, commanded_on=False
+        assert_eq(
+            (cut_on, cut_offered, cut_interrupted),
+            (False, False, True),
+            "window cut clears offered",
         )
-        assert_eq((later_on, later_offered), (False, False), "Complete after a cut stays off")
-        on, seen, offered = step(True, True, True, plugged=False)
-        assert_eq((on, seen, offered), (False, False, False), "unplug clears keep")
+        later_on, later_seen, later_offered, later_interrupted = step(
+            cut_on,
+            cut_seen,
+            cut_offered,
+            cut_interrupted,
+            plugged=True,
+            finished=True,
+            commanded_on=False,
+        )
+        assert_eq(
+            (later_on, later_offered, later_interrupted),
+            (False, False, True),
+            "Complete after a cut stays off",
+        )
+        on, seen, offered, interrupted = step(True, True, True, plugged=False)
+        assert_eq(
+            (on, seen, offered, interrupted),
+            (False, False, False, False),
+            "unplug clears keep",
+        )
 
     def test_min_equals_max_stays_fixed_over_time():
         day = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc)

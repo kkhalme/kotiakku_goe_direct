@@ -520,6 +520,7 @@ def keep_min_until_unplug_step(
     override,
     seen,
     offered,
+    interrupted=False,
     *,
     plugged,
     finished=False,
@@ -530,40 +531,49 @@ def keep_min_until_unplug_step(
 ):
     """Advance the after-charge-complete keep switch.
 
-    Returns ``(override, seen, offered)``. ``override`` is the keep
-    switch: on until unplug (same lifetime as Force On Until Unplug).
-    Auto-on when the pack can be assumed finished: Complete after HA
-    commanded this charger on while the car was plugged and not yet
-    finished (WaitCar or Charging), including leftover surplus. A cheap
-    window or leftover surplus interrupt while still not Complete clears
-    ``offered``. Force off never allows a charge, so it does not auto-on.
+    Returns ``(override, seen, offered, interrupted)``. ``override`` is
+    the keep switch: on until unplug (same lifetime as Force On Until
+    Unplug). Auto-on when the pack can be assumed finished: go-e Complete
+    while plugged. That includes leftover surplus WaitCar/Charging that
+    reaches Complete, a car that is already Complete when it plugs in,
+    and leftover surplus that starts on an already-finished car (leftover
+    skips Complete; keep holds the cable for precondition). A cheap
+    window or leftover surplus interrupt while still not Complete sets
+    ``interrupted`` so Complete later does not auto-on. Force off never
+    allows a charge, so it does not auto-on (pass ``enable`` False).
     ``enable`` False skips auto-on; the keep switch can still be turned
-    on by hand. Manual off clears ``offered`` so Complete does not
+    on by hand. Manual off sets ``interrupted`` so Complete does not
     immediately re-arm. Unplug after the switch was on while plugged
-    turns it off.
+    turns it off and clears ``offered`` / ``interrupted``.
 
-    ``track_command=False`` only applies unplug / auto-on from an
-    existing ``offered`` (used before leftover allocation so a newly
-    finished car is already keep and does not take leftover).
+    ``track_command=False`` only applies unplug / auto-on (used before
+    leftover allocation so a finished car is already keep and does not
+    take leftover).
     """
     override = bool(override)
     seen = bool(seen)
     offered = bool(offered)
+    interrupted = bool(interrupted)
     if was_on is None:
         was_on = override
     if was_on and not override:
         offered = False
+        interrupted = True
     if track_command:
         if commanded_on and plugged and not finished:
             offered = True
+            interrupted = False
         elif not commanded_on and not finished and not override:
+            if offered:
+                interrupted = True
             offered = False
-    if enable and not override and finished and offered and plugged:
+    if enable and not override and finished and plugged and not interrupted:
         override = True
     override, seen = until_unplug_step(override, plugged, seen)
     if not plugged:
         offered = False
-    return override, seen, offered
+        interrupted = False
+    return override, seen, offered, interrupted
 
 
 def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
