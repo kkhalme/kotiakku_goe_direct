@@ -119,6 +119,7 @@ from .surplus import (
     DEFAULT_LAT,
     DEFAULT_LON,
     OFFER_WAIT_S,
+    TAKE_MIN_W,
     budget,
     car_finished,
     car_plugged,
@@ -132,7 +133,6 @@ from .surplus import (
     last_usable_solar_end_ts as forecast_last_usable_end,
     leftover_w,
     leftover_for_surplus,
-    keep_take_w,
     group_lot_for_allocations,
     group_lot_for_amps,
     group_surplus_setpoint,
@@ -1242,7 +1242,7 @@ class KotiakkuGoeDirectController:
         offer_pending = {
             serial
             for serial in surplus
-            if take_w.get(serial, 0) < 100 and serial not in self._offer_expired
+            if take_w.get(serial, 0) < TAKE_MIN_W and serial not in self._offer_expired
         }
         allocations = surplus_allocation_plan(
             surplus,
@@ -1266,7 +1266,7 @@ class KotiakkuGoeDirectController:
         self._arm_split(allocations["arm_split_hold"])
         allocated = allocations["allocations"]
         for serial in surplus:
-            taking_now = take_w.get(serial, 0) >= 100
+            taking_now = take_w.get(serial, 0) >= TAKE_MIN_W
             self._arm_offer_wait(
                 serial,
                 serial in allocated and not taking_now,
@@ -1333,12 +1333,14 @@ class KotiakkuGoeDirectController:
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
         snap = self._snapshot()
-        keep_take = 0
-        for serial in self.chargers:
-            if roles[serial] != ROLE_KEEP:
-                continue
-            keep_take += keep_take_w(self.charger_power_w(serial))
-        snap["available_w"] = leftover_for_surplus(snap["available_w"], keep_take)
+        snap["available_w"] = leftover_for_surplus(
+            snap["available_w"],
+            *(
+                self.charger_power_w(serial)
+                for serial in self.chargers
+                if roles[serial] == ROLE_KEEP
+            ),
+        )
         dec = surplus_decision(
             self.session,
             snap["available_w"],

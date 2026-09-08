@@ -519,11 +519,12 @@ def until_unplug_step(override, plugged, seen):
 KEEP_IDLE = "idle"
 KEEP_ALLOWED = "allowed"
 KEEP_CUT = "cut"
+KEEP_PHASES = (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT)
 
 
 def restore_keep_phase(phase=None, *, offered=False, interrupted=False):
     """Keep session phase from store. Maps the older offered/interrupted pair."""
-    if phase in (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT):
+    if phase in KEEP_PHASES:
         return phase
     if interrupted:
         return KEEP_CUT
@@ -558,8 +559,7 @@ def keep_until_unplug_step(
     """
     override = bool(override)
     seen = bool(seen)
-    if phase not in (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT):
-        phase = KEEP_IDLE
+    phase = restore_keep_phase(phase)
     if was_on is None:
         was_on = override
     if was_on and not override:
@@ -653,7 +653,6 @@ def charger_mqtt_role(
         now_ts,
         enough_solar=enough_solar,
         until_unplug=until_unplug,
-        keep_min=keep_min,
     ):
         return ROLE_SURPLUS
     return ROLE_OFF
@@ -678,13 +677,13 @@ def charger_mqtt_command(
     Charge windows and leftover share this so a cheap hour ending does
     not ``frc=1`` a charger leftover is about to write. Full-power is
     always 22 kW. Keep is keep phase/amp until unplug after Complete,
-    or when that switch is turned on by hand. Leftover on only when surplus is
-    writing this serial. Otherwise off if Force off, a 22 kW session
-    just ended, leftover is stopping, or leftover is on but this serial
-    is not allocated. Idle SolarPriority that leftover has never started
-    is a no-op (do not spam ``frc=1``) unless live ``frc`` is known and
-    not force-off: Neutral after unplug would start charging in
-    Basic/default.
+    or when that switch is turned on by hand. Leftover on only when
+    surplus is writing this serial. Otherwise off if Force off, a 22 kW
+    session just ended, leftover is stopping, or leftover is on but this
+    serial is not allocated. Idle SolarPriority that leftover has never
+    started is a no-op (do not spam ``frc=1``) unless live ``frc`` is
+    known and not force-off: Neutral after unplug would start charging
+    in Basic/default.
     """
     if role == ROLE_FULL:
         return ("on", 2, int(group_lot), int(max_amp))

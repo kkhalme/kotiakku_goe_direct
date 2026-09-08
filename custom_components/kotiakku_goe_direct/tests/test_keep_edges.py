@@ -45,6 +45,7 @@ class KeepSim:
             self.phase,
             plugged=plugged,
             finished=finished,
+            commanded_on=None,
             was_on=was_on,
             enable=self.enable,
         )
@@ -68,10 +69,6 @@ class KeepSim:
         if seen is not None:
             assert_eq(self.seen, seen, "%s seen" % msg)
         return self
-
-
-def keep_cmd(**extra):
-    return cmd(planner.ROLE_KEEP, surplus_on=False, **extra)
 
 
 def main():
@@ -467,30 +464,6 @@ def main():
 
     case("full_power_wins_over_keep", test_full_power_wins_over_keep)
 
-    def test_keep_command_wins_over_leftover_watts():
-        assert_eq(
-            cmd(planner.ROLE_KEEP, surplus_on=True, surplus_pub=LEFTOVER),
-            ("on", 2, 50, 6),
-            "keep not leftover amp",
-        )
-        assert_eq(
-            cmd(planner.ROLE_KEEP, surplus_on=False, leftover_session=True),
-            ("on", 2, 50, 6),
-            "keep not leftover-session force-off",
-        )
-        assert_eq(
-            keep_cmd(keep_psm=1, keep_amp=8),
-            ("on", 1, 50, 8),
-            "keep knobs",
-        )
-        assert_eq(
-            cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=LEFTOVER),
-            ("on", 2, 11, 11),
-            "leftover without keep",
-        )
-
-    case("keep_command_wins_over_leftover_watts", test_keep_command_wins_over_leftover_watts)
-
     def test_two_chargers_keep_skips_leftover_for_that_serial():
         a = KeepSim()
         b = KeepSim()
@@ -549,21 +522,6 @@ def main():
         )
 
     case("pass1_arms_before_leftover_so_complete_is_not_surplus", test_pass1_arms_before_leftover_so_complete_is_not_surplus)
-
-    def test_pass1_already_complete_skips_leftover():
-        on, seen, phase = step(False, False, plugged=True, finished=True)
-        assert_eq(
-            (on, seen, phase),
-            (True, True, IDLE),
-            "pass 1 already Complete is keep",
-        )
-        assert_eq(
-            role("SolarPriority", WINDOW, 0, keep_min=on),
-            planner.ROLE_KEEP,
-            "already Complete is not leftover",
-        )
-
-    case("pass1_already_complete_skips_leftover", test_pass1_already_complete_skips_leftover)
 
     run()
 

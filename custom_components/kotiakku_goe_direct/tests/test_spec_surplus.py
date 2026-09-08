@@ -107,11 +107,20 @@ def main():
         assert_eq(surplus.watts(-3.2, True), 3200, "kW magnitude")
         assert_eq(surplus.watts(-1500, False), 1500, "inverted CT watts")
         assert_eq(surplus.watts("unknown", False, 0), 0, "unusable → default")
+
+    def test_keep_take_uses_leftover_pool():
+        leftover_w = surplus.leftover_w
         pool = leftover_w(5000, 6000, 3000)
         assert_eq(pool, 2000, "house includes 3 kW keep: leftover still 2 kW")
         assert_eq(surplus.keep_take_w(3000), 3000, "keep precondition take")
         assert_eq(surplus.keep_take_w(80), 0, "keep idle / Complete trickle")
         assert_eq(surplus.keep_take_w(None), 0, "unknown nrg")
+        assert_eq(surplus.leftover_for_surplus(pool), pool, "no keep cars")
+        assert_eq(
+            surplus.leftover_for_surplus(pool, 80),
+            pool,
+            "idle keep trickle is not take",
+        )
         assert_eq(
             surplus.leftover_for_surplus(pool, 3000),
             -1000,
@@ -123,6 +132,11 @@ def main():
             "keep 3 kW during 8 kW leftover: 5 kW left for surplus cars",
         )
         assert_eq(surplus.leftover_for_surplus(2000, 0), 2000, "keep not taking")
+        assert_eq(
+            surplus.leftover_for_surplus(2000, 1500, 1500),
+            -1000,
+            "two keep cars both taking 1.5 kW",
+        )
         assert_eq(
             surplus.surplus_decision(False, -1000, 92, window_ok=True)["write_on"],
             False,
@@ -1073,6 +1087,7 @@ def main():
         )
 
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
+    case("keep_take_uses_leftover_pool", test_keep_take_uses_leftover_pool)
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
     case("three_kw_is_13a_one_phase_not_a_hold", test_three_kw_is_13a_one_phase_not_a_hold)
