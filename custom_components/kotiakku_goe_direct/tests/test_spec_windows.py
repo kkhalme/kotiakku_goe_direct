@@ -414,6 +414,18 @@ def main():
         )
         assert_eq((on, seen, offered), (False, False, False), "window cut while Charging does not arm keep")
         on, seen, offered = step(
+            False, False, False, plugged=True, charging=False, commanded_on=True
+        )
+        assert_eq(offered, True, "leftover WaitCar while commanded on is offered")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq((on, seen, offered), (True, True, True), "Complete after leftover WaitCar arms keep")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
+        )
+        assert_eq(on, False, "enable off skips auto-on")
+        on, seen, offered = step(
             False, False, True, plugged=True, finished=True, commanded_on=True
         )
         assert_eq((on, seen, offered), (True, True, True), "Complete during the window arms keep")

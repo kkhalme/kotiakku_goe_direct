@@ -86,6 +86,7 @@ from .const import (
     SURPLUS_EIDS,
     WINDOW_EIDS,
     default_charger_priority,
+    after_charge_complete_keep_enable_entity_id,
     after_charge_complete_keep_entity_id,
     priority_entity_id,
     until_unplug_entity_id,
@@ -285,8 +286,18 @@ class KotiakkuGoeDirectController:
     def keep_min_entity(self, serial):
         return after_charge_complete_keep_entity_id(serial)
 
+    def keep_min_enable_entity(self, serial):
+        return after_charge_complete_keep_enable_entity_id(serial)
+
     def keep_min(self, serial):
         return str(self._state(self.keep_min_entity(serial)) or "").lower() == "on"
+
+    def keep_min_enable(self, serial):
+        """True unless the per-charger enable switch is explicitly off."""
+        state = self._state(self.keep_min_enable_entity(serial))
+        if state is None:
+            return True
+        return str(state).lower() != "off"
 
     def car_entity(self, serial):
         return self._car_entities.get(serial) or f"sensor.go_echarger_{serial}_car_state"
@@ -639,6 +650,7 @@ class KotiakkuGoeDirectController:
         track.extend(SURPLUS_EIDS)
         track.extend(self.policy_entity(s) for s in self.chargers)
         track.extend(self.until_unplug_entity(s) for s in self.chargers)
+        track.extend(self.keep_min_enable_entity(s) for s in self.chargers)
         track.extend(self.keep_min_entity(s) for s in self.chargers)
         track.append(EID_KEEP_PHASE)
         track.extend(self.car_entity(s) for s in self.chargers)
@@ -743,6 +755,11 @@ class KotiakkuGoeDirectController:
             await self._on_policy(serial, event)
             return
         if entity and entity.startswith("switch.kotiakku_goe_direct_until_unplug_"):
+            self._schedule_apply()
+            return
+        if entity and entity.startswith(
+            "switch.kotiakku_goe_direct_after_charge_complete_keep_enable_"
+        ):
             self._schedule_apply()
             return
         if entity and entity.startswith(
@@ -1136,6 +1153,7 @@ class KotiakkuGoeDirectController:
                 commanded_on=bool(commanded.get(serial)),
                 was_on=was_on,
                 track_command=track_command,
+                enable=self.keep_min_enable(serial),
             )
             if (
                 was_on != new_on

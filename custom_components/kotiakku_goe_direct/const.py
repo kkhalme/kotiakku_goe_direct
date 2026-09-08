@@ -408,6 +408,10 @@ def after_charge_complete_keep_entity_id(serial) -> str:
     return f"switch.kotiakku_goe_direct_after_charge_complete_keep_{serial}"
 
 
+def after_charge_complete_keep_enable_entity_id(serial) -> str:
+    return f"switch.kotiakku_goe_direct_after_charge_complete_keep_enable_{serial}"
+
+
 _REMOVED_WINDOW_RANKS = ("cheapest", "longest", "earliest")
 _OFFSUN_WINDOW_UIDS = (
     "kotiakku_goe_direct_offsun_window",

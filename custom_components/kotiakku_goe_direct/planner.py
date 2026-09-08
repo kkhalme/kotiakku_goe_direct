@@ -527,14 +527,18 @@ def keep_min_until_unplug_step(
     commanded_on=False,
     was_on=None,
     track_command=True,
+    enable=True,
 ):
     """Advance the after-charge-complete keep switch.
 
     Returns ``(override, seen, offered)``. ``override`` is the visible
     switch: manual on stays until unplug (same lifetime as Force On
     Until Unplug). Auto-on when Complete after HA commanded this charger
-    on while Charging. A cheap-window or leftover cut while still
-    Charging clears ``offered``. Manual off clears ``offered`` so
+    on while the car was plugged and not yet finished (Charging or
+    WaitCar — cheap window, Force on, leftover, or 22 kW until-unplug).
+    A cheap-window or leftover cut while still not Complete clears
+    ``offered``. ``enable`` False skips auto-on; the keep switch can
+    still be turned on by hand. Manual off clears ``offered`` so
     Complete does not immediately re-arm. Unplug after the switch was
     on while plugged turns it off. Car SoC is not available, so this is
     not a hard full-battery guarantee.
@@ -542,6 +546,8 @@ def keep_min_until_unplug_step(
     ``track_command=False`` only applies unplug / auto-on from an
     existing ``offered`` (used before leftover allocation so a newly
     finished car is already KEEP and does not take leftover).
+    ``charging`` is accepted for callers; offered follows plugged and
+    not finished while commanded on.
     """
     override = bool(override)
     seen = bool(seen)
@@ -551,11 +557,11 @@ def keep_min_until_unplug_step(
     if was_on and not override:
         offered = False
     if track_command:
-        if commanded_on and charging:
+        if commanded_on and plugged and not finished:
             offered = True
         elif not commanded_on and not finished and not override:
             offered = False
-    if not override and finished and offered and plugged:
+    if enable and not override and finished and offered and plugged:
         override = True
     override, seen = until_unplug_step(override, plugged, seen)
     if not plugged:

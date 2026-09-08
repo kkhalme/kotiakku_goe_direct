@@ -500,6 +500,21 @@ def main():
         )
         assert_eq(offered, True, "cheap window charging is offered")
         on, seen, offered = step(
+            False, False, False, plugged=True, charging=False, commanded_on=True
+        )
+        assert_eq(offered, True, "leftover WaitCar is offered")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=False
+        )
+        assert_eq(on, True, "Complete after leftover WaitCar arms keep")
+        on, seen, offered = step(
+            False, False, True, plugged=True, finished=True, commanded_on=True, enable=False
+        )
+        assert_eq(on, False, "enable off does not auto-on keep")
+        on, seen, offered = step(
+            False, False, False, plugged=True, charging=True, commanded_on=True
+        )
+        on, seen, offered = step(
             on, seen, offered, plugged=True, finished=True, commanded_on=True
         )
         assert_eq(on, True, "Complete during the window arms keep")

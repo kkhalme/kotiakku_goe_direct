@@ -514,6 +514,11 @@ def main():
             "after charge complete keep switch",
         )
         assert_eq(
+            const.after_charge_complete_keep_enable_entity_id("111111"),
+            "switch.kotiakku_goe_direct_after_charge_complete_keep_enable_111111",
+            "after charge complete keep enable switch",
+        )
+        assert_eq(
             const.EID_KEEP_AMP,
             "number.kotiakku_goe_direct_after_charge_complete_keep_a",
             "keep amp",
