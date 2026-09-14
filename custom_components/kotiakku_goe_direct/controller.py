@@ -110,6 +110,7 @@ from .planner import (
     restore_keep_phase,
     until_unplug_step,
     KEEP_IDLE,
+    KEEP_ALLOWED,
     KEEP_CUT,
     ROLE_FULL,
     ROLE_KEEP,
@@ -144,6 +145,8 @@ from .surplus import (
     surplus_allocation_plan,
     surplus_decision,
     surplus_higher_keep_on,
+    surplus_keep_stolen,
+    surplus_plan_if_still_charging,
     surplus_hour_ranges,
     surplus_phase_budget,
     surplus_want_w,
@@ -1331,10 +1334,11 @@ class KotiakkuGoeDirectController:
             until_on[serial] = new_on
         return changed, until_on
 
-    async def _sync_keep_min(self, commanded=None):
+    async def _sync_keep_min(self, commanded=None, stolen=None):
         """Arm after-charge-complete keep until unplug for a finished pack."""
         changed = False
         keep_on = {}
+        stolen = stolen or {}
         for serial in self.chargers:
             car_state = self._state(self.car_entity(serial))
             override = self.keep_min(serial)
@@ -1346,6 +1350,7 @@ class KotiakkuGoeDirectController:
                 self.keep_min_enable(serial)
                 and self.policy(serial) != POLICY_FORCE_OFF
             )
+            serial_stolen = bool(stolen.get(serial))
             new_on, new_seen, new_phase = keep_until_unplug_step(
                 override,
                 self._keep_min_seen.get(serial),
@@ -1357,6 +1362,7 @@ class KotiakkuGoeDirectController:
                 ),
                 was_on=was_on,
                 enable=enable,
+                stolen=serial_stolen,
             )
             if (
                 was_on != new_on
@@ -1382,9 +1388,15 @@ class KotiakkuGoeDirectController:
                 )
             if old_phase != new_phase:
                 if new_phase == KEEP_CUT:
+                    why = (
+                        "leftover moved to another charger"
+                        if serial_stolen
+                        else "HA stopped charge before Complete"
+                    )
                     _LOGGER.info(
-                        "kotiakku_goe_direct: %s keep cut (HA stopped charge before Complete, car=%s)",
+                        "kotiakku_goe_direct: %s keep cut (%s, car=%s)",
                         serial,
+                        why,
                         car_state,
                     )
                 else:
@@ -1419,6 +1431,116 @@ class KotiakkuGoeDirectController:
             self._last_policy[serial] = self.policy(serial)
         return roles
 
+    def _surplus_alloc_context(self, surplus, leftover_w):
+        """Priority, car state, take, and offer-wait flags for leftover MQTT."""
+        charger_max_w = self.max_amp * self.volts * 3
+        leftover_w = int(leftover_w)
+        lops = {serial: self.charger_priority(serial) for serial in surplus}
+        plugged = {}
+        states = {}
+        take_w = {}
+        for serial in surplus:
+            state = self._state(self.car_entity(serial))
+            states[serial] = state
+            plugged[serial] = car_plugged(state)
+            take_w[serial] = surplus_want_w(
+                leftover_w,
+                charger_take_w(
+                    state,
+                    self.charger_power_w(serial),
+                    leftover_w,
+                    charger_max_w,
+                ),
+                last_amp=self._surplus_amp.get(serial),
+                last_psm=self._surplus_psm.get(serial),
+                volts=self.volts,
+                min_amp=self.min_amp,
+                max_amp=self.max_amp,
+                group_lot=self.group_lot,
+                phase3_min_w=self.phase3_min_w,
+            )
+        offer_pending = {
+            serial
+            for serial in surplus
+            if take_w.get(serial, 0) < TAKE_MIN_W and serial not in self._offer_expired
+        }
+        return {
+            "lops": lops,
+            "plugged": plugged,
+            "states": states,
+            "take_w": take_w,
+            "offer_pending": offer_pending,
+            "charger_max_w": charger_max_w,
+        }
+
+    def _keep_stolen_by_surplus(self, until_on, *, floor_expired=False, split_expired=False):
+        """Serials whose leftover would go to another taking car if still charging."""
+        stolen = {serial: False for serial in self.chargers}
+        now_ts = self._now_ts()
+        keep_on = {
+            serial: bool(self._keep_min.get(serial) or self.keep_min(serial))
+            for serial in self.chargers
+        }
+        roles = self._charger_roles(now_ts, until_on, keep_on)
+        snap = self._snapshot()
+        keep_serials = [serial for serial in self.chargers if roles[serial] == ROLE_KEEP]
+        leftover = leftover_for_surplus(
+            snap["available_w"],
+            *[self.charger_power_w(serial) for serial in keep_serials],
+        )
+        surplus = [serial for serial in self.chargers if roles[serial] == ROLE_SURPLUS]
+        if not surplus:
+            return stolen
+        dec = surplus_decision(
+            self.session,
+            leftover,
+            snap["soc"],
+            window_ok=snap["window_ok"],
+            soc_on=self.soc_on,
+            soc_hyst=self.soc_hyst,
+            start_min_w=self.start_min_w,
+            hold_min_w=self.hold_min_w,
+            floor_expired=floor_expired,
+            hold_active=self._floor_unsub is not None,
+            hold_exit_w=self.start_min_w,
+        )
+        if not dec["write_on"]:
+            return stolen
+        ctx = self._surplus_alloc_context(surplus, leftover)
+        alloc_w = leftover
+        if dec["use_floor_budget"]:
+            alloc_w = max(int(alloc_w), self.min_amp * self.volts)
+        resume = [
+            serial
+            for serial in surplus
+            if self._keep_min_phase.get(serial) == KEEP_ALLOWED
+        ]
+        plan = surplus_plan_if_still_charging(
+            surplus,
+            resume,
+            lops=ctx["lops"],
+            plugged=ctx["plugged"],
+            leftover_w=max(int(alloc_w), 0),
+            split_min_w=self.split_min_w,
+            charger_max_w=ctx["charger_max_w"],
+            take_w=ctx["take_w"],
+            states=ctx["states"],
+            min_amp=self.min_amp,
+            volts=self.volts,
+            phase3_min_w=self.phase3_min_w,
+            split_floor_w=self.split_floor_w,
+            split_hold=self.split_session,
+            split_expired=split_expired,
+            offer_pending=ctx["offer_pending"],
+        )
+        for serial in self.chargers:
+            stolen[serial] = surplus_keep_stolen(
+                serial,
+                plan,
+                allowed=self._keep_min_phase.get(serial) == KEEP_ALLOWED,
+            )
+        return stolen
+
     def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full):
         """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
@@ -1437,39 +1559,16 @@ class KotiakkuGoeDirectController:
             n_full=n_full,
             group_lot=self.group_lot,
         )
-        lops = {serial: self.charger_priority(serial) for serial in surplus}
-        plugged = {}
-        states = {}
-        take_w = {}
-        charger_max_w = self.max_amp * self.volts * 3
-        for serial in surplus:
-            state = self._state(self.car_entity(serial))
-            states[serial] = state
-            plugged[serial] = car_plugged(state)
-            take_w[serial] = surplus_want_w(
-                snap["available_w"],
-                charger_take_w(
-                    state,
-                    self.charger_power_w(serial),
-                    snap["available_w"],
-                    charger_max_w,
-                ),
-                last_amp=self._surplus_amp.get(serial),
-                last_psm=self._surplus_psm.get(serial),
-                volts=self.volts,
-                min_amp=self.min_amp,
-                max_amp=self.max_amp,
-                group_lot=self.group_lot,
-                phase3_min_w=self.phase3_min_w,
-            )
+        ctx = self._surplus_alloc_context(surplus, snap["available_w"])
+        lops = ctx["lops"]
+        plugged = ctx["plugged"]
+        states = ctx["states"]
+        take_w = ctx["take_w"]
+        charger_max_w = ctx["charger_max_w"]
+        offer_pending = ctx["offer_pending"]
         alloc_w = snap["available_w"]
         if dec["use_floor_budget"]:
             alloc_w = max(alloc_w, self.min_amp * self.volts)
-        offer_pending = {
-            serial
-            for serial in surplus
-            if take_w.get(serial, 0) < TAKE_MIN_W and serial not in self._offer_expired
-        }
         allocations = surplus_allocation_plan(
             surplus,
             lops=lops,
@@ -1580,7 +1679,10 @@ class KotiakkuGoeDirectController:
     async def _apply_chargers(self, floor_expired=False, split_expired=False, force=False):
         self._log_gate_changes()
         changed, until_on = await self._sync_until_unplug()
-        keep_changed, keep_on = await self._sync_keep_min()
+        stolen = self._keep_stolen_by_surplus(
+            until_on, floor_expired=floor_expired, split_expired=split_expired
+        )
+        keep_changed, keep_on = await self._sync_keep_min(stolen=stolen)
         changed = changed or keep_changed
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
@@ -1708,7 +1810,7 @@ class KotiakkuGoeDirectController:
             serial: roles[serial] == ROLE_FULL or serial in pubs
             for serial in self.chargers
         }
-        keep_changed, keep_on = await self._sync_keep_min(commanded)
+        keep_changed, keep_on = await self._sync_keep_min(commanded, stolen=stolen)
         changed = changed or keep_changed
         roles = self._charger_roles(now_ts, until_on, keep_on)
         for serial, role in roles.items():

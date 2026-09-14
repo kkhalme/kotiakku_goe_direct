@@ -143,6 +143,78 @@ def main():
             "deficit after keep does not start leftover on other cars",
         )
 
+    def test_keep_stolen_when_higher_priority_takes_1phase():
+        """Low-surplus B charging, A plugs in and takes: Complete on B is steal."""
+        stolen = surplus.surplus_keep_stolen
+        both = leftover_kw_args(
+            lops={A: 1, B: 2},
+            plugged={A: True, B: True},
+        )
+        one_phase = MIN_A * VOLTS
+        assert_true(one_phase < P3, "fixture leftover is 1-phase only")
+        steal = surplus.surplus_plan_if_still_charging(
+            [A, B],
+            [B],
+            leftover_w=one_phase,
+            take_w={A: one_phase, B: 0},
+            states={A: "Charging", B: "Complete"},
+            **both,
+        )
+        assert_eq(steal["allocations"].get(A), one_phase, "A keeps the 1-phase leftover")
+        assert_true(B not in steal["allocations"], "B would be dropped if still charging")
+        assert_eq(steal["taking"], [A], "A is the taking car")
+        assert_eq(
+            stolen(B, steal, allowed=True),
+            True,
+            "Complete on B while A takes 1-phase leftover is stolen",
+        )
+        assert_eq(
+            stolen(A, steal, allowed=True),
+            False,
+            "A still has leftover",
+        )
+        waiting = surplus.surplus_plan_if_still_charging(
+            [A, B],
+            [B],
+            leftover_w=one_phase,
+            take_w={A: 0, B: 0},
+            states={A: "WaitCar", B: "Complete"},
+            **both,
+        )
+        assert_true(B in waiting["allocations"], "A not taking: B would still get leftover")
+        assert_eq(
+            stolen(B, waiting, allowed=True),
+            False,
+            "Complete while the other car is not taking is a finished pack",
+        )
+        share = surplus.surplus_plan_if_still_charging(
+            [A, B],
+            [B],
+            leftover_w=12000,
+            take_w={A: 3000, B: 0},
+            states={A: "Charging", B: "Complete"},
+            **both,
+        )
+        assert_true(B in share["allocations"], "12 kW leftover still has a share for B")
+        assert_eq(
+            stolen(B, share, allowed=True),
+            False,
+            "enough leftover for both: Complete is a finished pack",
+        )
+        assert_eq(
+            stolen(B, steal, allowed=False),
+            False,
+            "idle/cut phase is not stolen",
+        )
+        states, take_w = surplus.surplus_treat_as_charging(
+            {A: "Charging", B: "Complete"},
+            {A: one_phase, B: 0},
+            [B],
+            one_phase,
+        )
+        assert_eq(states[B], "Charging", "resume Complete as Charging")
+        assert_eq(take_w[B], one_phase, "resume wants leftover")
+
     def test_ev_prefers_nrg_over_lagged_controller():
         ev = surplus.effective_ev_w
         assert_eq(ev(12000, 3000), 3000, "lagged 12 kW Controller vs 3 kW nrg → 3 kW")
@@ -1088,6 +1160,10 @@ def main():
 
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
     case("keep_take_uses_leftover_pool", test_keep_take_uses_leftover_pool)
+    case(
+        "keep_stolen_when_higher_priority_takes_1phase",
+        test_keep_stolen_when_higher_priority_takes_1phase,
+    )
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
     case("three_kw_is_13a_one_phase_not_a_hold", test_three_kw_is_13a_one_phase_not_a_hold)

@@ -2,8 +2,8 @@
 
 Mirrors the controller two-pass apply: pass 1 arms keep at Complete
 before leftover allocation (commanded_on omitted), pass 2 tracks whether
-HA is still commanding this charger. A cut while WaitCar/Charging blocks
-later auto-on.
+HA is still commanding this charger. A cut while WaitCar/Charging, or
+leftover stolen by another taking charger, blocks later auto-on.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class KeepSim:
         self.phase = IDLE
         self.enable = enable
 
-    def apply(self, car, *, commanded_on, enable=None, switch=None):
+    def apply(self, car, *, commanded_on, enable=None, switch=None, stolen=False):
         if enable is not None:
             self.enable = enable
         override = self.on if switch is None else bool(switch)
@@ -48,6 +48,7 @@ class KeepSim:
             commanded_on=None,
             was_on=was_on,
             enable=self.enable,
+            stolen=stolen,
         )
         was_on = override
         override, self.seen, self.phase = step(
@@ -59,6 +60,7 @@ class KeepSim:
             commanded_on=commanded_on,
             was_on=was_on,
             enable=self.enable,
+            stolen=stolen,
         )
         self.on = override
         return self
@@ -249,6 +251,40 @@ def main():
         )
 
     case("leftover_stops_same_tick_as_complete", test_leftover_stops_same_tick_as_complete)
+
+    def test_leftover_stolen_same_tick_as_complete_is_interrupt():
+        sim = KeepSim()
+        sim.apply("Charging", commanded_on=True).expect(
+            False, ALLOWED, msg="low-priority leftover Charging"
+        )
+        sim.apply("Complete", commanded_on=False, stolen=True).expect(
+            False,
+            CUT,
+            msg="Complete as leftover moves to a higher-priority taking car",
+        )
+        sim.apply("Complete", commanded_on=False, stolen=True).expect(
+            False, CUT, msg="stolen Complete stays cut"
+        )
+
+    case(
+        "leftover_stolen_same_tick_as_complete_is_interrupt",
+        test_leftover_stolen_same_tick_as_complete_is_interrupt,
+    )
+
+    def test_leftover_stolen_while_charging_then_complete():
+        sim = KeepSim()
+        sim.apply("Charging", commanded_on=True)
+        sim.apply("Charging", commanded_on=False, stolen=True).expect(
+            False, CUT, msg="higher-priority car took leftover"
+        )
+        sim.apply("Complete", commanded_on=False).expect(
+            False, CUT, msg="later Complete after steal is not a finished pack"
+        )
+
+    case(
+        "leftover_stolen_while_charging_then_complete",
+        test_leftover_stolen_while_charging_then_complete,
+    )
 
     def test_error_while_leftover_then_complete():
         sim = KeepSim()

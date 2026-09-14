@@ -1102,6 +1102,62 @@ def surplus_allocation_plan(
     )
 
 
+def surplus_treat_as_charging(states, take_w, serials, leftover_w):
+    """Copy of allocation inputs as if ``serials`` were still charging.
+
+    Used to tell a finished pack from leftover that moved to another car.
+    go-e can report Complete when group current is starved. Treat those
+    serials as still wanting leftover so steal/drop is visible.
+    """
+    states = dict(states or {})
+    take_w = dict(take_w or {})
+    leftover_w = max(int(leftover_w), 0)
+    for serial in serials or ():
+        if not serial:
+            continue
+        states[serial] = "Charging"
+        try:
+            current = int(take_w.get(serial) or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current < TAKE_MIN_W:
+            take_w[serial] = leftover_w
+    return states, take_w
+
+
+def surplus_plan_if_still_charging(serials, resume_serials, **plan_kw):
+    """``surplus_allocation_plan`` with ``resume_serials`` still charging."""
+    leftover_w = plan_kw.get("leftover_w", 0)
+    states, take_w = surplus_treat_as_charging(
+        plan_kw.get("states"),
+        plan_kw.get("take_w"),
+        resume_serials,
+        leftover_w,
+    )
+    plan_kw = dict(plan_kw)
+    plan_kw["states"] = states
+    plan_kw["take_w"] = take_w
+    return surplus_allocation_plan(serials, **plan_kw)
+
+
+def surplus_keep_stolen(serial, plan, *, allowed):
+    """True when leftover would stay on another taking car: cut keep.
+
+    Complete while leftover is stolen is not a finished pack. Another
+    charger must actually be taking (≥100 W) and this serial must not
+    still have a leftover share if it were charging.
+    """
+    if not allowed:
+        return False
+    if not serial or not isinstance(plan, dict):
+        return False
+    allocations = plan.get("allocations") or {}
+    if serial in allocations:
+        return False
+    taking = plan.get("taking") or []
+    return any(other and other != serial for other in taking)
+
+
 def surplus_higher_keep_on(serial, allocations, lops, states=None):
     """True when a worse-priority charger has leftover: do not ``frc=1`` this one.
 

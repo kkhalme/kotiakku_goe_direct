@@ -543,6 +543,7 @@ def keep_until_unplug_step(
     commanded_on=None,
     was_on=None,
     enable=True,
+    stolen=False,
 ):
     """Keep switch until unplug. Auto-on at Complete unless a charge was cut.
 
@@ -556,6 +557,9 @@ def keep_until_unplug_step(
 
     ``commanded_on`` None skips command tracking (before leftover so a
     finished car is already keep and does not take leftover watts).
+    ``stolen`` means leftover would go to another taking charger if this
+    one were still charging: go-e Complete is then an interrupt (current
+    starved or leftover moved), not a finished pack.
     """
     override = bool(override)
     seen = bool(seen)
@@ -563,6 +567,8 @@ def keep_until_unplug_step(
     if was_on is None:
         was_on = override
     if was_on and not override:
+        phase = KEEP_CUT
+    if stolen and not override and phase == KEEP_ALLOWED:
         phase = KEEP_CUT
     if commanded_on is not None:
         if commanded_on and plugged and not finished:
