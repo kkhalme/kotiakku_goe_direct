@@ -35,8 +35,9 @@ FINISHED_STATES = {
 # Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
-# Below this, leftover still offers (nrg often 0 at start). Surplus treats that
-# as "this charger is taking". Keep take below this is idle (finished pack).
+# Below this, leftover still offers (nrg often 0 at start). Surplus treats a
+# Charging car as taking leftover (steal / offer-wait). Keep pool subtract
+# counts every watt of keep ``nrg``; it does not use this floor.
 TAKE_MIN_W = 100
 
 
@@ -93,27 +94,29 @@ def leftover_w(solar_w, house_w, ev_w):
 
 
 def keep_take_w(power_w):
-    """Watts a keep charger is pulling from the house pool. 0 if idle."""
+    """Watts a keep charger is pulling from the house pool.
+
+    Unknown ``nrg`` is 0. Every known watt counts, including Complete
+    trickle and Sentry; ``TAKE_MIN_W`` is only leftover has-started.
+    """
     if power_w is None:
         return 0
     try:
         power_w = int(power_w)
     except (TypeError, ValueError):
         return 0
-    if power_w < TAKE_MIN_W:
-        return 0
-    return power_w
+    return max(power_w, 0)
 
 
 def leftover_for_surplus(leftover_w, *keep_power_w):
     """Leftover still free for surplus chargers after keep take.
 
-    Pass each keep charger's ``nrg``. Idle keep (< TAKE_MIN_W) does not
-    count. Keep MQTT stays at keep amp so leftover does not charge that
-    pack, but keep and leftover are the same house pool. A keep car
-    preconditioning at 3 kW during 2 kW leftover has already used that
-    leftover (and 1 kW from the grid). Surplus chargers only get the
-    remainder; a negative remainder is a deficit.
+    Pass each keep charger's ``nrg``. Keep MQTT stays at keep amp so
+    leftover does not charge that pack, but keep and leftover are the
+    same house pool. Subtract the full keep ``nrg`` (0 if unknown). A
+    keep car preconditioning at 3 kW during 2 kW leftover has already
+    used that leftover (and 1 kW from the grid). Surplus chargers only
+    get the remainder; a negative remainder is a deficit.
     """
     leftover_w = int(leftover_w)
     take = sum(keep_take_w(power_w) for power_w in keep_power_w)

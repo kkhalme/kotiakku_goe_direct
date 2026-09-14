@@ -113,13 +113,13 @@ def main():
         pool = leftover_w(5000, 6000, 3000)
         assert_eq(pool, 2000, "house includes 3 kW keep: leftover still 2 kW")
         assert_eq(surplus.keep_take_w(3000), 3000, "keep precondition take")
-        assert_eq(surplus.keep_take_w(80), 0, "keep idle / Complete trickle")
+        assert_eq(surplus.keep_take_w(80), 80, "keep Sentry / Complete trickle still counts")
         assert_eq(surplus.keep_take_w(None), 0, "unknown nrg")
         assert_eq(surplus.leftover_for_surplus(pool), pool, "no keep cars")
         assert_eq(
             surplus.leftover_for_surplus(pool, 80),
-            pool,
-            "idle keep trickle is not take",
+            1920,
+            "keep 80 W trickle is subtracted from leftover for other cars",
         )
         assert_eq(
             surplus.leftover_for_surplus(pool, 3000),
