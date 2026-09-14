@@ -271,6 +271,33 @@ def main():
         test_leftover_stolen_same_tick_as_complete_is_interrupt,
     )
 
+    def test_leftover_stolen_complete_while_still_commanded_on():
+        """Activity log 2026-09-14: A (left) plugged and took 1-phase leftover.
+
+        B (right) force_state stayed On. ~8 s later B allowed_to_charge
+        went off, then Complete (~1 s), then keep Force_3 (~1 s). HA never
+        sent frc=1; Complete while still commanded is not a finished pack
+        when leftover would have moved to A.
+        """
+        sim = KeepSim()
+        sim.apply("Charging", commanded_on=True).expect(
+            False, ALLOWED, msg="B leftover Charging, A still unplugged"
+        )
+        sim.apply("Charging", commanded_on=True, stolen=True).expect(
+            False, CUT, msg="A taking; B still frc=2 for a second or two"
+        )
+        sim.apply("Complete", commanded_on=True, stolen=True).expect(
+            False, CUT, msg="Complete while force still On is the steal, not keep"
+        )
+        sim.apply("Charging", commanded_on=False).expect(
+            False, CUT, msg="manual keep off is not required if steal cut"
+        )
+
+    case(
+        "leftover_stolen_complete_while_still_commanded_on",
+        test_leftover_stolen_complete_while_still_commanded_on,
+    )
+
     def test_leftover_stolen_while_charging_then_complete():
         sim = KeepSim()
         sim.apply("Charging", commanded_on=True)

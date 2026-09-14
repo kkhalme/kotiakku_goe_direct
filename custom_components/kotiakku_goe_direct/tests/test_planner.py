@@ -544,6 +544,14 @@ def main():
         )
         assert_eq((on, phase), (False, cut), "pass 1 stolen Complete does not auto-on")
         on, seen, phase = step(
+            False, False, allowed, plugged=True, commanded_on=True, stolen=True
+        )
+        assert_eq((on, phase), (False, cut), "stolen stays cut while still commanded")
+        on, seen, phase = step(
+            False, False, cut, plugged=True, finished=True, commanded_on=True, stolen=True
+        )
+        assert_eq((on, phase), (False, cut), "Complete 1-2s later still commanded is not keep")
+        on, seen, phase = step(
             False, False, plugged=True, finished=True, enable=False
         )
         assert_eq(on, False, "enable off / Force off does not auto-on")

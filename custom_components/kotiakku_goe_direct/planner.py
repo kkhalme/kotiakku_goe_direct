@@ -559,7 +559,9 @@ def keep_until_unplug_step(
     finished car is already keep and does not take leftover watts).
     ``stolen`` means leftover would go to another taking charger if this
     one were still charging: go-e Complete is then an interrupt (current
-    starved or leftover moved), not a finished pack.
+    starved or leftover moved), not a finished pack. That can be a
+    second or two after the other car starts taking, while this charger
+    is still ``frc=2``.
     """
     override = bool(override)
     seen = bool(seen)
@@ -571,7 +573,7 @@ def keep_until_unplug_step(
     if stolen and not override and phase == KEEP_ALLOWED:
         phase = KEEP_CUT
     if commanded_on is not None:
-        if commanded_on and plugged and not finished:
+        if commanded_on and plugged and not finished and not stolen:
             phase = KEEP_ALLOWED
         elif not commanded_on and not finished and not override and phase == KEEP_ALLOWED:
             phase = KEEP_CUT
