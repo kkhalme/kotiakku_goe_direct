@@ -517,48 +517,60 @@ def main():
         role = planner.charger_mqtt_role
         cmd = planner.charger_mqtt_command
         idle, allowed, cut = planner.KEEP_IDLE, planner.KEEP_ALLOWED, planner.KEEP_CUT
+        probe_s = planner.KEEP_PROBE_S
         result = {"raw_windows": [{"start": 1000, "end": 2000}]}
         leftover = {"psm": 2, "lot": 11, "amp": 11}
 
-        on, seen, phase = step(False, False, plugged=True, commanded_on=True)
-        assert_eq((on, phase), (False, allowed), "commanded WaitCar/Charging is allowed")
-        on, seen, phase = step(
-            False, False, allowed, plugged=True, finished=True, commanded_on=False
+        on, seen, phase, since = step(False, False, plugged=True, commanded_on=True)
+        assert_eq((on, phase, since), (False, allowed, None), "commanded WaitCar/Charging is allowed")
+        on, seen, phase, since = step(
+            False, False, allowed, plugged=True, finished=True, commanded_on=False,
+            idle=True, now_ts=0,
         )
-        assert_eq((on, seen, phase), (True, True, allowed), "Complete auto-on")
-        on, seen, phase = step(False, False, plugged=True, finished=True)
-        assert_eq((on, phase), (True, idle), "already Complete auto-on")
-        on, seen, phase = step(
+        assert_eq((on, seen, phase, since), (False, False, allowed, 0), "Complete starts 60 s probe")
+        on, seen, phase, since = step(
+            False, False, allowed, plugged=True, finished=True, commanded_on=False,
+            idle=True, probe_since=0, now_ts=probe_s,
+        )
+        assert_eq((on, seen, phase, since), (True, True, allowed, None), "Complete auto-on after 60 s")
+        on, seen, phase, since = step(
+            False, False, plugged=True, finished=True, idle=True, now_ts=0,
+        )
+        on, seen, phase, since = step(
+            on, seen, phase, plugged=True, finished=True, idle=True,
+            probe_since=since, now_ts=probe_s,
+        )
+        assert_eq((on, phase), (True, idle), "already Complete auto-on after 60 s")
+        on, seen, phase, since = step(
             False, False, allowed, plugged=True, commanded_on=False
         )
-        on, seen, phase = step(
-            on, seen, phase, plugged=True, finished=True, commanded_on=False
+        on, seen, phase, since = step(
+            on, seen, phase, plugged=True, finished=True, commanded_on=False,
+            idle=True, now_ts=0,
+        )
+        on, seen, phase, since = step(
+            on, seen, phase, plugged=True, finished=True, commanded_on=False,
+            idle=True, probe_since=since, now_ts=probe_s,
         )
         assert_eq((on, phase), (False, cut), "Complete after a cut stays off")
-        on, seen, phase = step(
-            False, False, allowed, plugged=True, finished=True, commanded_on=False, stolen=True
+        on, seen, phase, since = step(
+            False, False, allowed, plugged=True, finished=True, commanded_on=False,
+            idle=True, steal_victim=True, now_ts=0,
         )
-        assert_eq((on, phase), (False, cut), "Complete as leftover is stolen is a cut")
-        on, seen, phase = step(
-            False, False, allowed, plugged=True, finished=True, stolen=True
+        on, seen, phase, since = step(
+            on, seen, phase, plugged=True, finished=True, commanded_on=False,
+            idle=True, steal_victim=True, probe_since=since, now_ts=probe_s,
         )
-        assert_eq((on, phase), (False, cut), "pass 1 stolen Complete does not auto-on")
-        on, seen, phase = step(
-            False, False, allowed, plugged=True, commanded_on=True, stolen=True
-        )
-        assert_eq((on, phase), (False, cut), "stolen stays cut while still commanded")
-        on, seen, phase = step(
-            False, False, cut, plugged=True, finished=True, commanded_on=True, stolen=True
-        )
-        assert_eq((on, phase), (False, cut), "Complete 1-2s later still commanded is not keep")
-        on, seen, phase = step(
-            False, False, plugged=True, finished=True, enable=False
+        assert_eq((on, phase, since), (False, allowed, None), "steal victim never keep")
+        on, seen, phase, since = step(
+            False, False, plugged=True, finished=True, idle=True, enable=False, now_ts=probe_s,
         )
         assert_eq(on, False, "enable off / Force off does not auto-on")
-        on, seen, phase = step(True, True, allowed, plugged=False)
-        assert_eq((on, seen, phase), (False, False, idle), "unplug clears keep")
-        on, seen, phase = step(
-            False, True, allowed, plugged=True, finished=True, was_on=True
+        on, seen, phase, since = step(True, True, allowed, plugged=False)
+        assert_eq((on, seen, phase, since), (False, False, idle, None), "unplug clears keep")
+        on, seen, phase, since = step(
+            False, True, allowed, plugged=True, finished=True, was_on=True,
+            idle=True, now_ts=probe_s,
         )
         assert_eq((on, phase), (False, cut), "manual off does not re-arm")
         assert_eq(
@@ -1232,7 +1244,10 @@ def main():
         assert_eq(surplus.parse_lop("100"), None, "lop 100")
         assert_eq(surplus.car_finished("Complete"), True, "complete finished")
         assert_eq(surplus.car_charging("Charging"), True, "charging")
-        assert_eq(surplus.charger_take_w("Complete", 8000, 8000, 22080), 0, "finished takes 0")
+        assert_eq(surplus.idle_complete("Complete", 350), True, "Sentry Complete is idle")
+        assert_eq(surplus.charger_take_w("Complete", 8000, 8000, 22080), 8000, "live Complete take")
+        assert_eq(surplus.charger_take_w("Complete", 350, 8000, 22080), 0, "idle Complete take 0")
+        assert_eq(surplus.charger_take_w("Complete", None, 8000, 22080), 0, "unknown Complete take 0")
         assert_eq(surplus.charger_take_w("WaitCar", None, 8000, 22080), 0, "waitcar takes 0")
         assert_eq(surplus.charger_take_w("Charging", None, 8000, 22080), 8000, "unknown charging assumes full")
         assert_eq(surplus.charger_take_w("Charging", 5000, 18000, 22080), 5000, "partial take")

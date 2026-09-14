@@ -520,6 +520,8 @@ KEEP_IDLE = "idle"
 KEEP_ALLOWED = "allowed"
 KEEP_CUT = "cut"
 KEEP_PHASES = (KEEP_IDLE, KEEP_ALLOWED, KEEP_CUT)
+# Wall-clock idle Complete before auto-on keep. Not a tick count.
+KEEP_PROBE_S = 60
 
 
 def restore_keep_phase(phase=None, *, offered=False, interrupted=False):
@@ -543,25 +545,26 @@ def keep_until_unplug_step(
     commanded_on=None,
     was_on=None,
     enable=True,
-    stolen=False,
+    steal_victim=False,
+    idle=False,
+    probe_since=None,
+    now_ts=0.0,
+    probe_s=KEEP_PROBE_S,
 ):
-    """Keep switch until unplug. Auto-on at Complete unless a charge was cut.
+    """Keep switch until unplug after 60 s idle Complete.
 
-    Returns ``(override, seen, phase)``. Complete while plugged auto-ons
-    (already Complete included) unless ``phase`` is cut, ``enable`` is
-    off, or Force off (pass ``enable`` False). ``phase`` is idle, allowed
-    (HA commanding while WaitCar/Charging), or cut (HA stopped that
-    charge before Complete; Complete later does not auto-on). Manual off
-    cuts so Complete does not immediately re-arm. Unplug clears the
-    switch and phase.
+    Returns ``(override, seen, phase, probe_since)``. Auto-on is a
+    positive decision: plugged, enable on (Force off is ``enable``
+    False), not cut, idle Complete (``idle``: Complete and ``nrg``
+    below the Sentry band), 60 s wall-clock of that, and not a steal
+    victim. Steal victim means leftover is writing and another surplus
+    charger is taking (≥100 W) at a better HA leftover priority
+    (lower number). That blocks keep; it does not cut.
 
-    ``commanded_on`` None skips command tracking (before leftover so a
-    finished car is already keep and does not take leftover watts).
-    ``stolen`` means leftover would go to another taking charger if this
-    one were still charging: go-e Complete is then an interrupt (current
-    starved or leftover moved), not a finished pack. That can be a
-    second or two after the other car starts taking, while this charger
-    is still ``frc=2``.
+    ``KEEP_CUT`` is leftover/window stop while WaitCar/Charging, or
+    manual keep off while Complete (no re-arm). Unplug clears the
+    switch, phase, and probe. Enable off / Force off skip auto-on and
+    do not clear keep that is already on.
     """
     override = bool(override)
     seen = bool(seen)
@@ -570,19 +573,51 @@ def keep_until_unplug_step(
         was_on = override
     if was_on and not override:
         phase = KEEP_CUT
-    if stolen and not override and phase == KEEP_ALLOWED:
-        phase = KEEP_CUT
     if commanded_on is not None:
-        if commanded_on and plugged and not finished and not stolen:
+        if commanded_on and plugged and not finished:
             phase = KEEP_ALLOWED
-        elif not commanded_on and not finished and not override and phase == KEEP_ALLOWED:
+        elif (
+            not commanded_on
+            and not finished
+            and not override
+            and phase == KEEP_ALLOWED
+        ):
             phase = KEEP_CUT
-    if enable and not override and finished and plugged and phase != KEEP_CUT:
-        override = True
-    override, seen = until_unplug_step(override, plugged, seen)
     if not plugged:
-        phase = KEEP_IDLE
-    return override, seen, phase
+        override, seen = until_unplug_step(override, plugged, seen)
+        return override, seen, KEEP_IDLE, None
+    if override:
+        override, seen = until_unplug_step(override, plugged, seen)
+        if not plugged:
+            return override, seen, KEEP_IDLE, None
+        return override, seen, phase, None
+    can_arm = bool(enable) and phase != KEEP_CUT and idle and not steal_victim
+    if can_arm:
+        try:
+            now_ts = float(now_ts)
+        except (TypeError, ValueError):
+            now_ts = 0.0
+        try:
+            probe_s = float(probe_s)
+        except (TypeError, ValueError):
+            probe_s = KEEP_PROBE_S
+        if probe_since is None:
+            since = now_ts
+        else:
+            try:
+                since = float(probe_since)
+            except (TypeError, ValueError):
+                since = now_ts
+            if now_ts < since:
+                since = now_ts
+        if now_ts - since >= probe_s:
+            override = True
+            override, seen = until_unplug_step(override, plugged, seen)
+            return override, seen, phase, None
+        override, seen = until_unplug_step(override, plugged, seen)
+        return override, seen, phase, since
+    override, seen = until_unplug_step(override, plugged, seen)
+    return override, seen, phase, None
 
 
 def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):

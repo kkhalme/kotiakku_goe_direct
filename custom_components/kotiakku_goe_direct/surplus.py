@@ -40,6 +40,12 @@ OFFER_WAIT_S = 15
 # counts every watt of keep ``nrg``; it does not use this floor.
 TAKE_MIN_W = 100
 
+# Idle Complete / Sentry band. Below this, leftover does not offer a
+# Complete car and keep may start its 60 s probe. Live Complete at or
+# above this is leftover-eligible as taking. Do not use this as leftover
+# has-started (that stays TAKE_MIN_W) or as keep-pool subtract.
+KEEP_PROBE_TAKE_W = 400
+
 
 def watts(state, in_kw, default=0):
     try:
@@ -719,6 +725,23 @@ def car_finished(state):
     return _norm_car(state) in FINISHED_STATES
 
 
+def idle_complete(state, take_w=None):
+    """Complete drawing below the Sentry / keep-probe band.
+
+    Unknown or unusable ``nrg`` is 0 W. This is not leftover has-started
+    and not keep-pool subtract.
+    """
+    if not car_finished(state):
+        return False
+    if take_w is None:
+        return True
+    try:
+        take = int(take_w)
+    except (TypeError, ValueError):
+        return True
+    return take < KEEP_PROBE_TAKE_W
+
+
 def min_charge_w(remaining, min_amp, volts, phase3_min_w):
     """Watts for the official 6 A floor at the leftover's 1- or 3-phase."""
     remaining = max(int(remaining), 0)
@@ -769,11 +792,25 @@ def nrg_total_w(payload):
 
 
 def charger_take_w(state, power_w, leftover_w, charger_max_w):
-    """Watts this car is taking from leftover. 0 if it is not accepting."""
+    """Watts this car is taking from leftover. 0 if it is not accepting.
+
+    Idle Complete (``nrg`` below ``KEEP_PROBE_TAKE_W``) is 0. Live
+    Complete still drawing at or above that band uses real ``nrg``.
+    Charging below ``TAKE_MIN_W`` still assumes the leftover cap (Tesla
+    start). Do not raise ``TAKE_MIN_W`` to the keep-probe band.
+    """
     leftover_w = max(int(leftover_w), 0)
     cap = min(leftover_w, max(int(charger_max_w), 0))
-    if not car_plugged(state) or car_finished(state):
+    if not car_plugged(state):
         return 0
+    if car_finished(state):
+        if idle_complete(state, power_w):
+            return 0
+        try:
+            take = int(power_w)
+        except (TypeError, ValueError):
+            return 0
+        return min(max(take, 0), cap)
     if not car_charging(state):
         return 0
     if power_w is None or int(power_w) < TAKE_MIN_W:
@@ -877,11 +914,14 @@ def surplus_allocation_plan(
     """Per-charger leftover watts plus next-car hold flags.
 
     Surplus MQTT does not wait for a car. Every listed surplus charger
-    that is not finished (Complete) can be offered leftover, including
-    Idle, unknown, or unplugged, so ``frc=2`` can arm the charger before
-    WaitCar. Equal or unknown HA priority: those chargers get the same
-    leftover (go-e splits). Unequal: steal/take follows actual take
-    (≥100 W), not plug-in. ``plugged`` is kept for callers and ignored.
+    that is not idle Complete can be offered leftover, including Idle,
+    unknown, or unplugged, so ``frc=2`` can arm the charger before
+    WaitCar. Idle Complete (``nrg`` below ``KEEP_PROBE_TAKE_W``) is not
+    offered, backfilled, or used for steal/remainder. Complete still
+    drawing at or above that band is leftover-eligible as taking. Equal
+    or unknown HA priority: those chargers get the same leftover (go-e
+    splits). Unequal: steal/take follows actual take (≥100 W), not
+    plug-in. ``plugged`` is kept for callers and ignored.
 
     A high-priority car that is not taking still gets leftover MQTT so
     it can start. If it does not take all leftover, the next car in
@@ -899,7 +939,7 @@ def surplus_allocation_plan(
     while a higher-priority offer is still pending. After the wait, if
     high is still not taking, leftover belongs to the next as first and
     high stays armed (not a lot share). If nobody is taking, every
-    eligible charger is armed at leftover watts. Finished chargers are
+    eligible charger is armed at leftover watts. Idle Complete is
     skipped so remaining equal-priority cars still share. After a taking
     first car, unused leftover above ``split_floor_w`` (default 500 W)
     goes to the next car in priority — even if that car is not taking
@@ -920,8 +960,8 @@ def surplus_allocation_plan(
     charger is allocated leftover, every better HA priority that is
     still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
     so it can start taking again. Those backfills are not group-lot
-    shares unless the offer wait is still running. Finished chargers
-    stay skipped.
+    shares unless the offer wait is still running. Idle Complete
+    stays skipped.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]
@@ -938,11 +978,16 @@ def surplus_allocation_plan(
         return empty
     take_w = take_w if isinstance(take_w, dict) else None
     states = states if isinstance(states, dict) else None
-    eligible = [
-        serial
-        for serial in serials
-        if states is None or not car_finished(states.get(serial))
-    ]
+
+    def _idle_of(serial):
+        if states is None:
+            return False
+        take = None
+        if take_w is not None and serial in take_w:
+            take = take_w[serial]
+        return idle_complete(states.get(serial), take)
+
+    eligible = [serial for serial in serials if not _idle_of(serial)]
     if not eligible or leftover_w <= 0:
         return empty
     charger_max_w = max(int(charger_max_w), 0)
@@ -1105,72 +1150,43 @@ def surplus_allocation_plan(
     )
 
 
-def surplus_treat_as_charging(states, take_w, serials, leftover_w):
-    """Copy of allocation inputs as if ``serials`` were still charging.
+def surplus_steal_victim(serial, *, leftover_on, taking, lops):
+    """Worse HA leftover priority than a taking surplus charger.
 
-    Used to tell a finished pack from leftover that moved to another car.
-    go-e can report Complete when group current is starved. Treat those
-    serials as still wanting leftover so steal/drop is visible.
+    Keep must not auto-on while leftover is writing and another surplus
+    charger is taking (≥100 W has-started) at a better (lower) HA
+    leftover priority. Equal priority is out of scope.
     """
-    states = dict(states or {})
-    take_w = dict(take_w or {})
-    leftover_w = max(int(leftover_w), 0)
-    for serial in serials or ():
-        if not serial:
+    if not leftover_on or not serial:
+        return False
+    others = [other for other in (taking or []) if other and other != serial]
+    if not others or not isinstance(lops, dict):
+        return False
+    rank = lops.get(serial)
+    if rank is None:
+        return False
+    rank = int(rank)
+    for other in others:
+        other_rank = lops.get(other)
+        if other_rank is None:
             continue
-        states[serial] = "Charging"
-        try:
-            current = int(take_w.get(serial) or 0)
-        except (TypeError, ValueError):
-            current = 0
-        if current < TAKE_MIN_W:
-            take_w[serial] = leftover_w
-    return states, take_w
+        if int(other_rank) < rank:
+            return True
+    return False
 
 
-def surplus_plan_if_still_charging(serials, resume_serials, **plan_kw):
-    """``surplus_allocation_plan`` with ``resume_serials`` still charging."""
-    leftover_w = plan_kw.get("leftover_w", 0)
-    states, take_w = surplus_treat_as_charging(
-        plan_kw.get("states"),
-        plan_kw.get("take_w"),
-        resume_serials,
-        leftover_w,
-    )
-    plan_kw = dict(plan_kw)
-    plan_kw["states"] = states
-    plan_kw["take_w"] = take_w
-    return surplus_allocation_plan(serials, **plan_kw)
-
-
-def surplus_keep_stolen(serial, plan, *, allowed):
-    """True when leftover would stay on another taking car: cut keep.
-
-    Complete while leftover is stolen is not a finished pack. Another
-    charger must actually be taking (≥100 W) and this serial must not
-    still have a leftover share if it were charging.
-    """
-    if not allowed:
-        return False
-    if not serial or not isinstance(plan, dict):
-        return False
-    allocations = plan.get("allocations") or {}
-    if serial in allocations:
-        return False
-    taking = plan.get("taking") or []
-    return any(other and other != serial for other in taking)
-
-
-def surplus_higher_keep_on(serial, allocations, lops, states=None):
+def surplus_higher_keep_on(serial, allocations, lops, states=None, take_w=None):
     """True when a worse-priority charger has leftover: do not ``frc=1`` this one.
 
-    Finished (Complete) chargers stay off. Plug-in does not matter.
+    Idle Complete stays off. Live Complete still drawing is leftover.
+    Plug-in does not matter.
     """
     if not serial or not isinstance(allocations, dict) or not allocations:
         return False
     if serial in allocations:
         return False
-    if states is not None and car_finished(states.get(serial)):
+    take = None if take_w is None else take_w.get(serial)
+    if states is not None and idle_complete(states.get(serial), take):
         return False
     if not isinstance(lops, dict):
         return False
