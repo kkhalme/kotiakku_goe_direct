@@ -98,6 +98,36 @@ def clamp_priority(value, default: int) -> int:
     return parsed
 
 
+def apply_unique_priority(serial, new_value, current) -> dict:
+    """Return serial → leftover priority after setting ``serial`` to ``new_value``.
+
+    Leftover priorities stay unique: if another charger already has ``new_value``,
+    that charger takes this charger's previous value (swap). ``current`` maps
+    serial to current priority; insertion order is config slot order.
+    """
+    serial = str(serial or "")
+    new_value = clamp_priority(new_value, PRIORITY_MIN)
+    out = {}
+    for key, raw in dict(current or {}).items():
+        name = str(key)
+        if not name:
+            continue
+        out[name] = clamp_priority(raw, PRIORITY_MIN)
+    old_value = out.get(serial)
+    occupant = None
+    for other, prio in out.items():
+        if other == serial:
+            continue
+        if prio == new_value:
+            occupant = other
+            break
+    if serial:
+        out[serial] = new_value
+    if occupant is not None and old_value is not None and old_value != new_value:
+        out[occupant] = old_value
+    return out
+
+
 def _row_priority(item, slot: int) -> int:
     default = default_charger_priority(slot)
     if not isinstance(item, dict):
@@ -262,18 +292,26 @@ def validate_charger_rows(rows) -> str | None:
     """Return an error key, or None if the rows can be stored.
 
     Charger 1 is required. Chargers 2–4 may be omitted.
+    Serials and leftover priorities must be unique.
     """
     if not rows:
         return "charger_required"
-    seen = []
-    for row in rows:
+    seen_serials = []
+    seen_priorities = []
+    for index, row in enumerate(rows):
         entity = (row.get("entity") or "").strip()
         serial = valid_serial(row.get("serial"))
         if not entity:
             return "entity_required"
         if not serial:
             return "serial_required"
-        if serial in seen:
+        if serial in seen_serials:
             return "duplicate_serial"
-        seen.append(serial)
+        seen_serials.append(serial)
+        priority = clamp_priority(
+            row.get(CONF_PRIORITY), default_charger_priority(index)
+        )
+        if priority in seen_priorities:
+            return "duplicate_priority"
+        seen_priorities.append(priority)
     return None

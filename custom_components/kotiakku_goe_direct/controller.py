@@ -76,6 +76,7 @@ from .const import (
     POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
     POLICIES,
+    PRIORITY_MIN,
     DEFAULT_KEEP_AMP,
     DEFAULT_KEEP_PHASE,
     charger_off_mqtt,
@@ -212,6 +213,7 @@ class KotiakkuGoeDirectController:
         self._car_entities = {}
         self._power_entities = {}
         self._priority_defaults = {}
+        self._priority_numbers = {}
         for index, row in enumerate(self.charger_rows):
             serial = row.get("serial")
             if not serial:
@@ -350,6 +352,27 @@ class KotiakkuGoeDirectController:
         if parsed is not None:
             return parsed
         return self._priority_defaults.get(serial)
+
+    def register_priority_number(self, entity):
+        serial = getattr(entity, "_serial", None)
+        if serial:
+            self._priority_numbers[serial] = entity
+
+    def priority_number(self, serial):
+        return self._priority_numbers.get(serial)
+
+    def charger_priority_values(self) -> dict:
+        """Current leftover priorities in charger slot order."""
+        out = {}
+        for serial in self.chargers:
+            default = self._priority_defaults.get(serial) or PRIORITY_MIN
+            entity = self._priority_numbers.get(serial)
+            if entity is not None and entity.native_value is not None:
+                out[serial] = clamp_priority(entity.native_value, default)
+                continue
+            parsed = parse_lop(self._state(self.priority_entity(serial)))
+            out[serial] = parsed if parsed is not None else default
+        return out
 
     def power_entity(self, serial):
         return self._power_entities.get(serial) or f"sensor.go_echarger_{serial}_nrg"

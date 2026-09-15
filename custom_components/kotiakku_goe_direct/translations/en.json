@@ -20,7 +20,7 @@
       },
       "serials": {
         "title": "Charger serials",
-        "description": "MQTT writes go-eCharger/<serial>/…/set. That is the device serial, not the Home Assistant entity id (entity ids can be renamed). Leftover priority is 1–99 (1 is highest), same scale as the go-e app. Prefill: {serial_hint}",
+        "description": "MQTT writes go-eCharger/<serial>/…/set. That is the device serial, not the Home Assistant entity id (entity ids can be renamed). Leftover priority is 1–99 (1 is highest), same scale as the go-e app. Each charger must have a different leftover priority. Prefill: {serial_hint}",
         "data": {
           "charger_1_serial": "Charger 1 serial",
           "charger_1_priority": "Charger 1 leftover priority (1 = highest)",
@@ -51,7 +51,8 @@
       "charger_required": "Charger 1 is required. Chargers 2–4 are optional.",
       "entity_required": "Each added charger needs an entity.",
       "serial_required": "Each added charger needs its MQTT serial (go-eCharger/<serial>).",
-      "duplicate_serial": "Each charger serial must be unique."
+      "duplicate_serial": "Each charger serial must be unique.",
+      "duplicate_priority": "Each leftover priority must be unique (1 is highest)."
     },
     "abort": {
       "already_configured": "Kotiakku go-e Direct is already configured"
@@ -61,7 +62,7 @@
     "step": {
       "init": {
         "title": "Configure Kotiakku go-e Direct",
-        "description": "Charger 1 is required; chargers 2–4 are optional. Each charger is an entity, MQTT serial, and leftover priority (1 = highest). MQTT publishes to go-eCharger/<serial>/set. Surplus numbers, group lot, window bounds, Enough solar, policies, and priority knobs live on the Kotiakku go-e Direct device.",
+        "description": "Charger 1 is required; chargers 2–4 are optional. Each charger is an entity, MQTT serial, and a unique leftover priority (1 = highest). MQTT publishes to go-eCharger/<serial>/set. Surplus numbers, group lot, window bounds, Enough solar, policies, and priority knobs live on the Kotiakku go-e Direct device.",
         "data": {
           "price_entity": "Spot-price sensor (raw_today / raw_tomorrow)",
           "charger_1_entity": "Charger 1 entity",
@@ -91,7 +92,8 @@
       "charger_required": "Charger 1 is required. Chargers 2–4 are optional.",
       "entity_required": "Each added charger needs an entity.",
       "serial_required": "Each added charger needs its MQTT serial (go-eCharger/<serial>).",
-      "duplicate_serial": "Each charger serial must be unique."
+      "duplicate_serial": "Each charger serial must be unique.",
+      "duplicate_priority": "Each leftover priority must be unique (1 is highest)."
     }
   }
 }
