@@ -264,6 +264,7 @@ def main():
         )
         assert_eq(custom[0]["priority"], 50, "custom first")
         assert_eq(custom[1]["priority"], 10, "custom second")
+        assert_eq(config.validate_charger_rows(custom), None, "unequal custom valid")
         assert_eq(config.clamp_priority(0, 1), 1, "clamp low")
         assert_eq(config.clamp_priority(100, 1), 99, "clamp high")
         assert_eq(const.default_charger_priority(0), 1, "slot 0")
@@ -294,6 +295,24 @@ def main():
             ),
             "duplicate_serial",
             "dup",
+        )
+        assert_eq(
+            config.validate_charger_rows(
+                [
+                    {
+                        "entity": "sensor.go_echarger_111111_car_state",
+                        "serial": "111111",
+                        "priority": 50,
+                    },
+                    {
+                        "entity": "sensor.go_echarger_222222_car_state",
+                        "serial": "222222",
+                        "priority": 50,
+                    },
+                ]
+            ),
+            "duplicate_priority",
+            "dup leftover priority",
         )
         assert_eq(
             config.validate_charger_rows([{"entity": "sensor.x", "serial": ""}]),
@@ -337,6 +356,43 @@ def main():
         assert_eq(guessed[1]["serial"], "111111", "empty serial filled")
         assert_eq(guessed[0]["priority"], 20, "priority kept on guess")
         assert_eq(guessed[1]["priority"], 30, "priority kept on fill")
+
+    def test_unique_priority_swap():
+        swap = config.apply_unique_priority
+        current = {"111111": 1, "222222": 2}
+        assert_eq(
+            swap("111111", 2, current),
+            {"111111": 2, "222222": 1},
+            "setting to the other charger's number swaps",
+        )
+        assert_eq(
+            swap("111111", 1, current),
+            {"111111": 1, "222222": 2},
+            "same value is a no-op",
+        )
+        assert_eq(
+            swap("111111", 50, current),
+            {"111111": 50, "222222": 2},
+            "unused number does not move the other charger",
+        )
+        three = {"111111": 1, "222222": 2, "333333": 3}
+        assert_eq(
+            swap("111111", 3, three),
+            {"111111": 3, "222222": 2, "333333": 1},
+            "swap with the occupant; middle charger stays",
+        )
+        assert_eq(
+            swap("222222", 7, three),
+            {"111111": 1, "222222": 7, "333333": 3},
+            "middle charger to a free number",
+        )
+        assert_eq(swap("111111", 0, current)["111111"], 1, "clamp low on set")
+        assert_eq(swap("111111", 100, current)["111111"], 99, "clamp high on set")
+        assert_eq(
+            swap("111111", 2.6, current),
+            {"111111": 3, "222222": 2},
+            "round then unique",
+        )
 
     def test_entry_config_options_overlay():
         class Entry:
@@ -832,6 +888,7 @@ def main():
         assert_eq("eco_psm" in config.persistable({"eco_psm": 2}), False, "eco psm is not stored")
 
     case("normalize_and_form", test_normalize_and_form)
+    case("unique_priority_swap", test_unique_priority_swap)
     case("entry_config_options_overlay", test_entry_config_options_overlay)
     case("persistable_does_not_invent_entities", test_persistable_does_not_invent_entities)
     case("source_refresh_ids", test_source_refresh_ids)

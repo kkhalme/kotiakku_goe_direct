@@ -11,7 +11,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .config import clamp_priority, entry_config
+from .config import apply_unique_priority, clamp_priority, entry_config
 from .const import (
     DEFAULT_CEILING,
     DEFAULT_FLEX_EUR,
@@ -191,6 +191,27 @@ class ChargerPriorityNumber(_HubNumber):
         self.entity_id = priority_entity_id(serial)
         self._attr_unique_id = f"kotiakku_goe_direct_priority_{serial}"
         self._attr_name = f"{serial} priority"
+        self._controller.register_priority_number(self)
+
+    def apply_swapped_priority(self, value: int) -> None:
+        self._attr_native_value = float(clamp_priority(value, PRIORITY_MIN))
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    async def async_set_native_value(self, value: float):
+        current = self._controller.charger_priority_values()
+        updated = apply_unique_priority(self._serial, value, current)
+        self._attr_native_value = float(updated[self._serial])
+        self.async_write_ha_state()
+        for serial, prio in updated.items():
+            if serial == self._serial:
+                continue
+            if current.get(serial) == prio:
+                continue
+            peer = self._controller.priority_number(serial)
+            if peer is not None:
+                peer.apply_swapped_priority(prio)
+        await self._on_changed()
 
     async def _on_changed(self):
         self._controller._schedule_apply()

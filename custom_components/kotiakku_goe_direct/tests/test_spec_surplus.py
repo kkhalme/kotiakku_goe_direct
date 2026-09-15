@@ -113,13 +113,13 @@ def main():
         pool = leftover_w(5000, 6000, 3000)
         assert_eq(pool, 2000, "house includes 3 kW keep: leftover still 2 kW")
         assert_eq(surplus.keep_take_w(3000), 3000, "keep precondition take")
-        assert_eq(surplus.keep_take_w(80), 0, "keep idle / Complete trickle")
+        assert_eq(surplus.keep_take_w(80), 80, "keep Sentry / Complete trickle still counts")
         assert_eq(surplus.keep_take_w(None), 0, "unknown nrg")
         assert_eq(surplus.leftover_for_surplus(pool), pool, "no keep cars")
         assert_eq(
             surplus.leftover_for_surplus(pool, 80),
-            pool,
-            "idle keep trickle is not take",
+            1920,
+            "keep 80 W trickle is subtracted from leftover for other cars",
         )
         assert_eq(
             surplus.leftover_for_surplus(pool, 3000),
@@ -142,6 +142,62 @@ def main():
             False,
             "deficit after keep does not start leftover on other cars",
         )
+
+    def test_steal_victim_worse_priority_while_other_takes():
+        victim = surplus.surplus_steal_victim
+        assert_eq(
+            victim(B, leftover_on=True, taking=[A], lops={A: 1, B: 2}),
+            True,
+            "worse prio than a taking surplus charger is steal victim",
+        )
+        assert_eq(
+            victim(A, leftover_on=True, taking=[A], lops={A: 1, B: 2}),
+            False,
+            "the taking car is not a victim",
+        )
+        assert_eq(
+            victim(B, leftover_on=True, taking=[], lops={A: 1, B: 2}),
+            False,
+            "nobody taking: not a victim",
+        )
+        assert_eq(
+            victim(B, leftover_on=False, taking=[A], lops={A: 1, B: 2}),
+            False,
+            "leftover off: not a victim",
+        )
+        assert_eq(
+            victim(A, leftover_on=True, taking=[B], lops={A: 1, B: 2}),
+            False,
+            "better prio than the taker can still keep",
+        )
+        assert_eq(
+            victim(B, leftover_on=True, taking=[A], lops={A: 1, B: 1}),
+            False,
+            "equal HA leftover priority is out of scope",
+        )
+        one_phase = MIN_A * VOLTS
+        both = leftover_kw_args(
+            lops={A: 1, B: 2},
+            plugged={A: True, B: True},
+        )
+        idle_b = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=one_phase,
+            take_w={A: one_phase, B: 0},
+            states={A: "Charging", B: "Complete"},
+            **both,
+        )
+        assert_eq(idle_b["allocations"].get(A), one_phase, "A keeps the 1-phase leftover")
+        assert_true(B not in idle_b["allocations"], "idle Complete B is not leftover-offered")
+        live_b = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=12000,
+            take_w={A: 5000, B: 5000},
+            states={A: "Charging", B: "Complete"},
+            **both,
+        )
+        assert_eq(live_b["allocations"].get(B), 7000, "live Complete ≥400 W is leftover-eligible")
+        assert_eq(live_b["taking"], [A, B], "live Complete is taking")
 
     def test_ev_prefers_nrg_over_lagged_controller():
         ev = surplus.effective_ev_w
@@ -323,7 +379,7 @@ def main():
                 take_w={A: 0, B: 0}, states={A: "Complete", B: "Charging"}, **both,
             ),
             {B: 8000},
-            "Complete first is skipped",
+            "idle Complete first is skipped",
         )
         wait = alloc(
             [A, B], leftover_w=2500, split_hold=True,
@@ -447,7 +503,7 @@ def main():
         assert_eq(
             keep(A, {B: 8000}, {A: 1, B: 50}, states={A: "Complete", B: "Charging"}),
             False,
-            "Complete high stays skipped",
+            "idle Complete high stays skipped",
         )
         assert_eq(keep(A, {}, {A: 1, B: 50}), False, "nobody allocated")
         assert_eq(
@@ -458,7 +514,7 @@ def main():
                 **leftover_kw_args(lops={A: 1, B: 50, C: 50}),
             ),
             {B: 8000, C: 8000},
-            "Complete dropped from ranks: remaining equal-priority cars share leftover",
+            "idle Complete dropped from ranks: remaining equal-priority cars share leftover",
         )
         assert_eq(alloc([A], leftover_w=8000, **both), {A: 8000}, "single charger gets leftover")
         none = surplus.surplus_allocation_plan(
@@ -563,7 +619,9 @@ def main():
         assert_eq(surplus.car_finished("Complete"), True, "Complete finished")
         assert_eq(surplus.car_charging("WaitCar"), False, "WaitCar not charging")
         assert_eq(surplus.charger_take_w("Idle", 3000, 8000, 22080), 0, "unplugged take 0")
-        assert_eq(surplus.charger_take_w("Complete", 8000, 8000, 22080), 0, "finished take 0")
+        assert_eq(surplus.charger_take_w("Complete", 8000, 8000, 22080), 8000, "live Complete take")
+        assert_eq(surplus.charger_take_w("Complete", 350, 8000, 22080), 0, "idle Complete take 0")
+        assert_eq(surplus.charger_take_w("Complete", None, 8000, 22080), 0, "unknown Complete take 0")
         assert_eq(surplus.charger_take_w("WaitCar", None, 8000, 22080), 0, "WaitCar take 0")
         assert_eq(surplus.charger_take_w("Charging", None, 8000, 22080), 8000, "unknown charging wants leftover")
         assert_eq(surplus.charger_take_w("Charging", 3000, 300, 22080), 300, "take capped by leftover")
@@ -843,7 +901,14 @@ def main():
         assert_eq(
             alloc([A], leftover_w=8000, states={A: "Complete"}, **finished),
             {},
-            "Complete is not offered leftover",
+            "idle Complete is not offered leftover",
+        )
+        assert_eq(
+            alloc(
+                [A], leftover_w=8000, take_w={A: 5000}, states={A: "Complete"}, **finished
+            ),
+            {A: 8000},
+            "live Complete ≥400 W is offered leftover",
         )
         dec, cmds = mqtt_for(
             2000, False, serials=[A], plugged={A: False}, states={A: "Idle"}
@@ -1088,6 +1153,10 @@ def main():
 
     case("leftover_house_must_contain_ev", test_leftover_house_must_contain_ev)
     case("keep_take_uses_leftover_pool", test_keep_take_uses_leftover_pool)
+    case(
+        "steal_victim_worse_priority_while_other_takes",
+        test_steal_victim_worse_priority_while_other_takes,
+    )
     case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
     case("three_kw_is_13a_one_phase_not_a_hold", test_three_kw_is_13a_one_phase_not_a_hold)
