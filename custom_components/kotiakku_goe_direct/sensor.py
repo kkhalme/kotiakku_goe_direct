@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    AVAILABLE_SURPLUS_UNIQUE_ID,
     DOMAIN,
+    EID_AVAILABLE_SURPLUS,
     EID_SOLAR_GATING_DAY,
     EID_SOLAR_GATING_KWH,
     EID_SOLAR_KWH,
@@ -43,6 +45,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         [
             WindowSensor(controller),
+            AvailableSurplusSensor(controller),
             ForecastSolarSensor(controller),
             SolarTodaySensor(controller),
             SolarTomorrowSensor(controller),
@@ -193,3 +196,27 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
             "usable_end": self._controller.usable_solar_end_iso,
             "tomorrow_ok": self._controller.tomorrow_prices_ok,
         }
+
+
+class AvailableSurplusSensor(HubEntity, SensorEntity):
+    """Leftover watts still free for surplus chargers (after keep take)."""
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_icon = "mdi:lightning-bolt-outline"
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self.entity_id = EID_AVAILABLE_SURPLUS
+        self._attr_unique_id = AVAILABLE_SURPLUS_UNIQUE_ID
+        self._attr_name = "Available surplus"
+
+    @property
+    def native_value(self):
+        return self._controller.available_surplus_w
+
+    @property
+    def extra_state_attributes(self):
+        return self._controller.available_surplus_attrs()

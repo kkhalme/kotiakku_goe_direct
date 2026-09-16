@@ -926,8 +926,10 @@ def write_report(sims, out_dir):
     lines = [
         "# SolarPriority 48 h Helsinki year-round",
         "",
-        "**Charger A SolarPriority**, **charger B Force off** (B never charges). One cheap window after",
+        "**Charger A SolarPriority**, **charger B Force off** (B never charges). Cheap windows after",
         "dropping hours with at least 1 kWh of expected solar (full-day today /",
+        "tomorrow shaped by elevation); a second window is added when tomorrow's",
+        "prices are in and the first does not overlap local 22:00–end of tomorrow.",
         "tomorrow shaped by elevation). SolarPriority then skips 22 kW when the",
         "gating day's kWh ≥ 40 (today until tomorrow's prices are in and the last",
         "hour with ≥ 1 kWh expected solar has ended). A finished",

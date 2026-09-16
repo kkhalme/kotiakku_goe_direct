@@ -117,12 +117,13 @@ def keep_take_w(power_w):
 def leftover_for_surplus(leftover_w, *keep_power_w):
     """Leftover still free for surplus chargers after keep take.
 
-    Pass each keep charger's ``nrg``. Keep MQTT stays at keep amp so
-    leftover does not charge that pack, but keep and leftover are the
-    same house pool. Subtract the full keep ``nrg`` (0 if unknown). A
-    keep car preconditioning at 3 kW during 2 kW leftover has already
-    used that leftover (and 1 kW from the grid). Surplus chargers only
-    get the remainder; a negative remainder is a deficit.
+    Exposed as ``sensor.kotiakku_goe_direct_available_surplus``. Pass each
+    keep charger's ``nrg``. Keep MQTT stays at keep amp so leftover does
+    not charge that pack, but keep and leftover are the same house pool.
+    Subtract the full keep ``nrg`` (0 if unknown). A keep car
+    preconditioning at 3 kW during 2 kW leftover has already used that
+    leftover (and 1 kW from the grid). Surplus chargers only get the
+    remainder; a negative remainder is a deficit.
     """
     leftover_w = int(leftover_w)
     take = sum(keep_take_w(power_w) for power_w in keep_power_w)

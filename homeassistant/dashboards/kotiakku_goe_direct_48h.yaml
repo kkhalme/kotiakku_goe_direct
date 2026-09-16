@@ -31,18 +31,13 @@ views:
           - type: markdown
             content: >
               {% set price = states('text.kotiakku_goe_direct_electricity_price_sensor') | trim %}
-              {% set solar = states('sensor.solar_power') %}
-              {% set house = states('sensor.house_power') %}
-              {% set ev_s = states('sensor.go_econtroller_ev_power_5_min_mean') %}
-              {% set solar_kw = solar | float(0) | abs %}
-              {% set house_kw = house | float(0) | abs %}
-              {% set ev_kw = (ev_s | float(0) | abs / 1000) if ev_s | is_number else 0 %}
-              {% set leftover = (solar_kw - house_kw + ev_kw) if (solar | is_number and house | is_number) else none %}
+              {% set leftover_w = states('sensor.kotiakku_goe_direct_available_surplus') %}
+              {% set leftover = (leftover_w | float(0) / 1000) if leftover_w | is_number else none %}
               **48 h from local midnight** · green = SolarPriority window · orange = off-sun · red = price ceiling.
 
               Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
               · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
-              (`|solar| − |house| + |ev|`)
+              (`sensor.kotiakku_goe_direct_available_surplus`)
               · window {{ states('sensor.kotiakku_goe_direct_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_window', 'end') }}.
 
               Delete charger 2 cards/series if you only have one charger. Leftover
@@ -68,7 +63,7 @@ views:
           - type: glance
             show_name: true
             show_state: true
-            columns: 5
+            columns: 6
             entities:
               - entity: sensor.kotiakku_goe_direct_solar_today_kwh
                 name: Solar today
@@ -78,6 +73,8 @@ views:
                 name: Solar gating
               - entity: sensor.kotiakku_goe_direct_solar_gating_day
                 name: Gating day
+              - entity: sensor.kotiakku_goe_direct_available_surplus
+                name: Available surplus
               - entity: sensor.kotiakku_goe_direct_solar_kwh
                 name: Forecast solar
 
