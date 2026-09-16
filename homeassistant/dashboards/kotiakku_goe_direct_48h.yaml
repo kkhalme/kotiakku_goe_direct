@@ -1,15 +1,16 @@
 # Single dashboard tab: 48 h spot + planned charge windows.
 #
-# Needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
-# No template sensors, packages, or other helpers. Window bands and
-# tomorrow's Nordpool curve come from entity attributes / data_generator.
+# Spot chart needs HACS
+# [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
+# Leftover chart needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
+# No template sensors, packages, or other helpers.
 #
 # Paste this file as a YAML dashboard, or paste the `views:` list into a
-# UI dashboard's raw editor.
+# UI dashboard's raw editor. Spot-only card:
+# dashboards/kotiakku_goe_direct_spot.yaml
 #
-# Edit only the leftover chart inputs (solar / house / Controller mean)
-# and charger serials 111111 / 222222. Spot uses
-# `text.kotiakku_goe_direct_electricity_price_sensor` from the integration.
+# Edit leftover chart inputs (solar / house / Controller mean) and charger
+# serials 111111 / 222222. Spot entity is `sensor.nordpool`.
 #
 # configuration.yaml (optional YAML dashboard):
 #   lovelace:
@@ -33,7 +34,7 @@ views:
               {% set price = states('text.kotiakku_goe_direct_electricity_price_sensor') | trim %}
               {% set leftover_w = states('sensor.kotiakku_goe_direct_available_surplus') %}
               {% set leftover = (leftover_w | float(0) / 1000) if leftover_w | is_number else none %}
-              **48 h from local midnight** · green = SolarPriority window · orange = off-sun · red = price ceiling.
+              **48 h from local midnight** · green = cheap window · charger strips = 22 kW.
 
               Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
               · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
@@ -78,196 +79,63 @@ views:
               - entity: sensor.kotiakku_goe_direct_solar_kwh
                 name: Forecast solar
 
-          - type: custom:apexcharts-card
-            header:
-              show: true
-              title: Spot · SolarPriority window · off-sun
-              show_states: false
-            graph_span: 2d
-            span:
-              start: day
-            now:
-              show: true
-              label: now
-            update_interval: 1min
-            apex_config:
-              legend:
-                show: true
-              grid:
-                borderColor: "#4444"
-            yaxis:
-              - id: price
-                decimals: 3
-                apex_config:
-                  title:
-                    text: €/kWh
-            series:
-              - entity: sensor.kotiakku_goe_direct_window
-                name: Window
-                yaxis_id: price
-                type: area
-                curve: stepline
-                color: "#2ca02c"
-                opacity: 0.32
-                stroke_width: 0
-                extend_to: false
-                unit: €/kWh
-                show:
-                  in_header: false
-                  legend_value: false
-                data_generator: &window_band |
-                  function parseTs(v) {
-                    if (v == null || v === '') return NaN;
-                    if (typeof v === 'number' && Number.isFinite(v))
-                      return v < 1e12 ? v * 1000 : v;
-                    return Date.parse(v);
-                  }
-                  function windowsFrom(attrs) {
-                    const out = [];
-                    const list = attrs && attrs.windows;
-                    if (Array.isArray(list)) {
-                      for (const w of list) {
-                        if (!w) continue;
-                        const s = parseTs(w.start);
-                        const e = parseTs(w.end);
-                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
-                      }
-                    }
-                    if (!out.length && attrs) {
-                      for (let i = 1; i <= 16; i++) {
-                        const s = parseTs(attrs['window_' + i + '_start']);
-                        const e = parseTs(attrs['window_' + i + '_end']);
-                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
-                      }
-                    }
-                    return out;
-                  }
-                  function priceSlots() {
-                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
-                    const id = raw || 'sensor.nordpool_kwh_fi';
-                    const a = ((hass.states[id] || {}).attributes) || {};
-                    return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
-                  }
-                  function slotVal(entry) {
-                    const v = entry.value != null ? entry.value : entry.price;
-                    const n = Number(v);
-                    return Number.isFinite(n) ? n : 0;
-                  }
-                  const windows = windowsFrom(entity.attributes || {});
-                  const pts = [];
-                  for (const entry of priceSlots()) {
-                    const t = parseTs(entry.start);
-                    if (!Number.isFinite(t)) continue;
-                    let on = false;
-                    for (const w of windows) {
-                      if (t >= w[0] && t < w[1]) { on = true; break; }
-                    }
-                    pts.push([t, on ? slotVal(entry) : 0]);
-                  }
-                  return pts;
-              - entity: sensor.kotiakku_goe_direct_window
-                name: Off-sun
-                yaxis_id: price
-                type: area
-                curve: stepline
-                color: "#ff7f0e"
-                opacity: 0.22
-                stroke_width: 0
-                extend_to: false
-                unit: €/kWh
-                show:
-                  in_header: false
-                  legend_value: false
-                data_generator: |
-                  function parseTs(v) {
-                    if (v == null || v === '') return NaN;
-                    if (typeof v === 'number' && Number.isFinite(v))
-                      return v < 1e12 ? v * 1000 : v;
-                    return Date.parse(v);
-                  }
-                  function rangesFrom(list) {
-                    const out = [];
-                    if (!Array.isArray(list)) return out;
-                    for (const w of list) {
-                      if (!w) continue;
-                      const s = parseTs(w.start);
-                      const e = parseTs(w.end);
-                      if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
-                    }
-                    return out;
-                  }
-                  function priceSlots() {
-                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
-                    const id = raw || 'sensor.nordpool_kwh_fi';
-                    const a = ((hass.states[id] || {}).attributes) || {};
-                    return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
-                  }
-                  function slotVal(entry) {
-                    const v = entry.value != null ? entry.value : entry.price;
-                    const n = Number(v);
-                    return Number.isFinite(n) ? n : 0;
-                  }
-                  const blocked = rangesFrom((entity.attributes || {}).blocked);
-                  const pts = [];
-                  for (const entry of priceSlots()) {
-                    const t = parseTs(entry.start);
-                    if (!Number.isFinite(t)) continue;
-                    let on = false;
-                    for (const w of blocked) {
-                      if (t >= w[0] && t < w[1]) { on = true; break; }
-                    }
-                    pts.push([t, on ? slotVal(entry) : 0]);
-                  }
-                  return pts;
-              - entity: text.kotiakku_goe_direct_electricity_price_sensor
+          - type: custom:statistics-graph-chart-card
+            card_header: Spot
+            graph_start: day
+            hours_to_show: 48
+            show_full_period: true
+            graph_end_hour: now+48
+            show_now_line: true
+            state_strip_height: 10
+            state_strip_labels: false
+            entities:
+              - entity: sensor.nordpool
                 name: Spot
-                yaxis_id: price
-                type: line
-                curve: stepline
-                color: "#1f4e79"
-                stroke_width: 2
-                extend_to: false
-                unit: €/kWh
-                show:
-                  in_header: false
-                  extremas: true
-                data_generator: |
-                  function parseTs(v) {
-                    if (v == null || v === '') return NaN;
-                    if (typeof v === 'number' && Number.isFinite(v))
-                      return v < 1e12 ? v * 1000 : v;
-                    return Date.parse(v);
-                  }
-                  const raw = String((entity.state || '')).trim();
-                  const id = raw || 'sensor.nordpool_kwh_fi';
-                  const a = ((hass.states[id] || {}).attributes) || {};
-                  const slots = [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
-                  const pts = [];
-                  for (const entry of slots) {
-                    const t = parseTs(entry.start);
-                    if (!Number.isFinite(t)) continue;
-                    const v = entry.value != null ? entry.value : entry.price;
-                    const n = Number(v);
-                    if (!Number.isFinite(n)) continue;
-                    pts.push([t, n]);
-                  }
-                  return pts;
-              - entity: number.kotiakku_goe_direct_electricity_price_ceiling
-                name: Ceiling
-                yaxis_id: price
-                type: line
-                curve: straight
-                color: "#d62728"
-                stroke_width: 1
-                stroke_dash: 4
-                extend_to: false
-                unit: €/kWh
-                show:
-                  in_header: false
-                data_generator: |
-                  const n = Number(entity.state);
-                  const v = Number.isFinite(n) ? n : 0.2;
-                  return [[start.getTime(), v], [end.getTime(), v]];
+                graph_type: bar
+                data_attribute: raw_today, raw_tomorrow
+                data_time_field: start
+                data_value_field: value
+                decimals: 3
+              - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
+                name: Charger 1
+                graph_type: state_strip
+                state_map:
+                  - value: "off"
+                    color: rgba(0, 0, 0, 0)
+                  - value: "on"
+                    label: "1"
+                    color: "#17becf"
+              - entity: binary_sensor.kotiakku_goe_direct_222222_full_power
+                name: Charger 2
+                graph_type: state_strip
+                state_map:
+                  - value: "off"
+                    color: rgba(0, 0, 0, 0)
+                  - value: "on"
+                    label: "2"
+                    color: "#ff7f0e"
+              - entity: binary_sensor.kotiakku_goe_direct_window_active
+                name: Window
+                graph_type: state_strip
+                state_map:
+                  - value: "off"
+                    color: rgba(0, 0, 0, 0)
+                  - value: "on"
+                    label: Window
+                    color: "#2ca02c"
+            annotations:
+              - type: span
+                start: "{{ state_attr('sensor.kotiakku_goe_direct_window', 'window_1_start') }}"
+                end: "{{ state_attr('sensor.kotiakku_goe_direct_window', 'window_1_end') }}"
+                color: "#2ca02c"
+                opacity: 0.18
+                label: Window
+              - type: span
+                start: "{{ state_attr('sensor.kotiakku_goe_direct_window', 'window_2_start') }}"
+                end: "{{ state_attr('sensor.kotiakku_goe_direct_window', 'window_2_end') }}"
+                color: "#2ca02c"
+                opacity: 0.18
+                label: Window
 
           - type: custom:apexcharts-card
             header:
