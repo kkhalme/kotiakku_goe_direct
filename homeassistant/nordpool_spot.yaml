@@ -1,70 +1,16 @@
-# Generic Nordpool spot helper (trigger-based template).
-#
-# Include as a package, or paste the `template:` block into configuration.yaml:
+# Generic Nordpool spot helper. Include as a package, or paste under `template:`:
 #   homeassistant:
 #     packages:
 #       nordpool_spot: !include nordpool_spot.yaml
 #
-# Only input: sensor.nordpool. Change that entity id if yours differs.
-# Creates sensor.nordpool_spot — state is the current price, attribute `raw`
-# is realized past (~8 days, restored on restart) plus live today/tomorrow
-# through the last Nordpool slot. Chart that with data_attribute: raw.
+# Only input: sensor.nordpool. Chart sensor.nordpool_spot with data_attribute: raw.
 
 template:
-  - trigger:
-      - trigger: state
-        entity_id: sensor.nordpool
-      - trigger: time_pattern
-        minutes: "/15"
-      - trigger: time
-        at: "00:00:30"
-      - trigger: homeassistant
-        event: start
-    sensor:
+  - sensor:
       - name: Nordpool spot
         unique_id: nordpool_spot
         icon: mdi:chart-bar
         state: "{{ states('sensor.nordpool') }}"
         unit_of_measurement: "{{ state_attr('sensor.nordpool', 'unit_of_measurement') }}"
         attributes:
-          source: sensor.nordpool
-          forecast_end: >-
-            {% set live = (state_attr('sensor.nordpool', 'raw_today') or [])
-               + (state_attr('sensor.nordpool', 'raw_tomorrow') or []) %}
-            {{ live[-1].end if live else none }}
-          raw: >-
-            {% set n = now().timestamp() %}
-            {% set keep = n - 8 * 86400 %}
-            {% set live = (state_attr('sensor.nordpool', 'raw_today') or [])
-               + (state_attr('sensor.nordpool', 'raw_tomorrow') or []) %}
-            {% set prev = this.attributes.raw | default([]) if this is defined else [] %}
-            {% if prev is string %}{% set prev = prev | from_json %}{% endif %}
-            {% if prev is not list %}{% set prev = [] %}{% endif %}
-            {% set ns = namespace(out=[], seen=[]) %}
-            {% for s in prev %}
-              {% set e = as_timestamp(s.end, none) %}
-              {% if e and e <= n and e > keep %}
-                {% set ns.out = ns.out + [s] %}
-                {% set ns.seen = ns.seen + [s.start] %}
-              {% endif %}
-            {% endfor %}
-            {% if live | count == 0 %}
-              {% for s in prev %}
-                {% set e = as_timestamp(s.end, none) %}
-                {% if e and e > n %}
-                  {% set ns.out = ns.out + [s] %}
-                {% endif %}
-              {% endfor %}
-            {% else %}
-              {% for s in live %}
-                {% set e = as_timestamp(s.end, none) %}
-                {% if e and e > keep %}
-                  {% if e > n %}
-                    {% set ns.out = ns.out + [s] %}
-                  {% elif s.start not in ns.seen %}
-                    {% set ns.out = ns.out + [s] %}
-                  {% endif %}
-                {% endif %}
-              {% endfor %}
-            {% endif %}
-            {{ ns.out }}
+          raw: "{{ (state_attr('sensor.nordpool', 'raw_today') or []) + (state_attr('sensor.nordpool', 'raw_tomorrow') or []) }}"

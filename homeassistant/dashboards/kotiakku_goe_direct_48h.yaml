@@ -3,9 +3,8 @@
 # Spot chart needs HACS
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
 # Leftover chart needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
-# Spot bars come from `sensor.nordpool_spot` (`raw`). Helper YAML:
-# `homeassistant/nordpool_spot.yaml` (trigger-based template, include as a
-# package). Only reads `sensor.nordpool`.
+# Spot bars come from `sensor.nordpool_spot` (`raw` = Nordpool raw_today +
+# raw_tomorrow). Helper: `homeassistant/nordpool_spot.yaml`.
 #
 # Paste this file as a YAML dashboard, or paste the `views:` list into a
 # UI dashboard's raw editor. Spot-only card:

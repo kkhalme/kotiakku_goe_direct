@@ -1,15 +1,11 @@
-# Spot prices: realized past + live Nordpool forecast
-# (`sensor.nordpool_spot` attribute `raw`).
+# Spot prices today + tomorrow (`sensor.nordpool_spot` attribute `raw`).
 #
-# Helper YAML: `homeassistant/nordpool_spot.yaml` (trigger-based template,
-# include as a package). Only reads `sensor.nordpool`.
+# Helper: `homeassistant/nordpool_spot.yaml` (concat of Nordpool raw_today
+# and raw_tomorrow). Include as a package. Change `sensor.nordpool` if needed.
 #
 # Paste this card into a Lovelace dashboard (raw editor). Needs
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
 # Replace charger serials 111111 / 222222 (delete charger 2 if you only have one).
-#
-# Week view: set `hours_to_show: 168` and drop `graph_start` / `graph_end_hour`
-# so the card still extends through the forecast while showing the past week.
 
 type: custom:statistics-graph-chart-card
 card_header: Spot
