@@ -1,10 +1,8 @@
 # Spot prices: realized past + live Nordpool forecast
 # (`sensor.nordpool_spot` attribute `raw`).
 #
-# Needs the generic helper in custom_components/nordpool_spot (copy from
-# this repo's homeassistant/custom_components/nordpool_spot) and:
-#   nordpool_spot:
-# in configuration.yaml. It only reads `sensor.nordpool`.
+# Helper YAML: `homeassistant/nordpool_spot.yaml` (trigger-based template,
+# include as a package). Only reads `sensor.nordpool`.
 #
 # Paste this card into a Lovelace dashboard (raw editor). Needs
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
