@@ -3,8 +3,10 @@
 # Spot chart needs HACS
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
 # Leftover chart needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
-# Spot bars come from `sensor.kotiakku_goe_direct_spot` (`raw`: realized past
-# plus live Nordpool through the last forecast slot).
+# Spot bars come from `sensor.nordpool_spot` (`raw`: realized past plus live
+# Nordpool through the last forecast slot). Copy
+# `homeassistant/custom_components/nordpool_spot` into HA custom_components
+# and add `nordpool_spot:` to configuration.yaml (reads `sensor.nordpool`).
 #
 # Paste this file as a YAML dashboard, or paste the `views:` list into a
 # UI dashboard's raw editor. Spot-only card:
@@ -91,7 +93,7 @@ views:
             state_strip_height: 10
             state_strip_labels: false
             entities:
-              - entity: sensor.kotiakku_goe_direct_spot
+              - entity: sensor.nordpool_spot
                 name: Spot
                 graph_type: bar
                 data_attribute: raw

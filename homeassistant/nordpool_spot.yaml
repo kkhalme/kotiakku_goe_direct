@@ -1,0 +1,9 @@
+# Generic Nordpool spot helper. Copy
+# custom_components/nordpool_spot into HA custom_components, then either
+# include this package or add the same key to configuration.yaml.
+#
+# Only input is the Nordpool sensor (default sensor.nordpool).
+# Creates sensor.nordpool_spot with attribute `raw` for charts.
+
+nordpool_spot:
+  # entity_id: sensor.nordpool

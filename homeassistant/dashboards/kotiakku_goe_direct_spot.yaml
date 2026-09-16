@@ -1,5 +1,10 @@
 # Spot prices: realized past + live Nordpool forecast
-# (`sensor.kotiakku_goe_direct_spot` attribute `raw`).
+# (`sensor.nordpool_spot` attribute `raw`).
+#
+# Needs the generic helper in custom_components/nordpool_spot (copy from
+# this repo's homeassistant/custom_components/nordpool_spot) and:
+#   nordpool_spot:
+# in configuration.yaml. It only reads `sensor.nordpool`.
 #
 # Paste this card into a Lovelace dashboard (raw editor). Needs
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
@@ -18,7 +23,7 @@ show_now_line: true
 state_strip_height: 10
 state_strip_labels: false
 entities:
-  - entity: sensor.kotiakku_goe_direct_spot
+  - entity: sensor.nordpool_spot
     name: Spot
     graph_type: bar
     data_attribute: raw

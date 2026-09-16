@@ -83,8 +83,6 @@ from .const import (
     charger_on_mqtt,
     keep_phase_psm,
     restore_policy,
-    SPOT_KEEP_DAYS,
-    SPOT_STORAGE_KEY,
     STORAGE_KEY,
     STORAGE_VERSION,
     SURPLUS_EIDS,
@@ -105,15 +103,9 @@ from .planner import (
     charger_mqtt_role,
     charger_mqtt_status_value,
     charger_surplus as policy_surplus,
-    collect_slots,
-    current_spot_price,
-    merge_spot_series,
     mqtt_apply_window_action,
-    normalize_spot_slots,
     now_in_windows,
     plan,
-    slots_from_state_history,
-    spot_raw_from_slots,
     tomorrow_prices_ok as planner_tomorrow_prices_ok,
     keep_until_unplug_step,
     restore_keep_phase,
@@ -268,14 +260,6 @@ class KotiakkuGoeDirectController:
         self._last_policy = {s: POLICY_FORCE_OFF for s in self.chargers}
         self._charge_session = {s: False for s in self.chargers}
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-        self._spot_store = Store(hass, STORAGE_VERSION, SPOT_STORAGE_KEY)
-        self._spot_slots = []
-        self._spot_backfilled = False
-        self.spot_price = None
-        self.spot_unit = None
-        self.spot_raw = []
-        self.spot_source = None
-        self.spot_forecast_end = None
         self._listeners = []
         self._surplus_listeners = []
         self._last_surplus_sensor_w = object()
@@ -822,10 +806,6 @@ class KotiakkuGoeDirectController:
                     self._keep_probe_since[serial] = float(raw)
                 except (TypeError, ValueError):
                     self._keep_probe_since[serial] = None
-        spot_stored = await self._spot_store.async_load()
-        if spot_stored:
-            self._spot_slots = normalize_spot_slots(spot_stored.get("slots"))
-            self._spot_backfilled = True
         await self._refresh_source_entities()
         track = [
             self.soc_entity,
@@ -926,90 +906,6 @@ class KotiakkuGoeDirectController:
                 "keep_probe_since": self._keep_probe_since,
             }
         )
-
-    async def _save_spot(self):
-        await self._spot_store.async_save({"slots": self._spot_slots})
-
-    async def _backfill_spot(self, price_entity, now_dt):
-        """First-run past from recorder history of the Nordpool entity.
-
-        Only slots that end at or before local today, so live `raw_today`
-        is not doubled. Failures are ignored.
-        """
-        if not price_entity:
-            return []
-        try:
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder import history as rec_history
-        except ImportError:
-            return []
-        try:
-            today_start = self.clock.start_of_local_day(now_dt)
-            start = today_start - timedelta(days=SPOT_KEEP_DAYS)
-            instance = get_instance(self.hass)
-            states_map = await instance.async_add_executor_job(
-                rec_history.get_significant_states,
-                self.hass,
-                start,
-                today_start,
-                [price_entity],
-            )
-            rows = (states_map or {}).get(price_entity) or []
-            today_ts = float(self.clock.as_timestamp(today_start))
-            keep_after = today_ts - (SPOT_KEEP_DAYS * 86400)
-            slots = slots_from_state_history(
-                self.clock, rows, period_end_ts=today_ts
-            )
-            return [
-                slot
-                for slot in slots
-                if slot[1] <= today_ts and slot[0] >= keep_after
-            ]
-        except Exception:
-            _LOGGER.debug(
-                "kotiakku_goe_direct: spot history backfill skipped",
-                exc_info=True,
-            )
-            return []
-
-    async def _refresh_spot(self, price_entity, attrs):
-        now = self.clock.now()
-        if not self._spot_backfilled and not self._spot_slots:
-            backfill = await self._backfill_spot(price_entity, now)
-            self._spot_backfilled = True
-            if backfill:
-                self._spot_slots = backfill
-        live = collect_slots(self.clock, attrs or {}, now)
-        merged = merge_spot_series(
-            self.clock, self._spot_slots, live, now, keep_days=SPOT_KEEP_DAYS
-        )
-        now_ts = float(self.clock.as_timestamp(now))
-        realized = [slot for slot in merged if slot[1] <= now_ts]
-        changed = realized != self._spot_slots
-        self._spot_slots = realized
-        self.spot_price = current_spot_price(merged, now_ts)
-        source = self.hass.states.get(price_entity) if price_entity else None
-        unit = None if source is None else source.attributes.get("unit_of_measurement")
-        self.spot_unit = unit or None
-        self.spot_raw = spot_raw_from_slots(self.clock, merged)
-        self.spot_source = price_entity or None
-        self.spot_forecast_end = None
-        if merged:
-            try:
-                self.spot_forecast_end = self.clock.utc_from_timestamp(
-                    merged[-1][1]
-                ).isoformat()
-            except Exception:
-                self.spot_forecast_end = None
-        _LOGGER.debug(
-            "kotiakku_goe_direct: spot slots=%s realized=%s forecast_end=%s source=%s",
-            len(merged),
-            len(realized),
-            self.spot_forecast_end,
-            self.spot_source,
-        )
-        if changed:
-            await self._save_spot()
 
     def _retarget_price(self):
         entity = self.price_entity_id()
@@ -1283,10 +1179,6 @@ class KotiakkuGoeDirectController:
         price_entity = self.price_entity_id()
         source = self.hass.states.get(price_entity) if price_entity else None
         attrs = None if source is None else dict(source.attributes)
-        try:
-            await self._refresh_spot(price_entity, attrs)
-        except Exception:
-            _LOGGER.debug("kotiakku_goe_direct: spot refresh failed", exc_info=True)
         min_hours = self._float_entity(EID_MIN, DEFAULT_MIN_HOURS)
         max_hours = self._float_entity(EID_MAX, DEFAULT_MAX_HOURS)
         ceiling = self._float_entity(EID_CEILING, DEFAULT_CEILING)
