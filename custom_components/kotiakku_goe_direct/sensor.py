@@ -201,6 +201,7 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
 class AvailableSurplusSensor(HubEntity, SensorEntity):
     """Leftover watts still free for surplus chargers (after keep take)."""
 
+    _listen_surplus_only = True
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfPower.WATT

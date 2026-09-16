@@ -38,7 +38,7 @@ views:
               Spot **{{ states(price) if price else '—' }}** {{ state_attr(price, 'unit_of_measurement') or '' }}
               · leftover **{{ leftover | round(2) if leftover is not none else '—' }} kW**
               (`sensor.kotiakku_goe_direct_available_surplus`)
-              · window {{ states('sensor.kotiakku_goe_direct_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_window', 'end') }}.
+              · windows {% set wins = state_attr('sensor.kotiakku_goe_direct_window', 'windows') or [] %}{% if wins %}{% for w in wins %}{{ w.start }} → {{ w.end }}{% if not loop.last %}; {% endif %}{% endfor %}{% else %}{{ states('sensor.kotiakku_goe_direct_window') }} → {{ state_attr('sensor.kotiakku_goe_direct_window', 'end') }}{% endif %}.
 
               Delete charger 2 cards/series if you only have one charger. Leftover
               chart sources: `sensor.solar_power`, `sensor.house_power`,

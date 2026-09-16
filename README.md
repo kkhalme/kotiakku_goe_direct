@@ -37,13 +37,13 @@ Leftover:
 available_w = |solar_w| − |house_w| + |ev_w|
 ```
 
-That leftover after keep take is `sensor.kotiakku_goe_direct_available_surplus` (watts). Unknown when Kotiakku SoC / solar / house cannot be read.
-
 Solar is generation, house is consumption (including the cars). EV watts come from charger `nrg` when known, otherwise the **Controller** Car-power 5-min mean. Use the magnitude of solar, house, and EV (an inverted CT can make Car negative). **Do not abs `available_w`.** A negative leftover is a deficit.
 
 Leftover is `solar − house + EV` only when house already contains the car. If house is clearly below the EV take (house CT misses the charger, or the Controller mean still includes a car that unplugged), EV is **not** added back — that would invent ~3 kW of surplus and keep charging from the grid.
 
 If the Controller mean is `unknown` (typical when nothing is charging) and no charger `nrg` is known, EV is **0 W**. House then has no car in it, so leftover is solar − house.
+
+`available_w` (`leftover_w` on the sensor) is that leftover before keep take. Watts still free for surplus chargers after subtracting keep `nrg` are `sensor.kotiakku_goe_direct_available_surplus`. Unknown when Kotiakku SoC / solar / house cannot be read.
 
 Unknown SoC, solar, or house → treat as a blocked window. MQTT waits **2 s** after the first intended write (later sensor ticks in that window do not restart the timer). At flush, leftover and 22 kW are recomputed from **current** sensors. The same command is sent only if live go-e `frc` / `amp` / `lot` / `psm` differ. The 15 min interval is the safety net.
 
@@ -216,8 +216,8 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_after_charge_complete_keep_a` | 6 A | Keep per-charger `amp` (6–32) |
 | `number.kotiakku_goe_direct_window_min_h` / `kotiakku_goe_direct_window_max_h` | 2–5 h | Seed length and grow cap. Equal min/max is a fixed-length window. Min 0.25 h is one 15-minute slot |
 | `number.kotiakku_goe_direct_window_flex_pct` / `kotiakku_goe_direct_window_flex_eur` | 20 / 0.02 | Grow may raise the window average by the looser of these above the seed. Both 0: no grow |
-| `sensor.kotiakku_goe_direct_window` | planned start | Planned window, including one that already ended. State is the start timestamp; `end`, avg, and `window_N_*` are attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on while now is inside a window |
-| `sensor.kotiakku_goe_direct_available_surplus` | leftover W | Watts still free for surplus chargers: `|solar| − |house| + EV` then minus keep take. Unknown when Kotiakku SoC / solar / house are unusable. Attributes: `solar_w`, `house_w`, `leftover_w`, `keep_take_w` |
+| `sensor.kotiakku_goe_direct_window` | planned start | Planned window, including one that already ended. State is the start timestamp; `end`, avg, `windows`, and `window_N_*` are attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on while now is inside a window |
+| `sensor.kotiakku_goe_direct_available_surplus` | leftover W | Watts still free for surplus chargers: `|solar| − |house| + EV` then minus keep take. Unknown when Kotiakku SoC / solar / house are unusable. Attributes: `solar_w`, `house_w`, `leftover_w` (before keep), `keep_take_w` |
 | `number.kotiakku_goe_direct_electricity_price_ceiling` | 0.2 | Safety: no window if the cheapest seed average is above this. Grow will not add a slot above it |
 | `text.kotiakku_goe_direct_electricity_price_sensor` | from setup | Electricity price sensor id |
 | `number.kotiakku_goe_direct_soc_on_pct` / `kotiakku_goe_direct_soc_hyst_pct` | 92 / 2 | Surplus SoC start (92%) and low-hold below 90% |
