@@ -80,6 +80,7 @@ class WindowSensor(HubEntity, SensorEntity):
         result.pop("raw_windows", None)
         result.pop("horizon_ts", None)
         result.pop("blocked_ts", None)
+        result["raw"] = self._controller.spot_raw()
         return result
 
 

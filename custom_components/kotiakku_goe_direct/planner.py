@@ -168,6 +168,22 @@ def _parse_series(clock, series, day_start_ts):
     return _slots_from_values(series, day_start_ts)
 
 
+def _as_series_list(value):
+    if value is None or value == "" or value == []:
+        return []
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _is_object_series(items):
+    if not items:
+        return True
+    first = items[0]
+    return isinstance(first, dict)
+
+
 def collect_slots(clock, attrs, now_dt):
     today_raw = _first_present(attrs, ["raw_today", "raw_today_prices", "today"])
     tomorrow_raw = _first_present(
@@ -186,6 +202,34 @@ def collect_slots(clock, attrs, now_dt):
     slots.extend(_parse_series(clock, tomorrow_raw, tomorrow_start))
     slots.sort()
     return slots
+
+
+def concat_raw_prices(clock, attrs, now_dt=None):
+    """Today then tomorrow as one ``{start, end, value}`` list for the spot chart.
+
+    statistics-graph-chart-card reads a single ``data_attribute`` array. Nordpool
+    splits the curve across ``raw_today`` / ``raw_tomorrow``, so concatenate here
+    instead of two bar series (grouped bars / a gap at midnight).
+    """
+    if not attrs:
+        return []
+    today_list = _as_series_list(
+        _first_present(attrs, ["raw_today", "raw_today_prices", "today"])
+    )
+    tomorrow_list = _as_series_list(
+        _first_present(attrs, ["raw_tomorrow", "raw_tomorrow_prices", "tomorrow"])
+    )
+    if _is_object_series(today_list) and _is_object_series(tomorrow_list):
+        return today_list + tomorrow_list
+    if now_dt is None:
+        try:
+            now_dt = clock.now()
+        except Exception:
+            return []
+    return [
+        {"start": _iso(clock, start), "end": _iso(clock, end), "value": price}
+        for start, end, price in collect_slots(clock, attrs, now_dt)
+    ]
 
 
 def tomorrow_ok(clock, attrs, slots):

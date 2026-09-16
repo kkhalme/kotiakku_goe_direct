@@ -10,7 +10,8 @@
 # dashboards/kotiakku_goe_direct_spot.yaml
 #
 # Edit leftover chart inputs (solar / house / Controller mean) and charger
-# serials 111111 / 222222. Spot entity is `sensor.nordpool`.
+# serials 111111 / 222222. Spot bars are `sensor.kotiakku_goe_direct_window`
+# `raw` (configured Nordpool today+tomorrow concatenated).
 #
 # configuration.yaml (optional YAML dashboard):
 #   lovelace:
@@ -89,10 +90,10 @@ views:
             state_strip_height: 10
             state_strip_labels: false
             entities:
-              - entity: sensor.nordpool
+              - entity: sensor.kotiakku_goe_direct_window
                 name: Spot
                 graph_type: bar
-                data_attribute: raw_today, raw_tomorrow
+                data_attribute: raw
                 data_time_field: start
                 data_value_field: value
                 decimals: 3
