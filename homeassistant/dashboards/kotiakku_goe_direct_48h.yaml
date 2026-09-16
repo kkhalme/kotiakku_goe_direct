@@ -3,14 +3,16 @@
 # Spot chart needs HACS
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
 # Leftover chart needs HACS [apexcharts-card](https://github.com/RomRider/apexcharts-card).
-# No extra helpers. Spot concat is a template on the chart entity.
+# Spot bars come from `sensor.kotiakku_goe_direct_spot` (`raw`: realized past
+# plus live Nordpool through the last forecast slot).
 #
 # Paste this file as a YAML dashboard, or paste the `views:` list into a
 # UI dashboard's raw editor. Spot-only card:
 # dashboards/kotiakku_goe_direct_spot.yaml
 #
 # Edit leftover chart inputs (solar / house / Controller mean) and charger
-# serials 111111 / 222222. Spot entity is `sensor.nordpool`.
+# serials 111111 / 222222. Week view: `hours_to_show: 168` and drop
+# `graph_start` / `graph_end_hour`.
 #
 # configuration.yaml (optional YAML dashboard):
 #   lovelace:
@@ -89,10 +91,10 @@ views:
             state_strip_height: 10
             state_strip_labels: false
             entities:
-              - entity: sensor.nordpool
+              - entity: sensor.kotiakku_goe_direct_spot
                 name: Spot
                 graph_type: bar
-                data_attribute: "{{ ((state_attr('sensor.nordpool', 'raw_today') or []) + (state_attr('sensor.nordpool', 'raw_tomorrow') or [])) | tojson }}"
+                data_attribute: raw
                 data_time_field: start
                 data_value_field: value
                 decimals: 3

@@ -14,12 +14,14 @@ from .const import (
     EID_SOLAR_KWH,
     EID_SOLAR_TODAY_KWH,
     EID_SOLAR_TOMORROW_KWH,
+    EID_SPOT,
     EID_WINDOW,
     SOLAR_GATING_DAY_UNIQUE_ID,
     SOLAR_GATING_KWH_UNIQUE_ID,
     SOLAR_KWH_UNIQUE_ID,
     SOLAR_TODAY_UNIQUE_ID,
     SOLAR_TOMORROW_UNIQUE_ID,
+    SPOT_SENSOR_UNIQUE_ID,
     WINDOW_SENSOR_UNIQUE_ID,
     migrate_group_lot_entities,
     migrate_window_entities,
@@ -45,6 +47,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(
         [
             WindowSensor(controller),
+            SpotSensor(controller),
             AvailableSurplusSensor(controller),
             ForecastSolarSensor(controller),
             SolarTodaySensor(controller),
@@ -81,6 +84,36 @@ class WindowSensor(HubEntity, SensorEntity):
         result.pop("horizon_ts", None)
         result.pop("blocked_ts", None)
         return result
+
+
+class SpotSensor(HubEntity, SensorEntity):
+    """Nordpool past (realized) plus live forecast through the last slot."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-bar"
+    _attr_suggested_display_precision = 3
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self.entity_id = EID_SPOT
+        self._attr_unique_id = SPOT_SENSOR_UNIQUE_ID
+        self._attr_name = "Spot"
+
+    @property
+    def native_value(self):
+        return self._controller.spot_price
+
+    @property
+    def native_unit_of_measurement(self):
+        return self._controller.spot_unit
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "raw": self._controller.spot_raw,
+            "source": self._controller.spot_source,
+            "forecast_end": self._controller.spot_forecast_end,
+        }
 
 
 class _ForecastKwhSensor(HubEntity, SensorEntity):

@@ -1319,8 +1319,90 @@ def main():
             "equal leftover 17 A must not sum to 34 A",
         )
 
+    def test_merge_spot_series():
+        import json
+
+        slot = 900
+        now = datetime.datetime(2026, 3, 15, 10, 32, tzinfo=timezone.utc)
+        clock = Clock(now)
+        t0 = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc).timestamp()
+        s1 = [t0, t0 + slot, 0.10]
+        s2 = [t0 + slot, t0 + 2 * slot, 0.11]
+        s3 = [t0 + 2 * slot, t0 + 3 * slot, 0.12]
+        s4 = [t0 + 3 * slot, t0 + 4 * slot, 0.13]
+        live = [
+            [t0, t0 + slot, 0.99],
+            [t0 + slot, t0 + 2 * slot, 0.11],
+            s3,
+            s4,
+        ]
+        stored = [s1, s2]
+        merged = planner.merge_spot_series(clock, stored, live, now)
+        assert_eq(merged[0][2], 0.10, "ended slot stays frozen")
+        assert_eq(merged[1][2], 0.11, "previous ended slot stays")
+        assert_eq(merged[2], s3, "current slot follows live")
+        assert_eq(merged[3], s4, "forecast follows live")
+        assert_eq(planner.current_spot_price(merged, now.timestamp()), 0.12, "now in current slot")
+        raw = planner.spot_raw_from_slots(clock, merged)
+        assert_eq(len(raw), 4, "raw length")
+        assert_eq(raw[0]["value"], 0.10, "raw value")
+        assert_true("T" in raw[-1]["end"], "raw iso end")
+
+        old_future = [t0 + 3 * slot, t0 + 4 * slot, 0.20]
+        replaced = planner.merge_spot_series(
+            clock, [s1, old_future], live, now
+        )
+        by_start = {slot[0]: slot[2] for slot in replaced}
+        assert_eq(by_start[t0 + 3 * slot], 0.13, "live forecast replaces stored future")
+        assert_eq(0.20 in by_start.values(), False, "stale forecast dropped")
+
+        empty_live = planner.merge_spot_series(
+            clock, [s1, s4], [], now
+        )
+        assert_eq(len(empty_live), 2, "empty live keeps stored past and forecast")
+        assert_eq(empty_live[1][2], 0.13, "kept last forecast")
+
+        first = planner.merge_spot_series(clock, [], live, now)
+        assert_eq(len(first), 4, "first collection uses full live curve")
+        assert_eq(first[0][2], 0.99, "unfrozen past comes from live")
+
+        old = [
+            t0 - (9 * 86400),
+            t0 - (9 * 86400) + slot,
+            0.01,
+        ]
+        trimmed = planner.merge_spot_series(clock, [old, s1], live, now, keep_days=8)
+        assert_eq(
+            any(slot[2] == 0.01 for slot in trimmed),
+            False,
+            "slots older than keep window trimmed",
+        )
+
+        payload = json.loads(json.dumps({"slots": [s1, s2]}))["slots"]
+        roundtrip = planner.merge_spot_series(clock, payload, live, now)
+        assert_eq(roundtrip[0][2], 0.10, "json store roundtrip keeps realized")
+
+        hist = [
+            {"state": "0.04", "last_changed": clock.utc_from_timestamp(t0 - 1800)},
+            {"state": "unavailable", "last_changed": clock.utc_from_timestamp(t0 - 1200)},
+            {"state": "0.05", "last_changed": clock.utc_from_timestamp(t0 - 900)},
+        ]
+        from_hist = planner.slots_from_state_history(clock, hist, period_end_ts=t0)
+        assert_eq(from_hist[0][2], 0.04, "unavailable does not make a slot")
+        assert_eq(from_hist[-1][2], 0.05, "last history price")
+        assert_eq(from_hist[-1][1], t0, "last history slot ends at period end")
+        hour = [{"state": "0.04", "last_changed": clock.utc_from_timestamp(t0 - 3600)}]
+        split = planner.slots_from_state_history(clock, hour, period_end_ts=t0)
+        assert_eq(len(split), 4, "one-hour history run splits into 15 min slots")
+        assert_eq(
+            planner.normalize_spot_slots([[1, 0, 1], ["x"], [1, 2, 3]]),
+            [[1.0, 2.0, 3.0]],
+            "normalize drops junk",
+        )
+
     case("surplus_allocations_steal_second_charger_floor", test_surplus_allocations_steal_second_charger_floor)
     case("phase_hold_both_directions", test_phase_hold_both_directions)
+    case("merge_spot_series", test_merge_spot_series)
 
     run()
 
