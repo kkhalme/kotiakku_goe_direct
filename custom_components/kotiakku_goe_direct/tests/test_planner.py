@@ -394,26 +394,6 @@ def main():
         none_ceil = plan(clock, {"raw_today": hourly}, ceiling=None, flex_pct=0, flex_euro=0)
         assert_eq(none_ceil["ceiling"], 0.2, "None ceiling uses default 0.2")
 
-    def test_concat_raw_prices_today_then_tomorrow():
-        clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
-        today = slots_from(base, [0.11, 0.12])
-        tomorrow = slots_from(base + 86400, [0.21])
-        joined = planner.concat_raw_prices(
-            clock, {"raw_today": today, "raw_tomorrow": tomorrow}
-        )
-        assert_eq(joined, today + tomorrow, "object series concatenates in order")
-        today_only = planner.concat_raw_prices(clock, {"raw_today": today})
-        assert_eq(today_only, today, "missing tomorrow is today only")
-        assert_eq(planner.concat_raw_prices(clock, {}), [], "empty attrs")
-        assert_eq(planner.concat_raw_prices(clock, None), [], "none attrs")
-        numeric = planner.concat_raw_prices(
-            clock, {"raw_today": [0.04] * 2, "raw_tomorrow": [0.08]}
-        )
-        assert_eq(len(numeric), 3, "numeric today+tomorrow becomes three slots")
-        assert_eq(numeric[0]["value"], 0.04, "first today value")
-        assert_eq(numeric[-1]["value"], 0.08, "last tomorrow value")
-        assert_true(numeric[0]["start"] < numeric[-1]["start"], "today before tomorrow")
-
     def test_current_or_next_and_flex_attrs():
         clock = Clock(datetime.datetime.fromtimestamp(base, tz=timezone.utc))
         first = plan(clock, {"raw_today": slots_from(base, [0.04] * 16)}, flex_pct=20, flex_euro=0.02)
@@ -658,7 +638,6 @@ def main():
 
     case("keep_until_unplug", test_keep_until_unplug)
     case("collect_slots_hourly_and_half_hour", test_collect_slots_hourly_and_half_hour)
-    case("concat_raw_prices_today_then_tomorrow", test_concat_raw_prices_today_then_tomorrow)
     case("current_or_next_and_flex_attrs", test_current_or_next_and_flex_attrs)
     case("horizon_tomorrow_only_and_zero_today", test_horizon_tomorrow_only_and_zero_today)
 

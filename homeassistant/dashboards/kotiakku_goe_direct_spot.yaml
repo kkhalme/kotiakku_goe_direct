@@ -2,10 +2,8 @@
 #
 # Paste this card into a Lovelace dashboard (raw editor). Needs
 # [statistics-graph-chart-card](https://github.com/cataseven/Statistics-Graph-Chart-Card).
-# The card reads one `data_attribute` array, so the bar series is
-# `sensor.kotiakku_goe_direct_window` `raw` (configured Nordpool `raw_today`
-# concatenated with `raw_tomorrow`). Replace charger serials 111111 / 222222
-# (delete charger 2 if you only have one).
+# Change `sensor.nordpool` if your Nordpool entity id differs. Replace charger
+# serials 111111 / 222222 (delete charger 2 if you only have one).
 
 type: custom:statistics-graph-chart-card
 card_header: Spot
@@ -17,10 +15,10 @@ show_now_line: true
 state_strip_height: 10
 state_strip_labels: false
 entities:
-  - entity: sensor.kotiakku_goe_direct_window
+  - entity: sensor.nordpool
     name: Spot
     graph_type: bar
-    data_attribute: raw
+    data_attribute: "{{ ((state_attr('sensor.nordpool', 'raw_today') or []) + (state_attr('sensor.nordpool', 'raw_tomorrow') or [])) | tojson }}"
     data_time_field: start
     data_value_field: value
     decimals: 3

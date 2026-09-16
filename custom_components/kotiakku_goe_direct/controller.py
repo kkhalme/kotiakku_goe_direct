@@ -103,7 +103,6 @@ from .planner import (
     charger_mqtt_role,
     charger_mqtt_status_value,
     charger_surplus as policy_surplus,
-    concat_raw_prices,
     mqtt_apply_window_action,
     now_in_windows,
     plan,
@@ -457,17 +456,6 @@ class KotiakkuGoeDirectController:
 
     def price_entity_id(self):
         return self._text_entity(EID_PRICE, str(self._config_price).strip())
-
-    def price_attrs(self):
-        price_entity = self.price_entity_id()
-        source = self.hass.states.get(price_entity) if price_entity else None
-        if source is None:
-            return {}
-        return dict(source.attributes)
-
-    def spot_raw(self):
-        """Nordpool today+tomorrow as one list for the statistics-graph-chart-card."""
-        return concat_raw_prices(self.clock, self.price_attrs())
 
     def _ha_state(self, entity_id):
         if not entity_id:
