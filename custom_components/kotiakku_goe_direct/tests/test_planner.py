@@ -1382,6 +1382,19 @@ def main():
         roundtrip = planner.merge_spot_series(clock, payload, live, now)
         assert_eq(roundtrip[0][2], 0.10, "json store roundtrip keeps realized")
 
+        week_stored = []
+        t = t0 - 7 * 86400
+        while t + slot <= t0:
+            week_stored.append([t, t + slot, 0.08])
+            t += 3600
+        week = planner.merge_spot_series(clock, week_stored, live, now)
+        assert_true(
+            week[0][0] <= now.timestamp() - 6 * 86400,
+            "week chart still has past slots",
+        )
+        assert_true(week[-1][1] > now.timestamp(), "week chart still extends into forecast")
+        assert_eq(week[-1], s4, "forecast tail is the last live slot")
+
         hist = [
             {"state": "0.04", "last_changed": clock.utc_from_timestamp(t0 - 1800)},
             {"state": "unavailable", "last_changed": clock.utc_from_timestamp(t0 - 1200)},
