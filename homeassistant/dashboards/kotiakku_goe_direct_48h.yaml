@@ -11,8 +11,7 @@
 # dashboards/kotiakku_goe_direct_spot.yaml
 #
 # Edit leftover chart inputs (solar / house / Controller mean) and charger
-# serials 111111 / 222222. Week view: `hours_to_show: 168` and drop
-# `graph_start` / `graph_end_hour`.
+# serials 111111 / 222222.
 #
 # configuration.yaml (optional YAML dashboard):
 #   lovelace:
