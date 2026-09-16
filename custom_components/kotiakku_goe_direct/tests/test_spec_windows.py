@@ -2,7 +2,10 @@
 
 One cheapest windowMinHours seed, grown under flex (looser of % of
 |seed| and €) up to windowMaxHours. Off-sun hours are blocked. Ceiling
-is a seed-average abort and a grow hard-no. Result is still a windows list.
+is a seed-average abort and a grow hard-no. A second window is added when
+tomorrow is searchable and the first window does not overlap local
+today 22:00 through the end of tomorrow; that follow-up's seed is in
+tomorrow. Result is a windows list; abutting windows are a 22 kW union.
 """
 
 from __future__ import annotations
@@ -661,6 +664,11 @@ def main():
             both_today["raw_windows"][0]["end"] <= base + 86400 + 1,
             "both forecasts: cheaper today wins",
         )
+        assert_eq(both_today["count"], 2, "today morning misses 22:00–tomorrow: follow-up")
+        assert_true(
+            both_today["raw_windows"][1]["start"] >= base + 86400 - 1,
+            "follow-up seed stays in tomorrow (flex 0)",
+        )
         both_tom = plan(
             clock,
             {
@@ -710,6 +718,8 @@ def main():
         held = plan(clock, expensive_tom, flex_pct=0, flex_euro=0)
         assert_eq(held["reason"], "planned", "dearer tomorrow does not beat today")
         assert_eq(held["raw_windows"][0]["start"], first["raw_windows"][0]["start"], "keep today's cheaper set")
+        assert_eq(held["count"], 2, "today morning plus tomorrow follow-up")
+        assert_eq(held["window_2_start"], held["windows"][1]["start"], "window_2 filled")
         started = plan(
             clock, {"raw_today": slots_from(base, [0.09] * 16)}, flex_pct=0, flex_euro=0
         )
@@ -760,6 +770,120 @@ def main():
         empty = choose([], 2.0, 5.0, 0.2, flex_pct=0, flex_euro=0)
         assert_eq(empty["reason"], "no_slots", "no price slots")
 
+    def test_followup_when_first_misses_overnight():
+        clock = Clock(datetime.datetime.fromtimestamp(base + 15 * 3600, tz=timezone.utc))
+        bounds = planner.local_overnight_bounds(clock, clock.now())
+        today_22, tomorrow_start, day_after = bounds
+        assert_eq(today_22, base + 22 * 3600, "UTC 22:00")
+        morning = slots_from(base, [0.01] * 8 + [0.20] * 8)
+        evening = slots_from(base + 21 * 3600, [0.04] * 12)
+        tomorrow_night = slots_from(base + 86400, [0.05] * 16)
+        tomorrow_rest = slots_from(base + 86400 + 4 * 3600, [0.20] * 16)
+        attrs = {
+            "raw_today": morning + evening,
+            "raw_tomorrow": tomorrow_night + tomorrow_rest,
+        }
+        two = plan(clock, attrs, flex_pct=20, flex_euro=0.02)
+        assert_eq(two["count"], 2, "morning winner plus tomorrow follow-up")
+        assert_eq(two["raw_windows"][0]["start"], base, "cheapest is still this morning")
+        assert_true(
+            not planner.window_overlaps_span(two["raw_windows"][0], today_22, day_after),
+            "first window misses 22:00–tomorrow end",
+        )
+        follow = two["raw_windows"][1]
+        assert_true(follow["start"] < tomorrow_start + 1, "follow-up may start today")
+        assert_true(follow["end"] > tomorrow_start, "follow-up touches tomorrow")
+        seed_ok = follow["end"] > tomorrow_start and follow["start"] < day_after
+        assert_true(seed_ok, "follow-up touches tomorrow hours")
+        assert_true(
+            follow["start"] >= base + 21 * 3600 - 1,
+            "grew into today's evening, not this morning",
+        )
+        already = plan(
+            clock,
+            {
+                "raw_today": slots_from(base + 21 * 3600, [0.02] * 20),
+                "raw_tomorrow": slots_from(base + 86400, [0.10] * 16),
+            },
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(already["count"], 1, "window starting 21:00 grows/covers past 22:00")
+        assert_true(
+            planner.window_overlaps_span(already["raw_windows"][0], today_22, day_after),
+            "21:00 window touches overnight span",
+        )
+        ends_at_22 = plan(
+            clock,
+            {
+                "raw_today": slots_from(base + 20 * 3600, [0.02] * 8),
+                "raw_tomorrow": slots_from(base + 86400, [0.10] * 16),
+            },
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(ends_at_22["raw_windows"][0]["end"], today_22, "2 h window ends at 22:00")
+        assert_eq(ends_at_22["count"], 2, "end==22:00 does not cover [22:00, tomorrow)")
+        starts_at_22 = plan(
+            clock,
+            {
+                "raw_today": slots_from(today_22, [0.02] * 8),
+                "raw_tomorrow": slots_from(base + 86400 + 2 * 3600, [0.10] * 16),
+            },
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(starts_at_22["count"], 1, "window starting at 22:00 already covers overnight")
+        no_tom = plan(
+            clock,
+            {"raw_today": morning},
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(no_tom["count"], 1, "no tomorrow prices: no follow-up")
+        dear_tom = plan(
+            clock,
+            {
+                "raw_today": morning,
+                "raw_tomorrow": slots_from(base + 86400, [0.40] * 16),
+            },
+            flex_pct=0,
+            flex_euro=0,
+        )
+        assert_eq(dear_tom["count"], 1, "tomorrow seed over ceiling: no follow-up")
+        hel = Clock(
+            datetime.datetime(2026, 3, 15, 15, 0, tzinfo=datetime.timezone.utc),
+            tz=datetime.timezone(datetime.timedelta(hours=2)),
+        )
+        hel_bounds = planner.local_overnight_bounds(hel, hel.now())
+        local_midnight = hel.start_of_local_day(hel.now())
+        expect_22 = hel.as_timestamp(local_midnight.replace(hour=22))
+        assert_eq(hel_bounds[0], expect_22, "22:00 is local, not UTC")
+
+    def test_union_windows_keep_full_power_on_the_seam():
+        first = {"start": 1000, "end": 2000, "avg": 0.01}
+        second = {"start": 2000, "end": 3000, "avg": 0.02}
+        result = {"raw_windows": [first, second]}
+        assert_eq(now_in_windows([first, second], 1999), True, "inside first")
+        assert_eq(now_in_windows([first, second], 2000), True, "on at abutment (second starts)")
+        assert_eq(now_in_windows([first], 2000), False, "first alone is off at end")
+        assert_eq(
+            charger_full_power("SolarPriority", result, 2000),
+            True,
+            "22 kW stays on across the seam",
+        )
+        assert_eq(
+            charger_full_power("SolarPriority", result, 2500),
+            True,
+            "22 kW in the second window",
+        )
+        overlap = {"raw_windows": [first, {"start": 1500, "end": 3000, "avg": 0.02}]}
+        assert_eq(
+            charger_full_power("SolarPriority", overlap, 1800),
+            True,
+            "overlap is a union",
+        )
+
     case("clamp_and_flex_defaults", test_clamp_and_flex_defaults)
     case("seed_is_cheapest_min_hours", test_seed_is_cheapest_min_hours)
     case("grow_cheaper_side_and_flex_or", test_grow_cheaper_side_and_flex_or)
@@ -785,6 +909,8 @@ def main():
     case("horizon_clip_combinations", test_horizon_clip_combinations)
     case("price_change_replans_without_prev", test_price_change_replans_without_prev)
     case("finished_window_stays_the_plan", test_finished_window_stays_the_plan)
+    case("followup_when_first_misses_overnight", test_followup_when_first_misses_overnight)
+    case("union_windows_keep_full_power_on_the_seam", test_union_windows_keep_full_power_on_the_seam)
     run()
 
 

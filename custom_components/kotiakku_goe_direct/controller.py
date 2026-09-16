@@ -137,6 +137,7 @@ from .surplus import (
     last_usable_solar_end_ts as forecast_last_usable_end,
     leftover_w,
     leftover_for_surplus,
+    keep_take_w,
     group_lot_for_allocations,
     group_lot_for_amps,
     group_surplus_setpoint,
@@ -260,6 +261,8 @@ class KotiakkuGoeDirectController:
         self._charge_session = {s: False for s in self.chargers}
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._listeners = []
+        self._surplus_listeners = []
+        self._last_surplus_sensor_w = object()
         self._unsubs = []
         self._apply_unsub = None
         self._floor_unsub = None
@@ -305,18 +308,30 @@ class KotiakkuGoeDirectController:
         self._keep_enable_ids = {self.keep_min_enable_entity(s) for s in self.chargers}
         self._keep_ids = {self.keep_min_entity(s) for s in self.chargers}
 
-    def listen(self, callback):
-        self._listeners.append(callback)
+    def listen(self, callback, surplus_only=False):
+        bucket = self._surplus_listeners if surplus_only else self._listeners
+        bucket.append(callback)
 
         def _remove():
-            if callback in self._listeners:
-                self._listeners.remove(callback)
+            if callback in bucket:
+                bucket.remove(callback)
 
         return _remove
 
-    def notify(self):
-        for callback in list(self._listeners):
+    def notify(self, surplus_only=False):
+        if surplus_only:
+            callbacks = list(self._surplus_listeners)
+        else:
+            callbacks = list(self._listeners) + list(self._surplus_listeners)
+            self._last_surplus_sensor_w = self.available_surplus_w
+        for callback in callbacks:
             callback()
+
+    def _notify_if_surplus_changed(self):
+        current = self.available_surplus_w
+        if current != self._last_surplus_sensor_w:
+            self._last_surplus_sensor_w = current
+            self.notify(surplus_only=True)
 
     def policy_entity(self, serial):
         return f"select.kotiakku_goe_direct_policy_{serial}"
@@ -532,6 +547,48 @@ class KotiakkuGoeDirectController:
     def window_active(self):
         result = self.window_result or {}
         return now_in_windows(result.get("raw_windows") or [], self._now_ts())
+
+    def _keep_powers_for_surplus(self):
+        now_ts = self._now_ts()
+        powers = []
+        for serial in self.chargers:
+            role = charger_mqtt_role(
+                self.policy(serial),
+                self.window_result,
+                now_ts,
+                enough_solar=self.enough_solar,
+                until_unplug=self.until_unplug(serial),
+                keep_min=self._keep_on(serial),
+            )
+            if role == ROLE_KEEP:
+                powers.append(self.charger_power_w(serial))
+        return powers
+
+    def _keep_on(self, serial):
+        return bool(self._keep_min.get(serial) or self.keep_min(serial))
+
+    @property
+    def available_surplus_w(self):
+        """Leftover watts free for surplus chargers. None if Kotiakku is unusable."""
+        if self._kotiakku_problems():
+            return None
+        snap = self._snapshot()
+        return leftover_for_surplus(snap["available_w"], *self._keep_powers_for_surplus())
+
+    def available_surplus_attrs(self):
+        if self._kotiakku_problems():
+            return {"usable": False, "window_ok": False}
+        snap = self._snapshot()
+        keep_powers = self._keep_powers_for_surplus()
+        keep_take = sum(keep_take_w(power) for power in keep_powers)
+        return {
+            "solar_w": snap["solar_w"],
+            "house_w": snap["house_w"],
+            "leftover_w": snap["available_w"],
+            "keep_take_w": keep_take,
+            "window_ok": True,
+            "usable": True,
+        }
 
     def _forecast_kwh(self, entity_id):
         st = self._ha_state(entity_id)
@@ -866,6 +923,7 @@ class KotiakkuGoeDirectController:
             return
         entity = event.data.get("entity_id")
         if entity in self._kotiakku_ids:
+            self._notify_if_surplus_changed()
             self._schedule_apply()
             return
         if entity in self._forecast_ids:
@@ -942,6 +1000,8 @@ class KotiakkuGoeDirectController:
             self._schedule_apply()
             return
         if entity in self._priority_ids or entity in self._power_ids:
+            if entity in self._power_ids:
+                self._notify_if_surplus_changed()
             self._schedule_apply()
 
     async def _on_price(self, _event):
@@ -1146,14 +1206,15 @@ class KotiakkuGoeDirectController:
             today_kwh=self.today_kwh,
             tomorrow_kwh=self.tomorrow_kwh,
         )
-        windows = self.window_result.get("raw_windows") or []
-        first = windows[0] if windows else {}
+        windows = self.window_result.get("windows") or []
+        spans = ",".join(
+            "%s→%s" % (w.get("start"), w.get("end")) for w in windows
+        ) or "-"
         _LOGGER.info(
-            "kotiakku_goe_direct: plan reason=%s count=%s start=%s end=%s tomorrow_ok=%s",
+            "kotiakku_goe_direct: plan reason=%s count=%s windows=%s tomorrow_ok=%s",
             self.window_result.get("reason"),
             self.window_result.get("count"),
-            first.get("start"),
-            first.get("end"),
+            spans,
             self.window_result.get("tomorrow_ok"),
         )
         _LOGGER.debug(
@@ -1262,6 +1323,7 @@ class KotiakkuGoeDirectController:
                 value,
             )
         if old != value:
+            self._notify_if_surplus_changed()
             self._schedule_apply()
 
     def _on_status_mqtt(self, msg):
@@ -1769,10 +1831,7 @@ class KotiakkuGoeDirectController:
         changed, until_on = await self._sync_until_unplug()
         was_session = self.session
         had_leftover_setpoint = set(self._surplus_amp)
-        keep_on = {
-            serial: bool(self._keep_min.get(serial) or self.keep_min(serial))
-            for serial in self.chargers
-        }
+        keep_on = {serial: self._keep_on(serial) for serial in self.chargers}
         plan = self._compute_leftover_plan(
             until_on, keep_on, floor_expired, split_expired
         )
@@ -1956,6 +2015,8 @@ class KotiakkuGoeDirectController:
         if changed:
             await self._save()
             self.notify()
+        else:
+            self._notify_if_surplus_changed()
 
     async def _migrate_legacy_until_unplug(self):
         for serial in list(self.legacy_until_unplug):

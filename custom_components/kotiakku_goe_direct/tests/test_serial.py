@@ -598,10 +598,20 @@ def main():
         assert_eq(const.EID_SOLAR_TOMORROW_KWH, "sensor.kotiakku_goe_direct_solar_tomorrow_kwh", "solar tomorrow")
         assert_eq(const.EID_SOLAR_GATING_KWH, "sensor.kotiakku_goe_direct_solar_gating_kwh", "solar gating")
         assert_eq(const.EID_SOLAR_GATING_DAY, "sensor.kotiakku_goe_direct_solar_gating_day", "gating day")
+        assert_eq(
+            const.EID_AVAILABLE_SURPLUS,
+            "sensor.kotiakku_goe_direct_available_surplus",
+            "available surplus",
+        )
         assert_eq(const.SOLAR_TODAY_UNIQUE_ID, "kotiakku_goe_direct_solar_today_kwh", "today unique id")
         assert_eq(const.SOLAR_TOMORROW_UNIQUE_ID, "kotiakku_goe_direct_solar_tomorrow_kwh", "tomorrow unique id")
         assert_eq(const.SOLAR_GATING_KWH_UNIQUE_ID, "kotiakku_goe_direct_solar_gating_kwh", "gating kWh unique id")
         assert_eq(const.SOLAR_GATING_DAY_UNIQUE_ID, "kotiakku_goe_direct_solar_gating_day", "gating day unique id")
+        assert_eq(
+            const.AVAILABLE_SURPLUS_UNIQUE_ID,
+            "kotiakku_goe_direct_available_surplus",
+            "available surplus unique id",
+        )
         assert_eq(
             const.EID_WINDOW_ACTIVE,
             "binary_sensor.kotiakku_goe_direct_window_active",

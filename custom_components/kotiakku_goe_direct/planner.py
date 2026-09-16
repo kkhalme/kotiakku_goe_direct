@@ -3,14 +3,22 @@
 Find the cheapest contiguous windowMinHours seed on the
 (off-sun-blocked, forecast-clipped) spot curve, then grow one native slot
 at a time toward the cheaper neighbor while the duration-weighted average
-stays under flex headroom and at most windowMaxHours. At most one window
-is appended; the result is still a list so more windows can be added later.
-The price ceiling is a safety abort on the seed average and a hard-no on
-grow neighbors; it does not score the seed.
+stays under flex headroom and at most windowMaxHours. That is window 1.
 
-The chosen window is a function of prices, solar clip, the off-sun mask,
-and knobs. Clock time does not move it: a cheapest window that has already
-ended stays the plan (visible in the past) and is not used for 22 kW.
+When tomorrow's prices are in the search set and that first window does
+not overlap local today 22:00 through the end of tomorrow, a second
+window is planned: its seed lies entirely in tomorrow's hours, then the
+same grow may walk into today (typically the evening). Overlapping or
+abutting windows are a union for 22 kW; chargers do not stop on a
+shared boundary.
+
+The price ceiling is a safety abort on the seed average and a hard-no
+on grow neighbors; it does not score the seed.
+
+The chosen windows are a function of prices, solar clip, the off-sun
+mask, and knobs. Clock time does not move them: a cheapest window that
+has already ended stays the plan (visible in the past) and is not used
+for 22 kW.
 """
 
 from __future__ import annotations
@@ -336,6 +344,72 @@ def find_seed(slots, min_s, now_ts=None):
     return best
 
 
+def local_overnight_bounds(clock, now_dt):
+    """Local today 22:00, tomorrow start, and end of tomorrow (next midnight).
+
+    ``None`` if the clock cannot produce those timestamps. 22:00 is the
+    local wall clock, not today-start plus 22 hours (DST).
+    """
+    try:
+        today_start = clock.start_of_local_day(now_dt)
+        tomorrow_start = clock.start_of_local_day(
+            now_dt + datetime.timedelta(days=1)
+        )
+        day_after = clock.start_of_local_day(now_dt + datetime.timedelta(days=2))
+        today_22 = today_start.replace(hour=22, minute=0, second=0, microsecond=0)
+        return (
+            float(clock.as_timestamp(today_22)),
+            float(clock.as_timestamp(tomorrow_start)),
+            float(clock.as_timestamp(day_after)),
+        )
+    except Exception:
+        return None
+
+
+def window_overlaps_span(window, start, end):
+    """True when ``window`` overlaps ``[start, end)``."""
+    return window["start"] < end and window["end"] > start
+
+
+def _span_indices(slots, start, end):
+    left_i = None
+    right_j = None
+    for i, slot in enumerate(slots):
+        if abs(slot[0] - start) <= 1:
+            left_i = i
+        if abs(slot[1] - end) <= 1:
+            right_j = i
+    if left_i is None or right_j is None or left_i > right_j:
+        return None
+    return left_i, right_j
+
+
+def pick_followup_window(
+    slots, min_s, max_s, ceiling, flex_pct, flex_euro, tomorrow_start, day_after
+):
+    """Cheapest tomorrow-seeded window, grown on the combined island.
+
+    The min-hours seed must sit inside tomorrow. Grow may add today's
+    hours (and later tomorrow) under the same flex / ceiling / max cap.
+    """
+    tom = [slot for slot in slots if tomorrow_start - 1 <= slot[0] < day_after]
+    seed = find_seed(tom, min_s)
+    if seed is None:
+        return None
+    avg, start, end, _left, _right = seed
+    if avg > ceiling + PRICE_EPS:
+        return None
+    if start < tomorrow_start - 1 or end > day_after + 1:
+        return None
+    idx = _span_indices(slots, start, end)
+    if idx is None:
+        return None
+    left_i, right_j = idx
+    return grow_window(
+        slots, left_i, right_j, avg, max_s, ceiling, flex_pct, flex_euro
+    )
+
+
 def grow_window(slots, left_i, right_j, seed_avg, max_s, ceiling, flex_pct, flex_euro):
     """Extend the seed by one native slot per step toward the cheaper neighbor."""
     pct_on = flex_pct is not None and flex_pct > 0
@@ -390,7 +464,7 @@ def grow_window(slots, left_i, right_j, seed_avg, max_s, ceiling, flex_pct, flex
 
 
 def pick_windows(slots, min_s, max_s, ceiling, flex_pct, flex_euro=DEFAULT_FLEX_EUR, extra=None):
-    """Return a list of at most one grown window.
+    """Return a list of at most one grown window (the global cheapest).
 
     Older tests passed ``now_ts`` as the fifth argument; that value is ignored.
     """
@@ -431,8 +505,16 @@ def choose(
     blocked=None,
     flex_pct=DEFAULT_FLEX_PCT,
     flex_euro=DEFAULT_FLEX_EUR,
+    overnight=None,
+    tomorrow_start=None,
+    day_after=None,
 ):
-    """Pick at most one grown window. ``now_ts`` and ``prev`` are ignored."""
+    """Pick the cheapest grown window, and a tomorrow follow-up when needed.
+
+    ``now_ts`` and ``prev`` are ignored. ``overnight`` is ``(today_22, day_after)``
+    in local time: if tomorrow is searchable and the first window does not
+    overlap that span, append a second window whose seed is in tomorrow.
+    """
     if not slots:
         return _choice([], None, "no_slots")
     horizon = slots[-1][1]
@@ -445,6 +527,29 @@ def choose(
     )
     if not new_windows:
         return _choice([], horizon, "no_window")
+    if (
+        overnight is not None
+        and tomorrow_start is not None
+        and day_after is not None
+        and any(slot[0] >= tomorrow_start - 1 for slot in search)
+    ):
+        cover_start, cover_end = overnight
+        if not any(
+            window_overlaps_span(window, cover_start, cover_end)
+            for window in new_windows
+        ):
+            follow = pick_followup_window(
+                search,
+                min_s,
+                max_s,
+                ceiling,
+                flex_pct,
+                flex_euro,
+                tomorrow_start,
+                day_after,
+            )
+            if follow is not None:
+                new_windows.append(follow)
     return _choice(new_windows, horizon, "planned")
 
 
@@ -882,6 +987,13 @@ def plan(
         return empty
     slots = collect_slots(clock, attrs, now_dt)
     slots = clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt)
+    bounds = local_overnight_bounds(clock, now_dt)
+    overnight = None
+    tomorrow_start = None
+    day_after = None
+    if bounds is not None:
+        today_22, tomorrow_start, day_after = bounds
+        overnight = (today_22, day_after)
     chosen = choose(
         slots,
         min_hours,
@@ -890,6 +1002,9 @@ def plan(
         blocked=blocked,
         flex_pct=flex_pct,
         flex_euro=flex_euro,
+        overnight=overnight,
+        tomorrow_start=tomorrow_start,
+        day_after=day_after,
     )
     iso_ws = iso_windows(clock, chosen["windows"])
     planned = chosen["windows"][0] if chosen["windows"] else None

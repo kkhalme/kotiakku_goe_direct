@@ -540,11 +540,18 @@ def main():
         result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
         assert_eq(result["reason"], "planned", "dearer tomorrow does not win")
         assert_eq(result["raw_windows"][0]["start"], start0, "started set kept")
+        assert_eq(len(result["raw_windows"]), 2, "today valley misses overnight: follow-up")
+        assert_true(
+            result["raw_windows"][1]["start"] >= tomorrow_start - 1,
+            "follow-up is tomorrow-seeded",
+        )
+        follow_start = result["raw_windows"][1]["start"]
         for _ in range(4):
             clock.advance(minutes=15)
             result = plan_once(clock, attrs, result, flex_pct=0, flex_euro=0)
             assert_eq(result["reason"], "planned", "still today's cheaper valley")
             assert_eq(result["raw_windows"][0]["start"], start0, "start does not slide")
+            assert_eq(result["raw_windows"][1]["start"], follow_start, "follow-up does not slide")
 
     def test_started_window_switches_then_holds():
         day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)

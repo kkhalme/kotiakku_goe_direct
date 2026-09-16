@@ -21,6 +21,7 @@ class HubEntity:
 
     _attr_has_entity_name = True
     _attr_should_poll = False
+    _listen_surplus_only = False
 
     def __init__(self, controller):
         self._controller = controller
@@ -29,7 +30,10 @@ class HubEntity:
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        self._unsub = self._controller.listen(self.async_write_ha_state)
+        self._unsub = self._controller.listen(
+            self.async_write_ha_state,
+            surplus_only=self._listen_surplus_only,
+        )
 
     async def async_will_remove_from_hass(self):
         if self._unsub:

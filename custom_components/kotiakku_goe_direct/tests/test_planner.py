@@ -489,6 +489,7 @@ def main():
             tie["raw_windows"][0]["end"] <= base + 86400 + 1,
             "equal prices: earlier day wins",
         )
+        assert_eq(tie["count"], 2, "today morning plus tomorrow follow-up")
 
     case("seed_is_cheapest_min_hours", test_seed_is_cheapest_min_hours)
     case("grow_cheaper_side_and_flex_or", test_grow_cheaper_side_and_flex_or)
