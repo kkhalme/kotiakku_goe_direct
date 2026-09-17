@@ -108,6 +108,7 @@ from .planner import (
     plan,
     tomorrow_prices_ok as planner_tomorrow_prices_ok,
     keep_until_unplug_step,
+    leftover_offer_idle_complete,
     restore_keep_phase,
     until_unplug_step,
     KEEP_IDLE,
@@ -1570,10 +1571,11 @@ class KotiakkuGoeDirectController:
             self._last_policy[serial] = self.policy(serial)
         return roles
 
-    def _surplus_alloc_context(self, surplus, leftover_w):
+    def _surplus_alloc_context(self, surplus, leftover_w, keep_on=None):
         """Priority, car state, take, and offer-wait flags for leftover MQTT."""
         charger_max_w = self.max_amp * self.volts * 3
         leftover_w = int(leftover_w)
+        keep_on = keep_on or {}
         lops = {serial: self.charger_priority(serial) for serial in surplus}
         plugged = {}
         states = {}
@@ -1603,12 +1605,21 @@ class KotiakkuGoeDirectController:
             for serial in surplus
             if take_w.get(serial, 0) < TAKE_MIN_W and serial not in self._offer_expired
         }
+        offer_complete = {
+            serial
+            for serial in surplus
+            if leftover_offer_idle_complete(
+                keep_on.get(serial),
+                self._keep_min_phase.get(serial),
+            )
+        }
         return {
             "lops": lops,
             "plugged": plugged,
             "states": states,
             "take_w": take_w,
             "offer_pending": offer_pending,
+            "offer_complete": offer_complete,
             "charger_max_w": charger_max_w,
         }
 
@@ -1663,9 +1674,10 @@ class KotiakkuGoeDirectController:
                 snap,
                 split_expired,
                 n_full=n_held,
+                keep_on=keep_on,
             )
         ctx = (
-            self._surplus_alloc_context(surplus, snap["available_w"])
+            self._surplus_alloc_context(surplus, snap["available_w"], keep_on)
             if surplus
             else {
                 "lops": {},
@@ -1673,6 +1685,7 @@ class KotiakkuGoeDirectController:
                 "states": {},
                 "take_w": {},
                 "offer_pending": set(),
+                "offer_complete": set(),
                 "charger_max_w": self.max_amp * self.volts * 3,
             }
         )
@@ -1693,7 +1706,7 @@ class KotiakkuGoeDirectController:
             "ctx": ctx,
         }
 
-    def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full):
+    def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full, keep_on=None):
         """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
         lot, psm, amp = budget(
@@ -1711,13 +1724,14 @@ class KotiakkuGoeDirectController:
             n_full=n_full,
             group_lot=self.group_lot,
         )
-        ctx = self._surplus_alloc_context(surplus, snap["available_w"])
+        ctx = self._surplus_alloc_context(surplus, snap["available_w"], keep_on)
         lops = ctx["lops"]
         plugged = ctx["plugged"]
         states = ctx["states"]
         take_w = ctx["take_w"]
         charger_max_w = ctx["charger_max_w"]
         offer_pending = ctx["offer_pending"]
+        offer_complete = ctx["offer_complete"]
         alloc_w = snap["available_w"]
         if dec["use_floor_budget"]:
             alloc_w = max(alloc_w, self.min_amp * self.volts)
@@ -1737,6 +1751,7 @@ class KotiakkuGoeDirectController:
             split_hold=self.split_session,
             split_expired=split_expired,
             offer_pending=offer_pending,
+            offer_complete=offer_complete,
         )
         taking = allocations.get("taking") or []
         was_split = self.split_session
@@ -1775,7 +1790,14 @@ class KotiakkuGoeDirectController:
         for serial in surplus:
             watts_i = allocations["allocations"].get(serial)
             if watts_i is None:
-                if surplus_higher_keep_on(serial, allocated, lops, states, take_w):
+                if surplus_higher_keep_on(
+                    serial,
+                    allocated,
+                    lops,
+                    states,
+                    take_w,
+                    offer_complete=offer_complete,
+                ):
                     watts_i = alloc_w
                     _LOGGER.debug(
                         "kotiakku_goe_direct: %s leftover stays armed (lower-priority car has leftover)",

@@ -2,10 +2,11 @@
 
 Mirrors the controller apply order: leftover first with the current keep
 switches, then one keep probe/cut/arm pass. Idle Complete (nrg below
-400 W) is not leftover-offered. Auto-on needs 60 s wall-clock of that,
-enable on, not KEEP_CUT, and not a steal victim (worse HA leftover
-priority than another surplus charger that is taking while leftover is
-writing).
+400 W) is not leftover-offered unless keep phase is KEEP_CUT (manual
+keep off or leftover/window interrupt). Auto-on needs 60 s wall-clock
+of idle Complete, enable on, not KEEP_CUT, and not a steal victim
+(worse HA leftover priority than another surplus charger that is
+taking while leftover is writing).
 """
 
 from __future__ import annotations
@@ -232,6 +233,11 @@ def main():
         sim.finish("Complete").expect(
             False, CUT, probe=False, msg="Complete after interrupt is not a finished pack"
         )
+        assert_eq(
+            planner.leftover_offer_idle_complete(sim.on, sim.phase),
+            True,
+            "interrupt KEEP_CUT leftover-offers Complete",
+        )
 
     case("leftover_interrupt_while_charging_then_complete", test_leftover_interrupt_while_charging_then_complete)
 
@@ -255,6 +261,11 @@ def main():
         )
         sim.finish("Complete").expect(
             False, CUT, probe=False, msg="Complete after interrupt is not a finished pack"
+        )
+        assert_eq(
+            planner.leftover_offer_idle_complete(sim.on, sim.phase),
+            True,
+            "window interrupt KEEP_CUT leftover-offers Complete",
         )
 
     case("window_interrupt_no_leftover_then_complete", test_window_interrupt_no_leftover_then_complete)
@@ -307,6 +318,11 @@ def main():
             cmd(planner.ROLE_SURPLUS, surplus_on=True, leftover_session=True),
             ("off",),
             "B leftover MQTT off is frc=1",
+        )
+        assert_eq(
+            planner.leftover_offer_idle_complete(sim.on, sim.phase),
+            False,
+            "steal victim is KEEP_ALLOWED, not KEEP_CUT leftover offer",
         )
 
     case("steal_victim_idle_complete_never_keep", test_steal_victim_idle_complete_never_keep)
@@ -456,8 +472,90 @@ def main():
         sim.finish("Complete", commanded_on=True).expect(
             False, CUT, probe=False, msg="Complete does not re-arm after manual off"
         )
+        assert_eq(
+            planner.leftover_offer_idle_complete(sim.on, sim.phase),
+            True,
+            "KEEP_CUT leftover-offers this Complete charger",
+        )
+        assert_eq(
+            surplus.surplus_allocations(
+                ["A"],
+                leftover_w=8000,
+                lops={"A": 1},
+                plugged={"A": True},
+                states={"A": "Complete"},
+                take_w={"A": 0},
+                split_min_w=3000,
+                charger_max_w=32 * 230 * 3,
+                offer_complete={"A"},
+            ),
+            {"A": 8000},
+            "leftover MQTT can arm while still Complete",
+        )
+        assert_eq(
+            cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=LEFTOVER),
+            ("on", 2, 11, 11),
+            "leftover command is frc=2, not force off",
+        )
 
     case("manual_off_while_complete_does_not_rearm", test_manual_off_while_complete_does_not_rearm)
+
+    def test_keep_cut_high_complete_leaves_taking_lower_on():
+        a = KeepSim()
+        a.apply("Charging", commanded_on=True)
+        a.finish("Complete").expect(True, ALLOWED, msg="A keep")
+        a.apply("Complete", commanded_on=False, switch=False).expect(
+            False, CUT, msg="A manual keep off"
+        )
+        assert_eq(
+            planner.leftover_offer_idle_complete(a.on, a.phase),
+            True,
+            "A KEEP_CUT leftover-offers",
+        )
+        plan = surplus.surplus_allocation_plan(
+            ["A", "B"],
+            leftover_w=8000,
+            lops={"A": 1, "B": 2},
+            plugged={"A": True, "B": True},
+            take_w={"A": 0, "B": 8000},
+            states={"A": "Complete", "B": "Charging"},
+            split_min_w=3000,
+            charger_max_w=32 * 230 * 3,
+            offer_complete={"A"},
+        )
+        assert_eq(plan["allocations"].get("A"), 8000, "KEEP_CUT A stays armed")
+        assert_eq(plan["allocations"].get("B"), 8000, "taking B keeps leftover")
+        assert_eq(plan["taking"], ["B"], "only B is taking")
+        probe = KeepSim()
+        probe.apply("Charging", commanded_on=True)
+        probe.apply("Complete", commanded_on=False).expect(
+            False, ALLOWED, probe=True, msg="A still in 60 s probe"
+        )
+        assert_eq(
+            planner.leftover_offer_idle_complete(probe.on, probe.phase),
+            False,
+            "probe does not leftover-offer idle Complete",
+        )
+        skipped = surplus.surplus_allocation_plan(
+            ["A", "B"],
+            leftover_w=8000,
+            lops={"A": 1, "B": 2},
+            plugged={"A": True, "B": True},
+            take_w={"A": 0, "B": 8000},
+            states={"A": "Complete", "B": "Charging"},
+            split_min_w=3000,
+            charger_max_w=32 * 230 * 3,
+        )
+        assert_eq(
+            skipped["allocations"],
+            {"B": 8000},
+            "probe skip leaves leftover on B so app lop cannot starve it",
+        )
+
+    case(
+        "keep_cut_high_complete_leaves_taking_lower_on",
+        test_keep_cut_high_complete_leaves_taking_lower_on,
+    )
 
     def test_manual_off_while_charging_does_not_cancel_later_auto_on():
         sim = KeepSim()

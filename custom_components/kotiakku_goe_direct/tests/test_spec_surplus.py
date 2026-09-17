@@ -928,6 +928,186 @@ def main():
         assert_true(A in cmds and B in cmds, "both Idle chargers get leftover MQTT")
         assert_eq(cmds[A]["amp"], cmds[B]["amp"], "equal leftover amp on both")
 
+    def test_keep_cut_idle_complete_leftover_offer():
+        """Manual keep off / interrupt (KEEP_CUT) arms leftover while Complete.
+
+        The 60 s keep probe still skips idle Complete so a finished
+        high-priority car cannot starve a taking lower car via app lop.
+        """
+        alloc = surplus.surplus_allocations
+        finished = leftover_kw_args(plugged={A: True}, lops={A: 1})
+        assert_eq(
+            alloc([A], leftover_w=8000, states={A: "Complete"}, **finished),
+            {},
+            "idle Complete without KEEP_CUT is still skipped",
+        )
+        assert_eq(
+            alloc(
+                [A],
+                leftover_w=8000,
+                states={A: "Complete"},
+                offer_complete={A},
+                **finished,
+            ),
+            {A: 8000},
+            "KEEP_CUT idle Complete is leftover-offered",
+        )
+        both = leftover_kw_args()
+        assert_eq(
+            alloc(
+                [A, B],
+                leftover_w=8000,
+                take_w={A: 0, B: 8000},
+                states={A: "Complete", B: "Charging"},
+                **both,
+            ),
+            {B: 8000},
+            "keep probe: idle Complete high is skipped so B is not starved",
+        )
+        cut_high = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=8000,
+            take_w={A: 0, B: 8000},
+            states={A: "Complete", B: "Charging"},
+            offer_complete={A},
+            **both,
+        )
+        assert_eq(cut_high["allocations"].get(A), 8000, "KEEP_CUT high stays armed")
+        assert_eq(cut_high["allocations"].get(B), 8000, "taking lower keeps leftover as first")
+        assert_eq(cut_high["taking"], [B], "Complete take 0 is not a taking split")
+        assert_eq(
+            cut_high["lot_allocations"],
+            {B: 8000},
+            "armed Complete is not a group-lot share after the wait",
+        )
+        waiting = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=8000,
+            take_w={A: 0, B: 8000},
+            states={A: "Complete", B: "Charging"},
+            offer_complete={A},
+            offer_pending={A},
+            **both,
+        )
+        assert_eq(waiting["overdraw"], True, "15 s wait: Complete high + taking B over-draw")
+        assert_true(A in waiting["lot_allocations"], "pending KEEP_CUT high is a lot share")
+        assert_true(B in waiting["lot_allocations"], "taking B stays a lot share during wait")
+        steal = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=12000,
+            take_w={A: 0, B: 10000},
+            states={A: "Complete", B: "Charging"},
+            offer_complete={A},
+            **both,
+        )
+        assert_eq(steal["allocations"].get(A), 12000, "not-taking KEEP_CUT high is Idle-like armed")
+        assert_eq(steal["allocations"].get(B), 12000, "lower taking is first until high takes")
+        taking_both = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=12000,
+            take_w={A: 10000, B: 3000},
+            states={A: "Charging", B: "Charging"},
+            offer_complete={A},
+            **both,
+        )
+        assert_eq(
+            taking_both["allocations"],
+            {A: 9000, B: 3000},
+            "once KEEP_CUT high takes, steal 9+3 as usual",
+        )
+        assert_eq(
+            alloc(
+                [A, B],
+                leftover_w=8000,
+                take_w={A: 8000, B: 0},
+                states={A: "Charging", B: "Complete"},
+                **both,
+            ),
+            {A: 8000},
+            "worse-priority idle Complete without KEEP_CUT still skipped",
+        )
+        b_cut = surplus.surplus_allocation_plan(
+            [A, B],
+            leftover_w=12000,
+            take_w={A: 10000, B: 0},
+            states={A: "Charging", B: "Complete"},
+            offer_complete={B},
+            **both,
+        )
+        assert_eq(
+            b_cut["allocations"],
+            {A: 9000, B: 3000},
+            "KEEP_CUT lower Complete can receive the 3 kW steal share",
+        )
+        three = leftover_kw_args(lops={A: 1, B: 2, C: 3})
+        three_plan = surplus.surplus_allocation_plan(
+            [A, B, C],
+            leftover_w=12000,
+            take_w={A: 0, B: 10000, C: 0},
+            states={A: "Complete", B: "Charging", C: "Charging"},
+            offer_complete={A},
+            **three,
+        )
+        assert_eq(
+            three_plan["allocations"],
+            {A: 12000, B: 9000, C: 3000},
+            "KEEP_CUT Complete high is Idle-like: armed, steal on taking remainder",
+        )
+        wait_three = surplus.surplus_allocation_plan(
+            [A, B, C],
+            leftover_w=12000,
+            take_w={A: 0, B: 10000, C: 0},
+            states={A: "Complete", B: "Charging", C: "Charging"},
+            offer_complete={A},
+            offer_pending={A},
+            **three,
+        )
+        assert_true(
+            C not in wait_three["allocations"],
+            "third still waits 15 s while high Complete is pending",
+        )
+        assert_eq(wait_three["overdraw"], True, "pending KEEP_CUT high plus taking B is over-draw")
+        keep = surplus.surplus_higher_keep_on
+        assert_eq(
+            keep(A, {B: 8000}, {A: 1, B: 50}, states={A: "Complete", B: "Charging"}),
+            False,
+            "idle Complete high stays skipped without KEEP_CUT",
+        )
+        assert_eq(
+            keep(
+                A,
+                {B: 8000},
+                {A: 1, B: 50},
+                states={A: "Complete", B: "Charging"},
+                offer_complete={A},
+            ),
+            True,
+            "KEEP_CUT idle Complete high stays armed if lower has leftover",
+        )
+        dec, cmds = mqtt_for(
+            4000,
+            False,
+            serials=[A],
+            plugged={A: True},
+            lops={A: 1},
+            states={A: "Complete"},
+            take_w={A: 0},
+            offer_complete={A},
+        )
+        assert_true(dec["write_on"], "4 kW leftover can start")
+        assert_true(A in cmds, "KEEP_CUT Complete gets leftover MQTT")
+        dec_skip, cmds_skip = mqtt_for(
+            4000,
+            False,
+            serials=[A],
+            plugged={A: True},
+            lops={A: 1},
+            states={A: "Complete"},
+            take_w={A: 0},
+        )
+        assert_true(dec_skip["write_on"], "write_on does not wait for Complete")
+        assert_true(A not in cmds_skip, "without KEEP_CUT there is no leftover setpoint")
+
     def test_offsun_hour_spread_tomorrow_and_evening():
         hel = ZoneInfo("Europe/Helsinki")
         noon = Clock(datetime.datetime(2026, 3, 15, 12, 0, tzinfo=hel), tz=hel)
@@ -1172,6 +1352,7 @@ def main():
     case("mqtt_start_floor_and_steal_amps", test_mqtt_start_floor_and_steal_amps)
     case("idle_mqtt_is_force_off", test_idle_mqtt_is_force_off)
     case("surplus_mqtt_does_not_wait_for_plug", test_surplus_mqtt_does_not_wait_for_plug)
+    case("keep_cut_idle_complete_leftover_offer", test_keep_cut_idle_complete_leftover_offer)
     case("offsun_hour_spread_tomorrow_and_evening", test_offsun_hour_spread_tomorrow_and_evening)
     case("enough_solar_usable_hour_gate", test_enough_solar_usable_hour_gate)
     run()
