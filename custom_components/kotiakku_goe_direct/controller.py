@@ -7,7 +7,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import CoreState
+from homeassistant.core import CoreState, callback
 from homeassistant.helpers.entity_component import async_update_entity
 from homeassistant.helpers.event import (
     async_call_later,
@@ -1306,6 +1306,7 @@ class KotiakkuGoeDirectController:
             payload = payload.decode("utf-8", "replace")
         return serial, payload
 
+    @callback
     def _on_nrg_mqtt(self, msg):
         serial, payload = self._mqtt_serial_payload(msg, "nrg")
         if not serial:
@@ -1326,6 +1327,7 @@ class KotiakkuGoeDirectController:
             self._notify_if_surplus_changed()
             self._schedule_apply()
 
+    @callback
     def _on_status_mqtt(self, msg):
         topic = str(getattr(msg, "topic", "") or "")
         key = topic.split("/")[-1]
