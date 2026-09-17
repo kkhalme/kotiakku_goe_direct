@@ -574,6 +574,12 @@ def main():
             idle=True, now_ts=probe_s,
         )
         assert_eq((on, phase), (False, cut), "manual off does not re-arm")
+        offer = planner.leftover_offer_idle_complete
+        assert_eq(offer(False, cut), True, "KEEP_CUT leftover-offers idle Complete")
+        assert_eq(offer(True, cut), False, "keep on still skips leftover")
+        assert_eq(offer(False, allowed), False, "60 s probe still skips leftover")
+        assert_eq(offer(False, idle), False, "idle phase skips leftover")
+        assert_eq(offer(False, None), False, "unknown phase skips leftover")
         assert_eq(
             planner.restore_keep_phase(None, offered=True),
             allowed,

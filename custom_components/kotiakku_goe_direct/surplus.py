@@ -911,6 +911,7 @@ def surplus_allocation_plan(
     split_hold=False,
     split_expired=False,
     offer_pending=None,
+    offer_complete=None,
 ):
     """Per-charger leftover watts plus next-car hold flags.
 
@@ -918,11 +919,14 @@ def surplus_allocation_plan(
     that is not idle Complete can be offered leftover, including Idle,
     unknown, or unplugged, so ``frc=2`` can arm the charger before
     WaitCar. Idle Complete (``nrg`` below ``KEEP_PROBE_TAKE_W``) is not
-    offered, backfilled, or used for steal/remainder. Complete still
-    drawing at or above that band is leftover-eligible as taking. Equal
-    or unknown HA priority: those chargers get the same leftover (go-e
-    splits). Unequal: steal/take follows actual take (≥100 W), not
-    plug-in. ``plugged`` is kept for callers and ignored.
+    offered, backfilled, or used for steal/remainder, unless
+    ``offer_complete`` lists that serial (controller: keep phase
+    ``KEEP_CUT`` — manual keep off or leftover/window interrupt).
+    Complete still drawing at or above that band is leftover-eligible
+    as taking. Equal or unknown HA priority: those chargers get the
+    same leftover (go-e splits). Unequal: steal/take follows actual
+    take (≥100 W), not plug-in. ``plugged`` is kept for callers and
+    ignored.
 
     A high-priority car that is not taking still gets leftover MQTT so
     it can start. If it does not take all leftover, the next car in
@@ -941,7 +945,8 @@ def surplus_allocation_plan(
     high is still not taking, leftover belongs to the next as first and
     high stays armed (not a lot share). If nobody is taking, every
     eligible charger is armed at leftover watts. Idle Complete is
-    skipped so remaining equal-priority cars still share. After a taking
+    skipped so remaining equal-priority cars still share, except
+    ``offer_complete`` serials (KEEP_CUT). After a taking
     first car, unused leftover above ``split_floor_w`` (default 500 W)
     goes to the next car in priority — even if that car is not taking
     yet, so it can start. If that next car is pending, stop there until
@@ -962,7 +967,7 @@ def surplus_allocation_plan(
     still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
     so it can start taking again. Those backfills are not group-lot
     shares unless the offer wait is still running. Idle Complete
-    stays skipped.
+    stays skipped unless ``offer_complete``.
     """
     leftover_w = max(int(leftover_w), 0)
     serials = [serial for serial in serials if serial]
@@ -981,6 +986,8 @@ def surplus_allocation_plan(
     states = states if isinstance(states, dict) else None
 
     def _idle_of(serial):
+        if offer_complete and serial in offer_complete:
+            return False
         if states is None:
             return False
         take = None
@@ -1176,18 +1183,24 @@ def surplus_steal_victim(serial, *, leftover_on, taking, lops):
     return False
 
 
-def surplus_higher_keep_on(serial, allocations, lops, states=None, take_w=None):
+def surplus_higher_keep_on(
+    serial, allocations, lops, states=None, take_w=None, offer_complete=None
+):
     """True when a worse-priority charger has leftover: do not ``frc=1`` this one.
 
-    Idle Complete stays off. Live Complete still drawing is leftover.
-    Plug-in does not matter.
+    Idle Complete stays off unless ``offer_complete`` (KEEP_CUT). Live
+    Complete still drawing is leftover. Plug-in does not matter.
     """
     if not serial or not isinstance(allocations, dict) or not allocations:
         return False
     if serial in allocations:
         return False
     take = None if take_w is None else take_w.get(serial)
-    if states is not None and idle_complete(states.get(serial), take):
+    if (
+        states is not None
+        and idle_complete(states.get(serial), take)
+        and not (offer_complete and serial in offer_complete)
+    ):
         return False
     if not isinstance(lops, dict):
         return False

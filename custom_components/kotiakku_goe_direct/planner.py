@@ -667,7 +667,10 @@ def keep_until_unplug_step(
     (lower number). That blocks keep; it does not cut.
 
     ``KEEP_CUT`` is leftover/window stop while WaitCar/Charging, or
-    manual keep off while Complete (no re-arm). Unplug clears the
+    manual keep off while Complete (no re-arm). Leftover still offers
+    that idle Complete charger (``frc=2``) so a Tesla that later
+    raises its charge limit can leave Complete. The 60 s probe
+    (``KEEP_ALLOWED``) still skips leftover. Unplug clears the
     switch, phase, and probe. Enable off / Force off skip auto-on and
     do not clear keep that is already on.
     """
@@ -723,6 +726,22 @@ def keep_until_unplug_step(
         return override, seen, phase, since
     override, seen = until_unplug_step(override, plugged, seen)
     return override, seen, phase, None
+
+
+def leftover_offer_idle_complete(keep_min=False, phase=KEEP_IDLE):
+    """Whether leftover may arm this charger while it is idle Complete.
+
+    Keep on is leftover-skipped (keep amp, not leftover amp). The 60 s
+    probe (``KEEP_ALLOWED``) also skips leftover so a finished high-
+    priority car cannot starve a taking lower car via app ``lop``.
+    ``KEEP_CUT`` (manual keep off while Complete, or leftover/window
+    stop while WaitCar/Charging) is leftover-eligible: keep will not
+    re-arm, and ``frc=2`` is required or a Tesla that later raises its
+    charge limit stays Complete forever.
+    """
+    if keep_min:
+        return False
+    return restore_keep_phase(phase) == KEEP_CUT
 
 
 def charger_full_power(policy, result, now_ts, *, enough_solar=False, until_unplug=False):
@@ -826,12 +845,13 @@ def charger_mqtt_command(
     not ``frc=1`` a charger leftover is about to write. Full-power is
     always 22 kW. Keep is keep phase/amp until unplug after Complete,
     or when that switch is turned on by hand. Leftover on only when
-    surplus is writing this serial. Otherwise off if Force off, a 22 kW
-    session just ended, leftover is stopping, or leftover is on but this
-    serial is not allocated. Idle SolarPriority that leftover has never
-    started is a no-op (do not spam ``frc=1``) unless live ``frc`` is
-    known and not force-off: Neutral after unplug would start charging
-    in Basic/default.
+    surplus is writing this serial. KEEP_CUT idle Complete is leftover-
+    eligible (controller passes it in the surplus pubs). Otherwise off
+    if Force off, a 22 kW session just ended, leftover is stopping, or
+    leftover is on but this serial is not allocated. Idle SolarPriority
+    that leftover has never started is a no-op (do not spam ``frc=1``)
+    unless live ``frc`` is known and not force-off: Neutral after unplug
+    would start charging in Basic/default.
     """
     if role == ROLE_FULL:
         return ("on", 2, int(group_lot), int(max_amp))
