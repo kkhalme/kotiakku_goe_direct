@@ -948,6 +948,69 @@ def charger_mqtt_needs_update(desired, actual):
     )
 
 
+def charger_mqtt_live_contradicts(desired, actual):
+    """True when a known live key already disagrees with ``desired``.
+
+    Missing keys do not contradict (still waiting for the echo). A present
+    ``frc=1`` while we want On, or live ``amp`` 0 while we want 32 A, means
+    the previous write did not stick — retry instead of waiting-live skip.
+    """
+    if desired is None or not isinstance(actual, dict):
+        return False
+    if desired[0] == "off":
+        frc = charger_mqtt_status_value(actual.get("frc"))
+        return frc is not None and int(frc) != 1
+    if desired[0] != "on" or len(desired) < 4:
+        return False
+    have_frc = charger_mqtt_status_value(actual.get("frc"))
+    if have_frc is not None and have_frc != 2:
+        return True
+    have_psm = charger_mqtt_status_value(actual.get("psm"))
+    if have_psm is not None and have_psm != int(desired[1]):
+        return True
+    have_lot = charger_mqtt_status_value(actual.get("lot"))
+    if have_lot is not None and have_lot != int(desired[2]):
+        return True
+    have_amp = charger_mqtt_status_value(actual.get("amp"))
+    if have_amp is not None and have_amp != int(desired[3]):
+        return True
+    return False
+
+
+def charger_mqtt_waiting_skip(desired, actual, last, force=False):
+    """True when we already published ``desired`` and live is still incomplete.
+
+    Do not skip when live already contradicts ``desired``: the first write
+    did not stick (typical: 22 kW on a WaitCar that still has ``frc=1`` /
+    ``amp`` 0 while another car is already taking the group).
+    """
+    if force or desired is None:
+        return False
+    if last != desired:
+        return False
+    if charger_mqtt_live_complete(desired, actual):
+        return False
+    return not charger_mqtt_live_contradicts(desired, actual)
+
+
+def charger_mqtt_publish_action(desired, actual, last, force=False):
+    """``skip_match``, ``skip_wait``, or ``publish``.
+
+    ``skip_match``: live already matches; record ``desired`` as last MQTT
+    (an off that was skipped because live is already ``frc=1`` must not
+    leave last MQTT as a previous On, or the next cheap window will skip).
+    ``skip_wait``: same command already sent, live incomplete, no contradict.
+    ``publish``: write now.
+    """
+    if desired is None:
+        return "skip_match"
+    if not charger_mqtt_needs_update(desired, actual):
+        return "skip_match"
+    if charger_mqtt_waiting_skip(desired, actual, last, force=force):
+        return "skip_wait"
+    return "publish"
+
+
 def _empty_result(
     min_hours,
     max_hours,

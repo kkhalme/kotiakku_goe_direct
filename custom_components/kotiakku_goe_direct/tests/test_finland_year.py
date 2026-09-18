@@ -360,9 +360,13 @@ def simulate(
         in_window = window_on(result, ts)
         cheap_window = in_window
         offsun_window = in_window
-        cheap_full = planner.charger_full_power(
+        a_full = planner.charger_full_power(
             policy, result, ts, enough_solar=enough
         )
+        b_full = n_chargers >= 2 and planner.charger_full_power(
+            b_policy, result, ts, enough_solar=enough
+        )
+        cheap_full = a_full
         solar = solar_w(now, cloud_at(now, {"cloud": cloud}))
         house = house_base_w(now, outdoor_c)
         leftover = surplus.leftover_w(solar, house, 0)
@@ -375,12 +379,18 @@ def simulate(
         use_floor = dec["use_floor_budget"]
         a = off_cmd()
         b = off_cmd()
-        if cheap_full:
+        if a_full:
             a = commanded(FULL_PSM, FULL_AMP)
             a["wanted_psm"] = FULL_PSM
             a["arm_phase"] = False
             last_psm[SERIAL_CHEAP] = None
             phase[SERIAL_CHEAP].tick(now, False)
+        if b_full:
+            b = commanded(FULL_PSM, FULL_AMP)
+            b["wanted_psm"] = FULL_PSM
+            b["arm_phase"] = False
+            last_psm[SERIAL_SURPLUS] = None
+            phase[SERIAL_SURPLUS].tick(now, False)
         surplus_serials = []
         if write_on:
             if planner.charger_surplus(policy, result, ts, enough_solar=enough):
@@ -393,16 +403,16 @@ def simulate(
                 session = False
                 split_hold = False
                 split.tick(now, False)
-                if not cheap_full:
+                if not a_full:
                     a = idle_surplus(SERIAL_CHEAP, now)
-                if n_chargers >= 2:
+                if n_chargers >= 2 and not b_full:
                     b = idle_surplus(SERIAL_SURPLUS, now)
             else:
                 session = True
         else:
-            if not cheap_full:
+            if not a_full:
                 a = idle_surplus(SERIAL_CHEAP, now)
-            if n_chargers >= 2:
+            if n_chargers >= 2 and not b_full:
                 b = idle_surplus(SERIAL_SURPLUS, now)
             session = False
             split_hold = False
@@ -1240,6 +1250,20 @@ def main():
         for t in overlap:
             assert_eq(t["a"]["amp"], 32, "A full power @ %s" % t["now"])
             assert_true(t["b"]["amp"], "B leftover beside full-power A @ %s" % t["now"])
+        both_full = sim_from_spec(
+            "midwinter-clear",
+            policy=POLICY_SOLAR_PRIORITY,
+            b_policy=POLICY_SOLAR_PRIORITY,
+        )
+        window_ticks = [t for t in both_full["ticks"] if t["cheap_full"]]
+        assert_true(window_ticks, "winter night still has a 22 kW window")
+        for t in window_ticks:
+            assert_eq(t["a"]["amp"], 32, "priority 1 is 22 kW @ %s" % t["now"])
+            assert_eq(
+                t["b"]["amp"],
+                32,
+                "priority 2 WaitCar still gets 22 kW MQTT @ %s" % t["now"],
+            )
 
     def test_solarandgrid_midsummer_still_22kw():
         sim = sim_from_spec("midsummer-clear", policy=POLICY_SOLAR_AND_GRID)

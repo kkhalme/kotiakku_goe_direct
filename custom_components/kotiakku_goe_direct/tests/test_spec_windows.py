@@ -444,6 +444,87 @@ def main():
             True,
             "all keys present is live",
         )
+        action = planner.charger_mqtt_publish_action
+        full = ("on", 2, 50, 32)
+        assert_eq(
+            action(full, {"frc": 1}, full),
+            "publish",
+            "frc=1 after an On write is a failed start: retry, do not wait-live",
+        )
+        assert_eq(
+            action(full, {"frc": 1, "amp": 0}, full),
+            "publish",
+            "WaitCar amp 0 / frc 1 retries 22 kW even if lot/psm are still missing",
+        )
+        assert_eq(
+            action(full, {"frc": 1, "psm": 2, "lot": 50, "amp": 0}, full),
+            "publish",
+            "complete live with amp 0 still needs a write",
+        )
+        assert_eq(
+            action(full, {"frc": 2}, full),
+            "skip_wait",
+            "On echo started: wait for the rest of the keys",
+        )
+        assert_eq(
+            action(full, None, full),
+            "skip_wait",
+            "no live yet after an On write still waits",
+        )
+        assert_eq(
+            action(full, None, ("off",)),
+            "publish",
+            "cheap window start after off is a new command",
+        )
+        assert_eq(
+            action(("off",), {"frc": 1}, full),
+            "skip_match",
+            "already force-off: record off so the next On is not skipped",
+        )
+        assert_eq(
+            action(full, {"frc": 1}, full, force=True),
+            "publish",
+            "window boundary force retries 22 kW",
+        )
+        assert_eq(
+            action(full, None, full, force=True),
+            "publish",
+            "first 22 kW session force-publishes even with no live echo yet",
+        )
+
+    def test_two_chargers_cheap_window_both_full_mqtt():
+        result = {"raw_windows": [{"start": 3000, "end": 4000}]}
+        role = planner.charger_mqtt_role
+        cmd = planner.charger_mqtt_command
+        action = planner.charger_mqtt_publish_action
+        high = "111111"
+        low = "222222"
+        roles = {
+            high: role("SolarPriority", result, 3500),
+            low: role("SolarPriority", result, 3500),
+        }
+        assert_eq(roles[high], planner.ROLE_FULL, "high leftover priority is 22 kW in the window")
+        assert_eq(roles[low], planner.ROLE_FULL, "low leftover priority is also 22 kW in the window")
+        assert_eq(
+            cmd(roles[low], surplus_on=False),
+            ("on", 2, 50, 32),
+            "lower-priority WaitCar still gets fup/psm/lot/amp/frc=2",
+        )
+        last = {high: ("on", 2, 50, 32), low: ("on", 2, 50, 32)}
+        live = {
+            high: {"frc": 2, "psm": 2, "lot": 50, "amp": 32},
+            low: {"frc": 1, "amp": 0},
+        }
+        assert_eq(
+            action(cmd(roles[high], surplus_on=False), live[high], last[high]),
+            "skip_match",
+            "already-charging high car does not republish",
+        )
+        assert_eq(
+            action(cmd(roles[low], surplus_on=False), live[low], last[low]),
+            "publish",
+            "lower car with Allowed To Charge off / 0 A is retried",
+        )
 
     def test_mqtt_apply_window_is_2s_from_first():
         action = planner.mqtt_apply_window_action
@@ -899,6 +980,7 @@ def main():
     case("full_power_solarpriority", test_full_power_solarpriority)
     case("charger_mqtt_is_one_decision", test_charger_mqtt_is_one_decision)
     case("charger_mqtt_needs_live_state", test_charger_mqtt_needs_live_state)
+    case("two_chargers_cheap_window_both_full_mqtt", test_two_chargers_cheap_window_both_full_mqtt)
     case("mqtt_apply_window_is_2s_from_first", test_mqtt_apply_window_is_2s_from_first)
     case("plan_result_is_a_window_list", test_plan_result_is_a_window_list)
     case("seed_tie_elapsed_gap_and_weighted_avg", test_seed_tie_elapsed_gap_and_weighted_avg)
