@@ -980,9 +980,11 @@ def charger_mqtt_live_contradicts(desired, actual):
 def charger_mqtt_waiting_skip(desired, actual, last, force=False):
     """True when we already published ``desired`` and live is still incomplete.
 
-    Do not skip when live already contradicts ``desired``: the first write
-    did not stick (typical: 22 kW on a WaitCar that still has ``frc=1`` /
-    ``amp`` 0 while another car is already taking the group).
+    ``force`` is only the 15 min safety interval (retry an unconfirmed
+    echo). A cheap window is a normal apply: every ROLE_FULL charger
+    gets On unless live already matches. Do not skip when live already
+    contradicts ``desired`` — ``frc=1`` / ``amp`` 0 after On means the
+    write did not stick.
     """
     if force or desired is None:
         return False
@@ -997,10 +999,11 @@ def charger_mqtt_publish_action(desired, actual, last, force=False):
     """``skip_match``, ``skip_wait``, or ``publish``.
 
     ``skip_match``: live already matches; record ``desired`` as last MQTT
-    (an off that was skipped because live is already ``frc=1`` must not
-    leave last MQTT as a previous On, or the next cheap window will skip).
-    ``skip_wait``: same command already sent, live incomplete, no contradict.
-    ``publish``: write now.
+    so a skipped off does not leave last MQTT as On.
+    ``skip_wait``: same command already sent, live incomplete, no
+    contradict. ``force`` (15 min interval) republishes that case.
+    ``publish``: write now, including every full-power charger whose
+    live ``frc`` / ``amp`` is still off.
     """
     if desired is None:
         return "skip_match"

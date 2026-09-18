@@ -1172,7 +1172,7 @@ class KotiakkuGoeDirectController:
     async def _on_boundary(self, _now=None):
         self._boundary_unsub = None
         self.notify()
-        self._schedule_apply(force=True)
+        self._schedule_apply()
         self._schedule_boundaries()
 
     async def async_plan(self):
@@ -2031,10 +2031,7 @@ class KotiakkuGoeDirectController:
             if cmd is None:
                 continue
             published = await self._publish_cmd(
-                serial,
-                cmd,
-                force=force or (role == ROLE_FULL and not had_full),
-                leftover=role == ROLE_SURPLUS,
+                serial, cmd, force=force, leftover=role == ROLE_SURPLUS
             )
             if published:
                 changed = True

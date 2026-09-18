@@ -482,14 +482,9 @@ def main():
             "already force-off: record off so the next On is not skipped",
         )
         assert_eq(
-            action(full, {"frc": 1}, full, force=True),
-            "publish",
-            "window boundary force retries 22 kW",
-        )
-        assert_eq(
             action(full, None, full, force=True),
             "publish",
-            "first 22 kW session force-publishes even with no live echo yet",
+            "15 min safety interval retries an On with no live echo",
         )
 
     def test_two_chargers_cheap_window_both_full_mqtt():
