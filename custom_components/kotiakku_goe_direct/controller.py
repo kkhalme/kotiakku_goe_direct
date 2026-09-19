@@ -98,8 +98,7 @@ from .planner import (
     MQTT_APPLY_S,
     charger_full_power as policy_full_power,
     charger_mqtt_command,
-    charger_mqtt_live_complete,
-    charger_mqtt_needs_update,
+    charger_mqtt_publish_action,
     charger_mqtt_role,
     charger_mqtt_status_value,
     charger_surplus as policy_surplus,
@@ -2114,15 +2113,15 @@ class KotiakkuGoeDirectController:
             return False
         live = self._charger_mqtt.get(serial)
         text = _mqtt_cmd_text(cmd)
-        if not charger_mqtt_needs_update(cmd, live):
+        action = charger_mqtt_publish_action(
+            cmd, live, self._last_mqtt.get(serial), force=force
+        )
+        if action == "skip_match":
+            self._last_mqtt[serial] = cmd
             if leftover or cmd[0] == "off":
                 self._remember_leftover(serial, cmd)
             return False
-        if (
-            not force
-            and not charger_mqtt_live_complete(cmd, live)
-            and self._last_mqtt.get(serial) == cmd
-        ):
+        if action == "skip_wait":
             _LOGGER.debug(
                 "kotiakku_goe_direct: %s mqtt skip waiting-live %s",
                 serial,
