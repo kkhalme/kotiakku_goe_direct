@@ -3,14 +3,19 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
+from .config import entry_config
 from .const import (
+    CONF_PREFERRED_START_PHASE,
     DEFAULT_KEEP_PHASE,
+    DEFAULT_PREFERRED_START_PHASE,
     DOMAIN,
     EID_KEEP_PHASE,
+    EID_PREFERRED_START_PHASE,
     KEEP_PHASE_OPTIONS,
     POLICIES,
     POLICY_FORCE_OFF,
     POLICY_UNTIL_UNPLUG,
+    preferred_start_option,
     restore_policy,
 )
 from .device import hub_device_info
@@ -18,8 +23,15 @@ from .device import hub_device_info
 
 async def async_setup_entry(hass, entry, async_add_entities):
     controller = hass.data[DOMAIN][entry.entry_id]
+    cfg = entry_config(entry)
     entities = [PolicySelect(controller, serial) for serial in controller.chargers]
     entities.append(KeepPhaseSelect(controller))
+    entities.append(
+        PreferredStartPhaseSelect(
+            controller,
+            preferred_start_option(cfg.get(CONF_PREFERRED_START_PHASE)),
+        )
+    )
     async_add_entities(entities)
 
 
@@ -92,6 +104,22 @@ class KeepPhaseSelect(_HubSelect):
             unique_id="kotiakku_goe_direct_after_charge_complete_keep_phase",
             name="After charge complete keep phase",
             icon="mdi:numeric-3-circle-outline",
+        )
+
+    async def _on_changed(self):
+        self._controller._schedule_apply()
+
+
+class PreferredStartPhaseSelect(_HubSelect):
+    def __init__(self, controller, default=DEFAULT_PREFERRED_START_PHASE):
+        super().__init__(
+            controller,
+            options=KEEP_PHASE_OPTIONS,
+            default=preferred_start_option(default),
+            entity_id=EID_PREFERRED_START_PHASE,
+            unique_id="kotiakku_goe_direct_surplus_preferred_start_phase",
+            name="Surplus preferred start phase",
+            icon="mdi:numeric-1-circle-outline",
         )
 
     async def _on_changed(self):

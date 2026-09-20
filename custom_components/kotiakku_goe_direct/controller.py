@@ -37,10 +37,10 @@ from .const import (
     DEFAULT_HOLD_MIN,
     DEFAULT_HOLD_MIN_W,
     DEFAULT_MAX_AMP,
+    DEFAULT_MAX_1PHASE_AMP,
     DEFAULT_MAX_HOURS,
     DEFAULT_MIN_AMP,
     DEFAULT_MIN_HOURS,
-    DEFAULT_PHASE3_MIN_W,
     DEFAULT_SETTLE_S,
     DEFAULT_SOC_HYST,
     DEFAULT_SOC_ON,
@@ -58,9 +58,9 @@ from .const import (
     EID_HOLD_MIN_W,
     EID_MAX,
     EID_MAX_AMP,
+    EID_MAX_1PHASE_AMP,
     EID_MIN,
     EID_MIN_AMP,
-    EID_PHASE3_MIN_W,
     EID_PRICE,
     EID_SETTLE_S,
     EID_SOC_HYST,
@@ -73,15 +73,18 @@ from .const import (
     EID_VOLTS,
     EID_KEEP_AMP,
     EID_KEEP_PHASE,
+    EID_PREFERRED_START_PHASE,
     POLICY_FORCE_ON,
     POLICY_FORCE_OFF,
     POLICIES,
     PRIORITY_MIN,
     DEFAULT_KEEP_AMP,
     DEFAULT_KEEP_PHASE,
+    DEFAULT_PREFERRED_START_PHASE,
     charger_off_mqtt,
     charger_on_mqtt,
     keep_phase_psm,
+    preferred_start_psm,
     restore_policy,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -495,8 +498,16 @@ class KotiakkuGoeDirectController:
     volts = _int_prop(EID_VOLTS, DEFAULT_VOLTS)
     min_amp = _int_prop(EID_MIN_AMP, DEFAULT_MIN_AMP)
     max_amp = _int_prop(EID_MAX_AMP, DEFAULT_MAX_AMP)
-    phase3_min_w = _int_prop(EID_PHASE3_MIN_W, DEFAULT_PHASE3_MIN_W)
     group_lot = _int_prop(EID_GROUP_LOT, DEFAULT_GROUP_LOT)
+
+    @property
+    def max_1phase_amp(self):
+        value = self._int_entity(EID_MAX_1PHASE_AMP, DEFAULT_MAX_1PHASE_AMP)
+        if value < 6:
+            return 6
+        if value > 32:
+            return 32
+        return min(value, self.max_amp)
 
     @property
     def keep_amp(self):
@@ -510,6 +521,12 @@ class KotiakkuGoeDirectController:
     @property
     def keep_psm(self):
         return keep_phase_psm(self._text_entity(EID_KEEP_PHASE, DEFAULT_KEEP_PHASE))
+
+    @property
+    def preferred_start_psm(self):
+        return preferred_start_psm(
+            self._text_entity(EID_PREFERRED_START_PHASE, DEFAULT_PREFERRED_START_PHASE)
+        )
 
     async def async_knobs_changed(self):
         self._schedule_apply()
@@ -1597,7 +1614,8 @@ class KotiakkuGoeDirectController:
                 min_amp=self.min_amp,
                 max_amp=self.max_amp,
                 group_lot=self.group_lot,
-                phase3_min_w=self.phase3_min_w,
+                max_1phase_amp=self.max_1phase_amp,
+                preferred_psm=self.preferred_start_psm,
             )
         offer_pending = {
             serial
@@ -1708,13 +1726,16 @@ class KotiakkuGoeDirectController:
     def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full, keep_on=None):
         """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
+        last_one = self._surplus_psm.get(surplus[0]) if len(surplus) == 1 else None
         lot, psm, amp = budget(
             target_w,
             self.min_amp,
             self.max_amp,
             self.group_lot,
             self.volts,
-            self.phase3_min_w,
+            self.max_1phase_amp,
+            last_psm=last_one,
+            preferred_psm=self.preferred_start_psm,
         )
         lot, psm, amp = group_surplus_setpoint(
             lot,
@@ -1745,7 +1766,7 @@ class KotiakkuGoeDirectController:
             states=states,
             min_amp=self.min_amp,
             volts=self.volts,
-            phase3_min_w=self.phase3_min_w,
+            max_1phase_amp=self.max_1phase_amp,
             split_floor_w=self.split_floor_w,
             split_hold=self.split_session,
             split_expired=split_expired,
@@ -1782,7 +1803,7 @@ class KotiakkuGoeDirectController:
                 max_amp=self.max_amp,
                 group_lot=self.group_lot,
                 volts=self.volts,
-                phase3_min_w=self.phase3_min_w,
+                max_1phase_amp=self.max_1phase_amp,
                 overdraw=overdraw,
             )
         targets = {}
@@ -1813,9 +1834,10 @@ class KotiakkuGoeDirectController:
                 self.max_amp,
                 self.group_lot,
                 self.volts,
-                self.phase3_min_w,
+                self.max_1phase_amp,
                 last_psm=self._surplus_psm.get(serial),
                 hold_expired=serial in self._phase_expired,
+                preferred_psm=self.preferred_start_psm,
             )
             targets[serial] = pub
             self._arm_phase(serial, pub["arm_phase"])

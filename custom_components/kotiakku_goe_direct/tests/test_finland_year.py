@@ -298,7 +298,9 @@ def simulate(
     def surplus_cmd(serial, watts_i, use_floor, now):
         source_w = 0 if use_floor else int(watts_i)
         last = last_psm[serial]
-        wanted = surplus.budget(source_w, 6, 32, 50, VOLTS, 4140)[1]
+        wanted = surplus.budget(
+            source_w, 6, 32, 50, VOLTS, 32, last_psm=last
+        )[1]
         expired = phase[serial].tick(now, last in (1, 2) and last != wanted)
         pub = surplus.surplus_phase_budget(
             source_w,
@@ -306,7 +308,7 @@ def simulate(
             32,
             50,
             VOLTS,
-            4140,
+            32,
             last_psm=last,
             hold_expired=expired,
         )
@@ -970,7 +972,7 @@ def write_report(sims, out_dir):
             "",
             "- **Midwinter / February / October / DST**: today's kWh stays well under 40, and night hours are under 1 kWh, so SolarPriority 22 kW runs in the night window. After that window ends it stays the plan (idle) until prices or the date change.",
             "- **April mixed**: after the last usable solar hour (and after 14:00 prices), tomorrow just crossing 40 kWh skips night 22 kW. Before that, today's full-day kWh gates. Surplus still starts in the brief midday sun.",
-            "- **Midsummer clear**: ~87 kWh tomorrow, SolarPriority never force-on after the last usable solar hour. Polar-day-long sun keeps today's gate on while later hours still have ≥ 1 kWh. Midday leftover still runs surplus (not 22 kW).",
+            "- **Midsummer clear**: ~87 kWh tomorrow, SolarPriority never force-on after the last usable solar hour. Polar-day-long sun keeps today's gate on while later hours still have ≥ 1 kWh. Midday leftover still runs surplus on 1-phase up toward 32 A (the 10 kW rooftop peaks under the leftover where 3-phase would deliver more).",
             "- **Midsummer overcast**: ~16 kWh is not enough solar; Off-sun still drops hours with ≥ 1 kWh expected energy.",
             "",
             "![Season comparison](summary.png)",
@@ -1093,12 +1095,27 @@ def main():
         sim = sim_from_spec("midsummer-clear")
         summary(sim)
         assert_48h_nordpool(sim)
-        assert_gt(max_leftover(sim["ticks"]), 5000, "midsummer leftover")
+        leftover_max = max_leftover(sim["ticks"])
+        assert_gt(leftover_max, 5000, "midsummer leftover")
+        assert_true(
+            leftover_max < 7590,
+            "10 kW rooftop peaks under 3-phase-better leftover (%s W)" % leftover_max,
+        )
         surplus_h = hours_where(sim["ticks"], lambda t: t["write_on"])
         assert_gt(surplus_h, 6, "surplus runs through the long day")
-        three = [t for t in sim["ticks"] if t["a"]["psm"] == 2]
-        assert_true(three, "clear midsummer reaches 3-phase")
-        assert_true(any(t["a"]["amp"] > 6 for t in three), "3-phase amp tracks leftover, not stuck at 6 A")
+        on = [
+            t
+            for t in sim["ticks"]
+            if t["write_on"] and not t["cheap_full"] and t["a"]["amp"]
+        ]
+        one_p = [t for t in on if t["a"]["psm"] == 1]
+        assert_true(one_p, "clear midsummer leftover stays 1-phase")
+        assert_true(
+            any(t["a"]["amp"] >= 30 for t in one_p),
+            "1-phase runs near 32 A while leftover still fits",
+        )
+        three = [t for t in on if t["a"]["psm"] == 2]
+        assert_eq(three, [], "leftover under 7590 W does not switch to 3-phase")
         held_up = [
             t
             for t in sim["ticks"]
@@ -1109,8 +1126,8 @@ def main():
             and t["a"].get("wanted_psm") == 2
         ]
         for t in held_up:
-            three_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140)[2]
-            one_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140, force_psm=1)[2]
+            three_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 32)[2]
+            one_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 32, force_psm=1)[2]
             assert_eq(t["a"]["amp"], one_amp, "held 1-phase uses 1-phase leftover amp")
             assert_true(t["a"]["amp"] != three_amp or one_amp == three_amp, "not the pending 3-phase amp")
         assert_eq(

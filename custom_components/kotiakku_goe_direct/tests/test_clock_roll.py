@@ -456,7 +456,7 @@ def main():
 
     def test_surplus_phase_hold_over_15_min():
         phase = surplus.surplus_phase_budget
-        args = (6, 32, 50, 230, 4140)
+        args = (6, 32, 50, 230, 32)
         first = phase(8000, *args)
         assert_eq((first["psm"], first["amp"], first["arm_phase"]), (2, 11, False), "first start is 3-phase")
         up = phase(8000, *args, last_psm=1)
@@ -471,6 +471,8 @@ def main():
         assert_eq((still["psm"], still["amp"], still["arm_phase"]), (2, 6, True), "still holding after leftover chatter")
         down_done = phase(3000, *args, last_psm=2, hold_expired=True)
         assert_eq((down_done["psm"], down_done["amp"]), (1, 13), "after 15 min: 1-phase 13 A")
+        stay = phase(6000, *args, last_psm=2)
+        assert_eq((stay["psm"], stay["amp"], stay["arm_phase"]), (2, 8, False), "8 kW → 6 kW keeps 3-phase")
 
     def test_until_unplug_clears_only_that_charger():
         on, seen = until_unplug_tick(True, True, False)

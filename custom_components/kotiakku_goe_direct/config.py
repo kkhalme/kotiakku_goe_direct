@@ -10,6 +10,9 @@ from .const import (
     CONF_GROUP_LOT,
     CONF_HOUSE_ENTITY,
     CONF_KOTIAKKU_IN_KW,
+    CONF_MAX_1PHASE_AMP,
+    CONF_PHASE3_MIN_W,
+    CONF_PREFERRED_START_PHASE,
     CONF_PRICE_ENTITY,
     CONF_PRIORITY,
     CONF_SOC_ENTITY,
@@ -19,10 +22,13 @@ from .const import (
     CONF_SOLAR_TOMORROW_ENTITY,
     DEFAULT_CONTROLLER_IN_KW,
     DEFAULT_KOTIAKKU_IN_KW,
+    DEFAULT_MAX_1PHASE_AMP,
+    DEFAULT_PREFERRED_START_PHASE,
     PRIORITY_MAX,
     PRIORITY_MIN,
     SURPLUS_NUMBER_SPECS,
     default_charger_priority,
+    preferred_start_option,
 )
 from .serial import valid_serial
 
@@ -221,7 +227,20 @@ def _with_legacy(raw: dict) -> dict:
         src[CONF_SOLAR_ENOUGH_KWH] = src[_LEGACY_SOLAR_ENOUGH]
     if CONF_GROUP_LOT not in src and src.get(CONF_ECO_LOT) is not None:
         src[CONF_GROUP_LOT] = src[CONF_ECO_LOT]
+    if CONF_MAX_1PHASE_AMP not in src and src.get(CONF_PHASE3_MIN_W) is not None:
+        src[CONF_MAX_1PHASE_AMP] = _legacy_max_1phase_amp(src.get(CONF_PHASE3_MIN_W))
     return src
+
+
+def _legacy_max_1phase_amp(raw, default=DEFAULT_MAX_1PHASE_AMP) -> int:
+    """Map old 3-phase leftover watts onto max 1-phase amp. Watts (>32) → default 32 A."""
+    try:
+        value = int(round(float(raw)))
+    except (TypeError, ValueError):
+        return int(default)
+    if 6 <= value <= 32:
+        return value
+    return int(default)
 
 
 def source_refresh_ids(*groups) -> list[str]:
@@ -248,6 +267,13 @@ def persistable(raw: dict) -> dict:
         out[key] = as_bool(cfg.get(key), default)
     for key, default in INT_KEYS.items():
         out[key] = as_int(cfg.get(key), default)
+    if out.get(CONF_MAX_1PHASE_AMP) is not None:
+        out[CONF_MAX_1PHASE_AMP] = _legacy_max_1phase_amp(
+            out[CONF_MAX_1PHASE_AMP], DEFAULT_MAX_1PHASE_AMP
+        )
+    out[CONF_PREFERRED_START_PHASE] = preferred_start_option(
+        cfg.get(CONF_PREFERRED_START_PHASE, DEFAULT_PREFERRED_START_PHASE)
+    )
     return out
 
 
