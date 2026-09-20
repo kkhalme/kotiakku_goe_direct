@@ -11,6 +11,8 @@ from .config import persistable, BOOL_KEYS, INT_KEYS, STRING_KEYS
 from .const import (
     CONF_CHARGERS,
     CONF_ECO_LOT,
+    CONF_PHASE3_MIN_W,
+    CONF_PREFERRED_START_PHASE,
     CONF_PRICE_ENTITY,
     CONF_PRIORITY,
     DOMAIN,
@@ -55,6 +57,8 @@ CONFIG_SCHEMA = vol.Schema(
                     for key, default in INT_KEYS.items()
                 },
                 vol.Optional(CONF_ECO_LOT): vol.Coerce(int),
+                vol.Optional(CONF_PHASE3_MIN_W): vol.Coerce(int),
+                vol.Optional(CONF_PREFERRED_START_PHASE): cv.string,
                 **{
                     vol.Optional(key, default=default): cv.boolean
                     for key, default in BOOL_KEYS.items()

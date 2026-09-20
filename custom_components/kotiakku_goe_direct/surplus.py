@@ -552,26 +552,47 @@ def _phase_offer_w(available_w, phases, min_amp, max_amp, volts):
     )
 
 
+def _clamp_amp(value, min_amp, max_amp):
+    try:
+        amp = int(value)
+    except (TypeError, ValueError):
+        amp = int(max_amp)
+    min_amp = int(min_amp)
+    max_amp = int(max_amp)
+    if amp < min_amp:
+        return min_amp
+    if amp > max_amp:
+        return max_amp
+    return amp
+
+
+def _one_phase_cap(min_amp, max_amp, max_1phase_amp):
+    """Surplus 1-phase amp ceiling, at most the per-charger cap."""
+    return _clamp_amp(max_1phase_amp, min_amp, max_amp)
+
+
 def surplus_wanted_psm(
     available_w,
     min_amp,
     max_amp,
     volts,
-    phase3_min_w,
+    max_1phase_amp=32,
     last_psm=None,
+    preferred_psm=1,
 ):
     """1- or 3-phase leftover should run.
 
     Keep the active phase while it can still offer leftover. 1-phase
-    stays until 3-phase would deliver more watts (1-phase amp is capped).
-    3-phase stays until leftover cannot hold the 6 A 3-phase floor.
-    ``phase3_min_w`` only delays going *to* 3-phase; it does not force
-    3→1. First start prefers 1-phase until 3-phase is strictly better.
+    stays until 3-phase would deliver more watts (1-phase amp is capped
+    at ``max_1phase_amp``). 3-phase stays until leftover cannot hold the
+    6 A 3-phase floor. First start: if both phases can run and 1-phase
+    still matches leftover, use ``preferred_psm`` (default 1-phase).
     """
     min_amp = int(min_amp)
     max_amp = int(max_amp)
     volts = int(volts)
     available_w = int(available_w)
+    one_cap = _one_phase_cap(min_amp, max_amp, max_1phase_amp)
     three_min = three_phase_min_w(min_amp, volts)
     try:
         last = None if last_psm is None else int(last_psm)
@@ -579,19 +600,26 @@ def surplus_wanted_psm(
         last = None
     if last not in (1, 2):
         last = None
-    if last == 2:
-        return 1 if available_w < three_min else 2
-    if available_w < three_min:
-        return 1
     try:
-        allow_3 = int(phase3_min_w)
+        pref = 1 if preferred_psm is None else int(preferred_psm)
     except (TypeError, ValueError):
-        allow_3 = three_min
-    if available_w < allow_3:
-        return 1
-    w1 = _phase_offer_w(available_w, 1, min_amp, max_amp, volts)
-    w3 = _phase_offer_w(available_w, 3, min_amp, max_amp, volts)
-    return 2 if w3 > w1 else 1
+        pref = 1
+    if pref not in (1, 2):
+        pref = 1
+    w1 = _phase_offer_w(available_w, 1, min_amp, one_cap, volts)
+    three_ok = available_w >= three_min
+    w3 = (
+        _phase_offer_w(available_w, 3, min_amp, max_amp, volts) if three_ok else 0
+    )
+    if last == 2:
+        return 1 if not three_ok else 2
+    if last == 1:
+        return 2 if three_ok and w3 > w1 else 1
+    if three_ok and w3 > w1:
+        return 2
+    if three_ok:
+        return 2 if pref == 2 else 1
+    return 1
 
 
 def budget(
@@ -600,14 +628,16 @@ def budget(
     max_amp,
     group_lot,
     volts,
-    phase3_min_w,
+    max_1phase_amp=32,
     force_psm=None,
     last_psm=None,
+    preferred_psm=1,
 ):
     min_amp = int(min_amp)
     volts = int(volts)
     min_hold_w = min_amp * volts
     target_w = max(int(available_w), min_hold_w)
+    one_cap = _one_phase_cap(min_amp, max_amp, max_1phase_amp)
     try:
         force_psm = None if force_psm is None else int(force_psm)
     except (TypeError, ValueError):
@@ -619,12 +649,19 @@ def budget(
         phases = 1
     else:
         psm_i = surplus_wanted_psm(
-            target_w, min_amp, max_amp, volts, phase3_min_w, last_psm=last_psm
+            target_w,
+            min_amp,
+            max_amp,
+            volts,
+            max_1phase_amp,
+            last_psm=last_psm,
+            preferred_psm=preferred_psm,
         )
         phases = 3 if psm_i == 2 else 1
     psm = 2 if phases == 3 else 1
     lot = min(int(group_lot), max(min_amp, target_w // (volts * phases)))
-    amp = min(int(max_amp), lot)
+    amp_cap = one_cap if phases == 1 else int(max_amp)
+    amp = min(amp_cap, lot)
     return lot, psm, amp
 
 
@@ -659,18 +696,20 @@ def surplus_phase_budget(
     max_amp,
     group_lot,
     volts,
-    phase3_min_w,
+    max_1phase_amp=32,
     *,
     last_psm=None,
     hold_expired=False,
+    preferred_psm=1,
 ):
     """``lot`` / ``psm`` / ``amp`` with sticky phase plus 1↔3 hold.
 
     Wanted ``psm`` keeps the last phase while it can still offer leftover.
     A real 1↔3 change still waits ``hold_min``. ``amp`` is leftover on the
     phase we will actually run — not the pending other-phase amp, and
-    not the last take. 1→3: 1-phase leftover (capped at max amp).
-    3→1: 3-phase min amp. Holding ``psm`` must not freeze amp.
+    not the last take. 1→3: 1-phase leftover (capped at max 1-phase amp).
+    3→1: 3-phase min amp. Holding ``psm`` must not freeze amp. First start
+    uses ``preferred_psm`` when both phases can still offer leftover.
     """
     _lot, wanted_psm, _wanted_amp = budget(
         available_w,
@@ -678,8 +717,9 @@ def surplus_phase_budget(
         max_amp,
         group_lot,
         volts,
-        phase3_min_w,
+        max_1phase_amp,
         last_psm=last_psm,
+        preferred_psm=preferred_psm,
     )
     hold = phase_hold_psm(wanted_psm, last_psm, hold_expired)
     lot, psm, amp = budget(
@@ -688,8 +728,9 @@ def surplus_phase_budget(
         max_amp,
         group_lot,
         volts,
-        phase3_min_w,
+        max_1phase_amp,
         force_psm=hold["psm"],
+        preferred_psm=preferred_psm,
     )
     return {
         "lot": lot,
@@ -752,7 +793,7 @@ def group_lot_for_allocations(
     max_amp,
     group_lot,
     volts,
-    phase3_min_w,
+    max_1phase_amp,
     overdraw=False,
 ):
     """Keep leftover ``lot`` when every surplus charger gets the same watts.
@@ -769,7 +810,7 @@ def group_lot_for_allocations(
     if not overdraw and len(set(watts_values)) <= 1:
         return lot
     amp_sum = sum(
-        int(budget(watts_i, min_amp, max_amp, group_lot, volts, phase3_min_w)[2])
+        int(budget(watts_i, min_amp, max_amp, group_lot, volts, max_1phase_amp)[2])
         for watts_i in watts_values
     )
     return min(int(group_lot), max(lot, amp_sum))
@@ -822,12 +863,12 @@ def idle_complete(state, take_w=None):
     return take < KEEP_PROBE_TAKE_W
 
 
-def min_charge_w(remaining, min_amp, volts, phase3_min_w, max_amp=32):
+def min_charge_w(remaining, min_amp, volts, max_1phase_amp=32, max_amp=32):
     """Watts for the official 6 A floor at the leftover's 1- or 3-phase."""
     remaining = max(int(remaining), 0)
     min_amp = int(min_amp)
     volts = int(volts)
-    if surplus_wanted_psm(remaining, min_amp, max_amp, volts, phase3_min_w) == 2:
+    if surplus_wanted_psm(remaining, min_amp, max_amp, volts, max_1phase_amp) == 2:
         return min_amp * volts * 3
     return min_amp * volts
 
@@ -908,7 +949,8 @@ def surplus_want_w(
     min_amp=6,
     max_amp=32,
     group_lot=50,
-    phase3_min_w=4140,
+    max_1phase_amp=32,
+    preferred_psm=1,
 ):
     """Watts the car should be treated as wanting from leftover.
 
@@ -934,8 +976,9 @@ def surplus_want_w(
         max_amp,
         group_lot,
         volts,
-        phase3_min_w,
+        max_1phase_amp,
         last_psm=last_psm,
+        preferred_psm=preferred_psm,
     )
     if last_amp is None or last_psm is None:
         return leftover_w
@@ -951,9 +994,9 @@ def surplus_want_w(
     return take_w
 
 
-def _can_charge(watts, min_amp, volts, phase3_min_w):
+def _can_charge(watts, min_amp, volts, max_1phase_amp=32):
     watts = max(int(watts), 0)
-    return watts >= min_charge_w(watts, min_amp, volts, phase3_min_w)
+    return watts >= min_charge_w(watts, min_amp, volts, max_1phase_amp)
 
 
 def _serial_take(serial, remaining, charger_max_w, take_w, states):
@@ -965,16 +1008,16 @@ def _serial_take(serial, remaining, charger_max_w, take_w, states):
     return offered
 
 
-def _steal_keep_w(remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w):
+def _steal_keep_w(remaining, prev_take, split_min_w, min_amp, volts, max_1phase_amp=32):
     """Watts the high car keeps after a split_min steal. None unless both
     shares are at least ``split_min_w`` and still meet 6 A."""
     split_min_w = int(split_min_w)
     keep_w = int(remaining) + int(prev_take) - split_min_w
     if keep_w < split_min_w:
         return None
-    if not _can_charge(keep_w, min_amp, volts, phase3_min_w):
+    if not _can_charge(keep_w, min_amp, volts, max_1phase_amp):
         return None
-    if not _can_charge(split_min_w, min_amp, volts, phase3_min_w):
+    if not _can_charge(split_min_w, min_amp, volts, max_1phase_amp):
         return None
     return keep_w
 
@@ -991,7 +1034,7 @@ def surplus_allocation_plan(
     states=None,
     min_amp=6,
     volts=230,
-    phase3_min_w=4140,
+    max_1phase_amp=32,
     split_floor_w=500,
     split_hold=False,
     split_expired=False,
@@ -1177,7 +1220,7 @@ def surplus_allocation_plan(
     remainder_after_high = leftover_w
     for serial in pool:
         if not allocations:
-            if not _can_charge(remaining, min_amp, volts, phase3_min_w):
+            if not _can_charge(remaining, min_amp, volts, max_1phase_amp):
                 break
             offered = min(remaining, charger_max_w)
             take = _take_of(serial, remaining)
@@ -1189,7 +1232,7 @@ def surplus_allocation_plan(
             if overdraw_serials:
                 break
             continue
-        need = min_charge_w(remaining, min_amp, volts, phase3_min_w)
+        need = min_charge_w(remaining, min_amp, volts, max_1phase_amp)
         if remaining >= split_min_w and remaining >= need:
             offered = min(remaining, charger_max_w)
             take = _take_of(serial, remaining)
@@ -1210,7 +1253,7 @@ def surplus_allocation_plan(
             and not overdraw_serials
         )
         keep_w = _steal_keep_w(
-            remaining, prev_take, split_min_w, min_amp, volts, phase3_min_w
+            remaining, prev_take, split_min_w, min_amp, volts, max_1phase_amp
         )
         if want_steal and prev is not None and keep_w is not None:
             allocations[prev] = keep_w

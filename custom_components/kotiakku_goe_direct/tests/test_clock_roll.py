@@ -456,7 +456,7 @@ def main():
 
     def test_surplus_phase_hold_over_15_min():
         phase = surplus.surplus_phase_budget
-        args = (6, 32, 50, 230, 4140)
+        args = (6, 32, 50, 230, 32)
         first = phase(8000, *args)
         assert_eq((first["psm"], first["amp"], first["arm_phase"]), (2, 11, False), "first start is 3-phase")
         up = phase(8000, *args, last_psm=1)

@@ -21,7 +21,7 @@ VOLTS = 230
 MIN_A = 6
 MAX_A = 32
 GROUP_LOT = 50
-P3 = 4140
+MAX_1P = 32
 SPLIT_MIN = 3000
 SPLIT_FLOOR = 500
 HOLD_W = 1000
@@ -37,7 +37,7 @@ def leftover_kw_args(**extra):
         charger_max_w=MAX_A * VOLTS * 3,
         min_amp=MIN_A,
         volts=VOLTS,
-        phase3_min_w=P3,
+        max_1phase_amp=32,
     )
     kw.update(extra)
     return kw
@@ -72,7 +72,7 @@ def mqtt_for(leftover, session, *, soc=96, window_ok=True, floor_expired=False,
     for serial, watts_i in plan["allocations"].items():
         source_w = 0 if dec["use_floor_budget"] else min(int(watts_i), max(int(leftover), 0))
         cmds[serial] = surplus.surplus_phase_budget(
-            source_w, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3,
+            source_w, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P,
             last_psm=last_psm.get(serial),
         )
     return dec, cmds
@@ -265,36 +265,36 @@ def main():
         assert_true(deficit["use_floor_budget"], "negative leftover is a low hold, not abs'd")
 
     def test_three_kw_is_13a_one_phase_not_a_hold():
-        lot, psm, amp = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 13), "3 kW is 1-phase 13 A")
-        lot, psm, amp = surplus.budget(300, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(300, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 6), "300 W budgets 6 A floor, not 13 A")
-        lot, psm, amp = surplus.budget(0, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(0, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 6), "0 W floor is 6 A 1-phase")
-        lot, psm, amp = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 18), "4140 W first start stays 1-phase 18 A")
-        stay3 = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3, last_psm=2)
+        stay3 = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P, last_psm=2)
         assert_eq((stay3[1], stay3[2]), (2, 6), "active 3-phase keeps 6 A at the 3-phase floor")
-        lot, psm, amp = surplus.budget(2500, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(2500, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 10), "2500 W is 1-phase 10 A")
-        hold3 = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3, force_psm=2)
+        hold3 = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P, force_psm=2)
         assert_eq((hold3[1], hold3[2]), (2, 6), "forced 3-phase below 4140 W stays 6 A")
-        lot, psm, amp = surplus.budget(4139, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(4139, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 17), "1 W under 4140 W stays 1-phase")
-        lot, psm, amp = surplus.budget(7589, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(7589, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 32), "just under 3-phase-better stays 1-phase 32 A")
-        lot, psm, amp = surplus.budget(7590, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(7590, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (2, 11), "7590 W 3-phase delivers more than 32 A 1-phase")
-        lot, psm, amp = surplus.budget(-100, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(-100, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((psm, amp), (1, 6), "negative leftover still floors at 6 A")
-        lot, psm, amp = surplus.budget(100000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        lot, psm, amp = surplus.budget(100000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((lot, amp), (50, 32), "group_lot then max_amp clip a huge leftover")
-        lot, psm, amp = surplus.budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3, force_psm="x")
+        lot, psm, amp = surplus.budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P, force_psm="x")
         assert_eq((psm, amp), (2, 11), "bad force_psm is auto")
-        assert_eq(surplus.min_charge_w(0, MIN_A, VOLTS, P3), 1380, "0 W floor is 1-phase 6 A")
-        assert_eq(surplus.min_charge_w(4139, MIN_A, VOLTS, P3), 1380, "just under 3-phase min")
-        assert_eq(surplus.min_charge_w(4140, MIN_A, VOLTS, P3), 1380, "4140 W first start is still 1-phase 6 A")
-        assert_eq(surplus.min_charge_w(7590, MIN_A, VOLTS, P3), 4140, "3-phase better than 32 A 1-phase uses 6 A × 3")
+        assert_eq(surplus.min_charge_w(0, MIN_A, VOLTS, MAX_1P), 1380, "0 W floor is 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(4139, MIN_A, VOLTS, MAX_1P), 1380, "just under 3-phase min")
+        assert_eq(surplus.min_charge_w(4140, MIN_A, VOLTS, MAX_1P), 1380, "4140 W first start is still 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(7590, MIN_A, VOLTS, MAX_1P), 4140, "3-phase better than 32 A 1-phase uses 6 A × 3")
 
     def test_unplugged_first_does_not_keep_3kw_steal():
         alloc = surplus.surplus_allocations
@@ -374,7 +374,7 @@ def main():
         assert_eq(
             surplus.group_lot_for_allocations(
                 11, waiting["lot_allocations"],
-                min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140,
+                min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32,
                 overdraw=True,
             ),
             22,
@@ -437,7 +437,7 @@ def main():
         assert_eq(
             surplus.group_lot_for_allocations(
                 17, lead_plan["lot_allocations"],
-                min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140,
+                min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32,
             ),
             26,
             "9+3 steal raises lot to 13 A + 13 A without the Idle arm",
@@ -589,21 +589,21 @@ def main():
         assert_eq(setp(25, 2, 25, n_full=1, group_lot=50), (50, 2, 25), "do not cap leftover amp for 32 A")
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {A: 9000, B: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
+                17, {A: 9000, B: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             26,
             "9+3 kW raises lot to 13 A + 13 A",
         )
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {A: 12000, B: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
+                17, {A: 12000, B: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             17,
             "equal leftover does not sum amps",
         )
 
     def test_phase_hold_tracks_amp_on_held_phase():
-        args = (MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        args = (MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         first = surplus.surplus_phase_budget(8000, *args)
         assert_eq((first["psm"], first["amp"], first["arm_phase"]), (2, 11, False), "first start 3-phase")
         up = surplus.surplus_phase_budget(8000, *args, last_psm=1)
@@ -624,10 +624,36 @@ def main():
         keep1 = surplus.surplus_phase_budget(5000, *args, last_psm=1)
         assert_eq((keep1["psm"], keep1["amp"], keep1["arm_phase"]), (1, 21, False), "5 kW keeps active 1-phase")
         assert_eq(keep1["wanted_psm"], 1, "1-phase can still offer 5 kW")
-        delay = surplus.surplus_phase_budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 10000, last_psm=1)
-        assert_eq((delay["psm"], delay["amp"], delay["wanted_psm"]), (1, 32, 1), "phase3_min_w delays 1→3")
-        still3 = surplus.surplus_phase_budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 10000, last_psm=2)
-        assert_eq((still3["psm"], still3["wanted_psm"], still3["arm_phase"]), (2, 2, False), "phase3_min_w does not force 3→1")
+        cap16 = surplus.surplus_phase_budget(5000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 16, last_psm=1)
+        assert_eq(
+            (cap16["psm"], cap16["amp"], cap16["wanted_psm"], cap16["arm_phase"]),
+            (1, 16, 2, True),
+            "16 A 1-phase cap wants 3-phase at 5 kW",
+        )
+        still3 = surplus.surplus_phase_budget(5000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 16, last_psm=2)
+        assert_eq(
+            (still3["psm"], still3["wanted_psm"], still3["arm_phase"]),
+            (2, 2, False),
+            "max 1-phase amp does not force 3→1",
+        )
+        pref3 = surplus.surplus_phase_budget(6000, *args, preferred_psm=2)
+        assert_eq((pref3["psm"], pref3["amp"], pref3["arm_phase"]), (2, 8, False), "preferred 3-phase first start 6 kW")
+        keep_pref = surplus.surplus_phase_budget(6000, *args, last_psm=1, preferred_psm=2)
+        assert_eq(
+            (keep_pref["psm"], keep_pref["amp"], keep_pref["arm_phase"]),
+            (1, 26, False),
+            "preferred start does not switch an active 1-phase",
+        )
+        keep3_pref1 = surplus.surplus_phase_budget(6000, *args, last_psm=2, preferred_psm=1)
+        assert_eq(
+            (keep3_pref1["psm"], keep3_pref1["amp"], keep3_pref1["arm_phase"]),
+            (2, 8, False),
+            "preferred start does not drop an active 3-phase",
+        )
+        must3 = surplus.surplus_phase_budget(8000, *args, preferred_psm=1)
+        assert_eq((must3["psm"], must3["amp"]), (2, 11), "8 kW first start is 3-phase even if preferred 1-phase")
+        below = surplus.surplus_phase_budget(3000, *args, preferred_psm=2)
+        assert_eq((below["psm"], below["amp"]), (1, 13), "below 3-phase floor first start is 1-phase")
 
     def test_car_states_plugged_charging_finished():
         assert_eq(surplus.car_plugged("Idle"), False, "Idle is unplugged")
@@ -761,7 +787,7 @@ def main():
         )
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {A: 8000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
+                17, {A: 8000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             17,
             "single allocation does not raise lot",

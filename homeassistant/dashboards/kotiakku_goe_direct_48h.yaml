@@ -487,8 +487,8 @@ views:
                   const n = Number(entity.state);
                   const v = Number.isFinite(n) ? n / 1000 : 2;
                   return [[start.getTime(), v], [end.getTime(), v]];
-              - entity: number.kotiakku_goe_direct_phase3_min_w
-                name: 3-phase
+              - entity: number.kotiakku_goe_direct_max_1phase_amp
+                name: 1-phase max
                 yaxis_id: kw
                 type: line
                 color: "#6a3d9a"
@@ -500,7 +500,7 @@ views:
                   in_header: false
                 data_generator: |
                   const n = Number(entity.state);
-                  const v = Number.isFinite(n) ? n / 1000 : 4.14;
+                  const v = Number.isFinite(n) ? n * 230 / 1000 : 7.36;
                   return [[start.getTime(), v], [end.getTime(), v]];
 
           - type: entities
@@ -533,4 +533,6 @@ views:
               - entity: number.kotiakku_goe_direct_offsun_hour_kwh
               - entity: select.kotiakku_goe_direct_after_charge_complete_keep_phase
               - entity: number.kotiakku_goe_direct_after_charge_complete_keep_a
+              - entity: select.kotiakku_goe_direct_surplus_preferred_start_phase
+              - entity: number.kotiakku_goe_direct_max_1phase_amp
               - entity: text.kotiakku_goe_direct_electricity_price_sensor

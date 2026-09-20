@@ -172,6 +172,16 @@ class SurplusNumber(_HubNumber):
         self._attr_unique_id = spec["unique_id"]
         self._attr_name = spec["name"]
 
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        try:
+            value = float(self._attr_native_value)
+        except (TypeError, ValueError):
+            self._attr_native_value = self._default
+            return
+        if value < self._attr_native_min_value or value > self._attr_native_max_value:
+            self._attr_native_value = self._default
+
     async def _on_changed(self):
         if self.entity_id in (EID_SOLAR_ENOUGH_KWH, EID_OFFSUN_HOUR_KWH):
             await self._controller.async_plan()

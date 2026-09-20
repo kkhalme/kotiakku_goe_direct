@@ -806,31 +806,31 @@ def main():
         assert_eq(surplus.effective_ev_w(0, 3000, controller_usable=False), 3000, "unknown Controller uses nrg")
         assert_eq(surplus.effective_ev_w(3000, None), 3000, "no nrg keeps Controller")
         assert_eq(surplus.effective_ev_w(3000, 0), 3000, "zero nrg is missing, keep Controller")
-        lot, psm, amp = budget(2500, 6, 32, 50, 230, 4140)
+        lot, psm, amp = budget(2500, 6, 32, 50, 230, 32)
         assert_eq(lot, 10, "2500 W 1-phase lot")
         assert_eq(psm, 1, "1-phase")
         assert_eq(amp, 10, "amp")
-        lot3, psm3, amp3 = budget(16000, 6, 32, 50, 230, 4140)
+        lot3, psm3, amp3 = budget(16000, 6, 32, 50, 230, 32)
         assert_eq(lot3, 23, "16 kW 3-phase lot")
         assert_eq(psm3, 2, "3-phase")
         assert_eq(amp3, 23, "amp cap lot")
-        lot5, psm5, amp5 = budget(5000, 6, 32, 50, 230, 4140)
+        lot5, psm5, amp5 = budget(5000, 6, 32, 50, 230, 32)
         assert_eq((lot5, psm5, amp5), (21, 1, 21), "5 kW first start is 1-phase 21 A")
-        stay5 = budget(5000, 6, 32, 50, 230, 4140, last_psm=2)
+        stay5 = budget(5000, 6, 32, 50, 230, 32, last_psm=2)
         assert_eq((stay5[1], stay5[2]), (2, 7), "active 3-phase keeps 7 A at 5 kW")
-        lot8, psm8, amp8 = budget(8000, 6, 32, 50, 230, 4140)
+        lot8, psm8, amp8 = budget(8000, 6, 32, 50, 230, 32)
         assert_eq((lot8, psm8, amp8), (11, 2, 11), "8 kW is 3-phase 11 A")
-        lot12, psm12, amp12 = budget(12000, 6, 32, 50, 230, 4140)
+        lot12, psm12, amp12 = budget(12000, 6, 32, 50, 230, 32)
         assert_eq((lot12, psm12, amp12), (17, 2, 17), "12 kW is 3-phase 17 A")
-        lot_min3, psm_min3, amp_min3 = budget(4140, 6, 32, 50, 230, 4140)
+        lot_min3, psm_min3, amp_min3 = budget(4140, 6, 32, 50, 230, 32)
         assert_eq((lot_min3, psm_min3, amp_min3), (18, 1, 18), "4140 W first start is 1-phase 18 A")
-        floor3 = budget(4140, 6, 32, 50, 230, 4140, last_psm=2)
+        floor3 = budget(4140, 6, 32, 50, 230, 32, last_psm=2)
         assert_eq((floor3[1], floor3[2]), (2, 6), "active 3-phase keeps the 6 A floor")
-        lot1, psm1, amp1 = budget(2000, 6, 32, 50, 230, 4140)
+        lot1, psm1, amp1 = budget(2000, 6, 32, 50, 230, 32)
         assert_eq((lot1, psm1, amp1), (8, 1, 8), "2 kW is 1-phase 8 A")
-        hold1 = budget(8000, 6, 32, 50, 230, 4140, force_psm=1)
+        hold1 = budget(8000, 6, 32, 50, 230, 32, force_psm=1)
         assert_eq((hold1[1], hold1[2]), (1, 32), "force 1-phase 8 kW is 32 A")
-        hold3 = budget(3000, 6, 32, 50, 230, 4140, force_psm=2)
+        hold3 = budget(3000, 6, 32, 50, 230, 32, force_psm=2)
         assert_eq((hold3[1], hold3[2]), (2, 6), "force 3-phase below 4140 W stays 6 A")
         want = surplus.surplus_want_w
         assert_eq(
@@ -1151,7 +1151,7 @@ def main():
             {a: 300, b: 300},
             "300 W leftover arms Idle too; no 3 kW floor",
         )
-        _lot, psm_tiny, amp_tiny = surplus.budget(tiny, 6, 32, 50, 230, 4140)
+        _lot, psm_tiny, amp_tiny = surplus.budget(tiny, 6, 32, 50, 230, 32)
         assert_eq((psm_tiny, amp_tiny), (1, 6), "300 W budgets 6 A, not 13 A / 3 kW")
         held = surplus.surplus_decision(
             True, 1500, 96, window_ok=True, hold_active=True, hold_exit_w=2000
@@ -1220,22 +1220,22 @@ def main():
             {a: 8000},
             "single charger gets leftover",
         )
-        lot, psm, amp = surplus.budget(12000, 6, 32, 50, 230, 4140)
+        lot, psm, amp = surplus.budget(12000, 6, 32, 50, 230, 32)
         assert_eq((lot, psm, amp), (17, 2, 17), "group lot from 12 kW leftover")
-        high_lot, high_psm, high_amp = surplus.budget(9000, 6, 32, 50, 230, 4140)
+        high_lot, high_psm, high_amp = surplus.budget(9000, 6, 32, 50, 230, 32)
         assert_eq((high_psm, high_amp), (2, 13), "high 9 kW is 3-phase 13 A")
-        low_lot, low_psm, low_amp = surplus.budget(3000, 6, 32, 50, 230, 4140)
+        low_lot, low_psm, low_amp = surplus.budget(3000, 6, 32, 50, 230, 32)
         assert_eq((low_psm, low_amp), (1, 13), "low 3 kW is 1-phase 13 A")
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             26,
             "9+3 kW: raise group lot to 13 A + 13 A so both amp caps fit",
         )
         assert_eq(
             surplus.group_lot_for_allocations(
-                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, phase3_min_w=4140
+                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             17,
             "same leftover on both: keep leftover lot",
@@ -1248,7 +1248,7 @@ def main():
         assert_eq(surplus.nrg_total_w("[230,230,230,0,10,10,10,0,2300,2300,2300,6900]"), 6900, "nrg JSON list")
         assert_eq(surplus.nrg_total_w("1500"), 1500, "nrg numeric sensor")
         assert_eq(surplus.nrg_total_w([1, 2, 3]), None, "short nrg list")
-        lot_u, psm_u, amp_u = surplus.budget(4139, 6, 32, 50, 230, 4140)
+        lot_u, psm_u, amp_u = surplus.budget(4139, 6, 32, 50, 230, 32)
         assert_eq((psm_u, amp_u), (1, 17), "4139 W is still 1-phase")
         assert_eq(surplus.surplus_want_w(12000, 50), 50, "take under 100 W is not accepting")
         assert_eq(surplus.parse_lop("99"), 99, "lop 99")
@@ -1262,14 +1262,14 @@ def main():
         assert_eq(surplus.charger_take_w("WaitCar", None, 8000, 22080), 0, "waitcar takes 0")
         assert_eq(surplus.charger_take_w("Charging", None, 8000, 22080), 8000, "unknown charging assumes full")
         assert_eq(surplus.charger_take_w("Charging", 5000, 18000, 22080), 5000, "partial take")
-        assert_eq(surplus.min_charge_w(8000, 6, 230, 4140), 4140, "8 kW is 3-phase 6 A")
-        assert_eq(surplus.min_charge_w(5000, 6, 230, 4140), 1380, "5 kW first start is 1-phase 6 A")
-        assert_eq(surplus.min_charge_w(2000, 6, 230, 4140), 1380, "2 kW is 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(8000, 6, 230, 32), 4140, "8 kW is 3-phase 6 A")
+        assert_eq(surplus.min_charge_w(5000, 6, 230, 32), 1380, "5 kW first start is 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(2000, 6, 230, 32), 1380, "2 kW is 1-phase 6 A")
 
     def test_phase_hold_both_directions():
         hold = surplus.phase_hold_psm
         phase = surplus.surplus_phase_budget
-        args = (6, 32, 50, 230, 4140)
+        args = (6, 32, 50, 230, 32)
         assert_eq(hold(2, None)["arm"], False, "first start has no last psm")
         assert_eq(hold(2, None)["psm"], 2, "first start uses wanted")
         assert_eq(hold(2, 2), {"psm": 2, "arm": False}, "same 3-phase: no arm")
@@ -1318,6 +1318,8 @@ def main():
         assert_eq(stay6["wanted_psm"], 2, "3-phase can still offer 6 kW")
         first6 = phase(6000, *args)
         assert_eq((first6["psm"], first6["amp"]), (1, 26), "first start 6 kW prefers 1-phase")
+        pref3 = phase(6000, *args, preferred_psm=2)
+        assert_eq((pref3["psm"], pref3["amp"]), (2, 8), "preferred 3-phase first start 6 kW is 8 A")
         assert_eq(surplus.group_lot_for_amps(7, [21], 50), 21, "raise lot so 1-phase 21 A is not clipped")
         floor = phase(0, *args, last_psm=2)
         assert_eq((floor["psm"], floor["amp"]), (2, 6), "6 A floor stays 3-phase during hold")

@@ -298,7 +298,9 @@ def simulate(
     def surplus_cmd(serial, watts_i, use_floor, now):
         source_w = 0 if use_floor else int(watts_i)
         last = last_psm[serial]
-        wanted = surplus.budget(source_w, 6, 32, 50, VOLTS, 4140)[1]
+        wanted = surplus.budget(
+            source_w, 6, 32, 50, VOLTS, 32, last_psm=last
+        )[1]
         expired = phase[serial].tick(now, last in (1, 2) and last != wanted)
         pub = surplus.surplus_phase_budget(
             source_w,
@@ -306,7 +308,7 @@ def simulate(
             32,
             50,
             VOLTS,
-            4140,
+            32,
             last_psm=last,
             hold_expired=expired,
         )
@@ -1124,8 +1126,8 @@ def main():
             and t["a"].get("wanted_psm") == 2
         ]
         for t in held_up:
-            three_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140)[2]
-            one_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 4140, force_psm=1)[2]
+            three_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 32)[2]
+            one_amp = surplus.budget(t["leftover"], 6, 32, 50, 230, 32, force_psm=1)[2]
             assert_eq(t["a"]["amp"], one_amp, "held 1-phase uses 1-phase leftover amp")
             assert_true(t["a"]["amp"] != three_amp or one_amp == three_amp, "not the pending 3-phase amp")
         assert_eq(

@@ -60,10 +60,10 @@ When one charger is full-power (`lot` 50 / `amp` 32) or after-charge-complete ke
 Budget from leftover watts (floored amps, Finnish 230 V). Keep the **active** phase while it can still offer leftover:
 
 1. Active **3-phase** stays 3-phase while leftover ≥ 6 A × 230 V × 3 (4140 W). 8 kW → 6 kW stays `psm=2`, `lot = leftover // (230 × 3)` (11 A → 8 A). Drop to 1-phase only when leftover cannot hold that 6 A 3-phase floor.
-2. Active **1-phase**, or a first surplus start, stays 1-phase until 3-phase would deliver **more watts** than 1-phase (32 A × 230 V = 7360 W 1-phase vs 11 A × 230 V × 3 = 7590 W 3-phase). Then `psm=2`, `lot = leftover // (230 × 3)`. `number.kotiakku_goe_direct_phase3_min_w` (default **4140 W**) only *delays* going to 3-phase; it does not force 3→1.
-3. Else → `psm=1`, `lot = leftover // 230`. First start at 6 kW is 1-phase 26 A.
-4. `lot` is at least 6 A and at most group lot (default **50 A**). Per-charger `amp = min(max amp, lot)` (default **32**). 3-phase amp is leftover ÷ (230 × 3), not stuck at 6 A. If a car is already at the published amp cap and leftover would allow more **on this phase** (or 1-phase is capped so leftover wants 3-phase), it is offered leftover again so amp can rise.
-5. A published `psm` change (1-phase ↔ 3-phase) waits the same hold minutes (default 15) **both up and down**. CCS cannot switch phases in-session: go-e pauses charging for several seconds, and Tesla can send a charging-stopped / interrupted app alert (often CP_a055). Holding `psm` does **not** freeze amp: leftover is still budgeted on the phase that is actually running. 1→3: 1-phase leftover, capped at max amp (8 kW → 32 A, not the pending 11 A 3-phase). 3→1: 3-phase min amp (6 A), not the pending 1-phase amp. The first surplus start has no last `psm`, so it picks 1- or 3-phase immediately. Full-power force-on and after-charge-complete keep write that keep `psm` immediately.
+2. Active **1-phase** stays 1-phase until 3-phase would deliver **more watts** than 1-phase. 1-phase amp is capped at `number.kotiakku_goe_direct_max_1phase_amp` (default **32 A**, so 32 A × 230 V = 7360 W 1-phase vs 11 A × 230 V × 3 = 7590 W 3-phase). Then `psm=2`, `lot = leftover // (230 × 3)`. Lowering that cap makes 3-phase better sooner. It does not force 3→1.
+3. Else → `psm=1`, `lot = leftover // 230`. A **first surplus start** (no last `psm`) uses 3-phase when that would deliver more watts than 1-phase. If both phases can still offer leftover, `select.kotiakku_goe_direct_surplus_preferred_start_phase` chooses (default **1-phase**, so first start at 6 kW is 1-phase 26 A). That select does not change an already-running phase.
+4. `lot` is at least 6 A and at most group lot (default **50 A**). Per-charger `amp = min(max amp, lot)` (default **32**). Surplus 1-phase `amp` is also capped by max 1-phase amp. 3-phase amp is leftover ÷ (230 × 3), not stuck at 6 A. If a car is already at the published amp cap and leftover would allow more **on this phase** (or 1-phase is capped so leftover wants 3-phase), it is offered leftover again so amp can rise.
+5. A published `psm` change (1-phase ↔ 3-phase) waits the same hold minutes (default 15) **both up and down**. CCS cannot switch phases in-session: go-e pauses charging for several seconds, and Tesla can send a charging-stopped / interrupted app alert (often CP_a055). Holding `psm` does **not** freeze amp: leftover is still budgeted on the phase that is actually running. 1→3: 1-phase leftover, capped at max 1-phase amp (8 kW → 32 A, not the pending 11 A 3-phase). 3→1: 3-phase min amp (6 A), not the pending 1-phase amp. The first surplus start has no last `psm`, so it picks 1- or 3-phase immediately (preferred start when both are valid). Full-power force-on and after-charge-complete keep write that keep `psm` immediately.
 
 Start still needs SoC ≥ surplus SoC on (default **92%**) and leftover ≥ start leftover (default **2000 W**). After that, do **not** cut to zero every time leftover dips. While the session is on:
 
@@ -232,7 +232,8 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | Offer wait | 15 s | After leftover MQTT, wait this long before `frc=1` on anyone **and** before steal / a further car. Over-draw is allowed. High stays on; unused leftover still goes to the next |
 | `number.kotiakku_goe_direct_hold_minutes` | 15 min | Hold duration (leftover, SoC, second-car leftover gone, or 1↔3 `psm`) |
 | `number.kotiakku_goe_direct_voltage_v` / `kotiakku_goe_direct_min_a` / `kotiakku_goe_direct_max_a` | 230 / 6 / 32 | Budget math |
-| `number.kotiakku_goe_direct_phase3_min_w` | 4140 W | Minimum leftover to *allow* 1→3. 3-phase is chosen only when it would deliver more watts than 1-phase (about 7590 W at 32 A / 230 V). 3→1 uses the 6 A 3-phase floor, not this knob |
+| `number.kotiakku_goe_direct_max_1phase_amp` | 32 A | Surplus 1-phase amp ceiling. 1→3 when 3-phase would deliver more watts than this cap (about 7590 W at 32 A / 230 V). YAML `phase3_min_w` (old watts) seeds 32 A. 3→1 uses the 6 A 3-phase floor |
+| `select.kotiakku_goe_direct_surplus_preferred_start_phase` | 1-phase | First surplus start when both 1-phase and 3-phase can offer leftover. Does not change an already-running phase |
 | `number.kotiakku_goe_direct_group_lot_a` | 50 A | Load-balancing group current cap. YAML `eco_lot` still seeds this |
 | `number.kotiakku_goe_direct_solar_enough_kwh` | 40 kWh | SolarPriority: no 22 kW when today's full-day kWh ≥ this until tomorrow's prices are in and today's last usable solar hour has ended, then when tomorrow ≥ this. SolarAndGrid ignores this skip. Missing tomorrow after the flip is not enough (night 22 kW allowed). 0 disables. `binary_sensor.kotiakku_goe_direct_solar_enough` is that condition |
 | `sensor.kotiakku_goe_direct_solar_today_kwh` | from Configure | Today's full-day kWh. Attribute `source` is the picker entity |
@@ -242,7 +243,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `sensor.kotiakku_goe_direct_solar_kwh` | max(today, tomorrow) | Headline forecast. Attributes: `source_today`, `source_tomorrow`, `enough_solar`, `offsun_hour_kwh` |
 | `number.kotiakku_goe_direct_offsun_hour_kwh` | 1 kWh | Drop a local hour from the search when its expected forecast energy ≥ this. SolarPriority gating also treats the last such hour as “usable solar left today”. 0 disables the search drop (any remaining expected kWh still counts as solar left). Dawn/dusk/night under 1 kWh stay searchable |
 
-YAML `soc_on`, `group_lot` (legacy `eco_lot`), charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
+YAML `soc_on`, `group_lot` (legacy `eco_lot`), `max_1phase_amp` (legacy `phase3_min_w`), `surplus_preferred_start_phase_config`, charger `priority`, … only seed those entities on first add. After that, change the device entities. If `number.kotiakku_goe_direct_next_surplus_min_w` still shows 11000 W from an older restore, set it to 3000 W.
 
 ## 6. Smoke checks
 
@@ -267,6 +268,8 @@ After the first surplus write, `go-eCharger/<serial>/lot/result`, `amp/result`, 
 | Higher-priority car taking 10 kW of 18 kW leftover | Lower-priority charger gets the remaining 8 kW (already ≥ 3 kW, no steal) |
 | Leftover 4 kW, unequal HA leftover priority, both wanting surplus | Only the higher-priority charger: it wants all 4 kW |
 | Surplus on, leftover collapses below 1000 W | `lot` 6 for up to 15 min (stay 3-phase 6 A if that was the last `psm`), then `frc` 1 |
+| Surplus first start, leftover 6 kW, preferred start 1-phase (default) | `psm` 1, `amp` 26. Both phases can offer leftover, so the select wins |
+| Surplus first start, leftover 6 kW, preferred start 3-phase | `psm` 2, `amp` 8 |
 | Surplus on 1-phase, leftover 5 kW | Stay `psm` 1, `amp` 21. 1-phase can still offer 5 kW; no `psm` hold |
 | Surplus on 1-phase, leftover rises to 8 kW | Stay `psm` 1, `amp` 32 for 15 min, then `psm` 2 / 11 A. Amp still tracks leftover while held |
 | Surplus on 3-phase, leftover drops to 6 kW | Stay `psm` 2, `amp` 8. 6 kW still holds 6 A 3-phase; no `psm` hold |

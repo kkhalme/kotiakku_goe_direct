@@ -539,6 +539,11 @@ def main():
         assert_true(const.EID_OFFSUN_HOUR_KWH in const.SURPLUS_EIDS, "offsun hour")
         assert_true(const.EID_KEEP_AMP in const.SURPLUS_EIDS, "keep amp")
         assert_true(const.EID_KEEP_PHASE in const.SURPLUS_EIDS, "keep phase")
+        assert_true(const.EID_MAX_1PHASE_AMP in const.SURPLUS_EIDS, "max 1-phase amp")
+        assert_true(
+            const.EID_PREFERRED_START_PHASE in const.SURPLUS_EIDS,
+            "preferred start phase",
+        )
         assert_eq(const.DEFAULT_SPLIT_MIN_W, 3000, "next surplus min 3 kW")
         assert_eq(const.DEFAULT_SPLIT_FLOOR_W, 500, "remainder floor 500 W")
         assert_eq(const.DEFAULT_SOLAR_ENOUGH_KWH, 40, "enough solar 40 kWh")
@@ -586,6 +591,11 @@ def main():
         )
         assert_eq(const.keep_phase_psm("3-phase"), 2, "3-phase is psm 2")
         assert_eq(const.keep_phase_psm("1-phase"), 1, "1-phase is psm 1")
+        assert_eq(const.preferred_start_psm("1-phase"), 1, "preferred start default 1-phase")
+        assert_eq(const.preferred_start_psm(None), 1, "preferred start missing is 1-phase")
+        assert_eq(const.preferred_start_psm("3-phase"), 2, "preferred start 3-phase")
+        assert_eq(const.preferred_start_option(2), "3-phase", "preferred start option 3-phase")
+        assert_eq(const.preferred_start_option("x"), "1-phase", "preferred start unknown is 1-phase")
         assert_eq(const.DOMAIN, "kotiakku_goe_direct", "domain")
         assert_eq(const.HUB_ID, "kotiakku_goe_direct", "hub id")
         assert_eq(const.STORAGE_KEY, "kotiakku_goe_direct", "storage key")
@@ -841,6 +851,31 @@ def main():
             "select.kotiakku_goe_direct_eco_phase" in lot.removed,
             "eco phase entity removed",
         )
+        phase3 = Registry(
+            [
+                {
+                    "domain": "number",
+                    "platform": const.DOMAIN,
+                    "unique_id": "kotiakku_goe_direct_phase3_min_w",
+                    "entity_id": "number.kotiakku_goe_direct_phase3_min_w",
+                },
+            ]
+        )
+        const.migrate_max_1phase_amp_entities(phase3)
+        assert_eq(
+            phase3.async_get_entity_id(
+                "number", const.DOMAIN, "kotiakku_goe_direct_max_1phase_amp"
+            ),
+            "number.kotiakku_goe_direct_max_1phase_amp",
+            "phase3 min watts renamed to max 1-phase amp",
+        )
+        assert_eq(
+            phase3.async_get_entity_id(
+                "number", const.DOMAIN, "kotiakku_goe_direct_phase3_min_w"
+            ),
+            None,
+            "old phase3 min unique_id gone",
+        )
         assert_eq(
             const.EID_CEILING,
             "number.kotiakku_goe_direct_electricity_price_ceiling",
@@ -852,6 +887,23 @@ def main():
         assert_eq(const.EID_VOLTS, "number.kotiakku_goe_direct_voltage_v", "voltage")
         assert_eq(const.EID_MIN_AMP, "number.kotiakku_goe_direct_min_a", "min amp")
         assert_eq(const.EID_MAX_AMP, "number.kotiakku_goe_direct_max_a", "max amp")
+        assert_eq(
+            const.EID_MAX_1PHASE_AMP,
+            "number.kotiakku_goe_direct_max_1phase_amp",
+            "max 1-phase amp",
+        )
+        assert_eq(
+            const.MAX_1PHASE_AMP_UNIQUE_ID,
+            "kotiakku_goe_direct_max_1phase_amp",
+            "max 1-phase unique_id",
+        )
+        assert_eq(
+            const.EID_PREFERRED_START_PHASE,
+            "select.kotiakku_goe_direct_surplus_preferred_start_phase",
+            "preferred start phase",
+        )
+        assert_eq(const.DEFAULT_MAX_1PHASE_AMP, 32, "max 1-phase default 32 A")
+        assert_eq(const.DEFAULT_PREFERRED_START_PHASE, "1-phase", "preferred start default")
         assert_eq(const.EID_GROUP_LOT, "number.kotiakku_goe_direct_group_lot_a", "group lot")
         assert_eq(const.GROUP_LOT_UNIQUE_ID, "kotiakku_goe_direct_group_lot_a", "group lot unique_id")
         assert_eq(
@@ -896,6 +948,39 @@ def main():
         )
         assert_eq("eco_psm" in config.INT_KEYS, False, "eco psm is not persisted")
         assert_eq("eco_psm" in config.persistable({"eco_psm": 2}), False, "eco psm is not stored")
+        assert_eq(config.persistable({})["max_1phase_amp"], 32, "persist max 1-phase amp")
+        assert_eq(
+            config.persistable({"phase3_min_w": 4140})["max_1phase_amp"],
+            32,
+            "legacy 3-phase leftover watts seed 32 A",
+        )
+        assert_eq(
+            config.persistable({"phase3_min_w": 16})["max_1phase_amp"],
+            16,
+            "legacy phase3_min_w in amp range is kept as amps",
+        )
+        assert_eq(
+            "phase3_min_w" in config.persistable({"phase3_min_w": 4140}),
+            False,
+            "legacy phase3_min_w is not stored",
+        )
+        assert_eq(
+            config.persistable({"max_1phase_amp": 16, "phase3_min_w": 4140})["max_1phase_amp"],
+            16,
+            "max_1phase_amp wins over legacy phase3_min_w",
+        )
+        assert_eq(
+            config.persistable({})["surplus_preferred_start_phase_config"],
+            "1-phase",
+            "persist preferred start 1-phase",
+        )
+        assert_eq(
+            config.persistable({"surplus_preferred_start_phase_config": "3-phase"})[
+                "surplus_preferred_start_phase_config"
+            ],
+            "3-phase",
+            "persist preferred start 3-phase",
+        )
 
     case("normalize_and_form", test_normalize_and_form)
     case("unique_priority_swap", test_unique_priority_swap)

@@ -46,7 +46,8 @@ CONF_HOLD_MIN = "hold_min"
 CONF_VOLTS = "volts"
 CONF_MIN_AMP = "min_amp"
 CONF_MAX_AMP = "max_amp"
-CONF_PHASE3_MIN_W = "phase3_min_w"
+CONF_MAX_1PHASE_AMP = "max_1phase_amp"
+CONF_PHASE3_MIN_W = "phase3_min_w"  # legacy YAML / options alias for max_1phase_amp
 CONF_GROUP_LOT = "group_lot"
 CONF_ECO_LOT = "eco_lot"  # legacy YAML / options alias for group_lot
 CONF_KOTIAKKU_IN_KW = "kotiakku_in_kw"
@@ -65,7 +66,7 @@ DEFAULT_HOLD_MIN = 15
 DEFAULT_VOLTS = 230
 DEFAULT_MIN_AMP = 6
 DEFAULT_MAX_AMP = 32
-DEFAULT_PHASE3_MIN_W = 4140
+DEFAULT_MAX_1PHASE_AMP = 32
 DEFAULT_GROUP_LOT = 50
 DEFAULT_MIN_HOURS = 2.0
 DEFAULT_MAX_HOURS = 5.0
@@ -118,20 +119,24 @@ EID_HOLD_MIN = "number.kotiakku_goe_direct_hold_minutes"
 EID_VOLTS = "number.kotiakku_goe_direct_voltage_v"
 EID_MIN_AMP = "number.kotiakku_goe_direct_min_a"
 EID_MAX_AMP = "number.kotiakku_goe_direct_max_a"
-EID_PHASE3_MIN_W = "number.kotiakku_goe_direct_phase3_min_w"
+EID_MAX_1PHASE_AMP = "number.kotiakku_goe_direct_max_1phase_amp"
+MAX_1PHASE_AMP_UNIQUE_ID = "kotiakku_goe_direct_max_1phase_amp"
 EID_GROUP_LOT = "number.kotiakku_goe_direct_group_lot_a"
 GROUP_LOT_UNIQUE_ID = "kotiakku_goe_direct_group_lot_a"
 EID_SOLAR_ENOUGH_KWH = "number.kotiakku_goe_direct_solar_enough_kwh"
 EID_OFFSUN_HOUR_KWH = "number.kotiakku_goe_direct_offsun_hour_kwh"
 EID_KEEP_AMP = "number.kotiakku_goe_direct_after_charge_complete_keep_a"
 EID_KEEP_PHASE = "select.kotiakku_goe_direct_after_charge_complete_keep_phase"
+EID_PREFERRED_START_PHASE = "select.kotiakku_goe_direct_surplus_preferred_start_phase"
 
 KEEP_PHASE_1 = "1-phase"
 KEEP_PHASE_3 = "3-phase"
 KEEP_PHASE_OPTIONS = (KEEP_PHASE_1, KEEP_PHASE_3)
 DEFAULT_KEEP_AMP = 6
 DEFAULT_KEEP_PHASE = KEEP_PHASE_3
+DEFAULT_PREFERRED_START_PHASE = KEEP_PHASE_1
 CONF_KEEP_AMP = "after_charge_complete_keep_a"
+CONF_PREFERRED_START_PHASE = "surplus_preferred_start_phase_config"
 
 WINDOW_EIDS = (EID_MIN, EID_MAX, EID_CEILING, EID_FLEX_PCT, EID_FLEX_EUR, EID_PRICE)
 SURPLUS_EIDS = (
@@ -146,12 +151,13 @@ SURPLUS_EIDS = (
     EID_VOLTS,
     EID_MIN_AMP,
     EID_MAX_AMP,
-    EID_PHASE3_MIN_W,
+    EID_MAX_1PHASE_AMP,
     EID_GROUP_LOT,
     EID_SOLAR_ENOUGH_KWH,
     EID_OFFSUN_HOUR_KWH,
     EID_KEEP_AMP,
     EID_KEEP_PHASE,
+    EID_PREFERRED_START_PHASE,
 )
 
 # unit: percent | W | s | min | V | A | kWh
@@ -289,16 +295,16 @@ SURPLUS_NUMBER_SPECS = (
         "icon": "mdi:current-ac",
     },
     {
-        "entity_id": EID_PHASE3_MIN_W,
-        "unique_id": "kotiakku_goe_direct_phase3_min_w",
-        "name": "3-phase leftover min",
-        "conf": CONF_PHASE3_MIN_W,
-        "default": DEFAULT_PHASE3_MIN_W,
-        "min": 0,
-        "max": 50000,
-        "step": 10,
-        "unit": "W",
-        "icon": "mdi:numeric-3-circle-outline",
+        "entity_id": EID_MAX_1PHASE_AMP,
+        "unique_id": MAX_1PHASE_AMP_UNIQUE_ID,
+        "name": "Surplus max 1-phase amp",
+        "conf": CONF_MAX_1PHASE_AMP,
+        "default": DEFAULT_MAX_1PHASE_AMP,
+        "min": 6,
+        "max": 32,
+        "step": 1,
+        "unit": "A",
+        "icon": "mdi:current-ac",
     },
     {
         "entity_id": EID_GROUP_LOT,
@@ -380,6 +386,31 @@ def keep_phase_psm(option):
     except (TypeError, ValueError):
         pass
     return 2
+
+
+def preferred_start_psm(option):
+    """go-e ``psm`` for surplus first start when both phases can offer leftover.
+
+    Default is 1-phase. 3-phase only when the option is explicitly 3-phase.
+    """
+    if option in (2, "2", KEEP_PHASE_3, PSM_FORCE_3):
+        return 2
+    text = str(option or "").strip().lower().replace(" ", "")
+    if text in ("2", "3", "3-phase", "force3-phase"):
+        return 2
+    try:
+        if int(option) == 2:
+            return 2
+    except (TypeError, ValueError):
+        pass
+    return 1
+
+
+def preferred_start_option(option):
+    """Select option for surplus preferred start phase."""
+    if preferred_start_psm(option) == 2:
+        return KEEP_PHASE_3
+    return KEEP_PHASE_1
 
 
 # go-e forceState: Neutral=0 charges in Basic/default; Off=1 stops; On=2 starts.
@@ -500,6 +531,22 @@ def migrate_group_lot_entities(registry) -> None:
     if not renamed:
         _registry_remove(registry, "number", _ECO_LOT_UID)
     _registry_remove(registry, "select", _ECO_PSM_UID)
+
+
+_PHASE3_MIN_W_UID = "kotiakku_goe_direct_phase3_min_w"
+
+
+def migrate_max_1phase_amp_entities(registry) -> None:
+    """Rename 3-phase leftover watts to surplus max 1-phase amp."""
+    renamed = _registry_rename(
+        registry,
+        "number",
+        _PHASE3_MIN_W_UID,
+        MAX_1PHASE_AMP_UNIQUE_ID,
+        EID_MAX_1PHASE_AMP,
+    )
+    if not renamed:
+        _registry_remove(registry, "number", _PHASE3_MIN_W_UID)
 
 
 def default_charger_priority(slot) -> int:
