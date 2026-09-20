@@ -272,13 +272,19 @@ def main():
         lot, psm, amp = surplus.budget(0, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
         assert_eq((psm, amp), (1, 6), "0 W floor is 6 A 1-phase")
         lot, psm, amp = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
-        assert_eq((psm, amp), (2, 6), "4140 W is 3-phase 6 A")
+        assert_eq((psm, amp), (1, 18), "4140 W first start stays 1-phase 18 A")
+        stay3 = surplus.budget(4140, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3, last_psm=2)
+        assert_eq((stay3[1], stay3[2]), (2, 6), "active 3-phase keeps 6 A at the 3-phase floor")
         lot, psm, amp = surplus.budget(2500, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
         assert_eq((psm, amp), (1, 10), "2500 W is 1-phase 10 A")
         hold3 = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3, force_psm=2)
         assert_eq((hold3[1], hold3[2]), (2, 6), "forced 3-phase below 4140 W stays 6 A")
         lot, psm, amp = surplus.budget(4139, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
         assert_eq((psm, amp), (1, 17), "1 W under 4140 W stays 1-phase")
+        lot, psm, amp = surplus.budget(7589, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        assert_eq((psm, amp), (1, 32), "just under 3-phase-better stays 1-phase 32 A")
+        lot, psm, amp = surplus.budget(7590, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
+        assert_eq((psm, amp), (2, 11), "7590 W 3-phase delivers more than 32 A 1-phase")
         lot, psm, amp = surplus.budget(-100, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
         assert_eq((psm, amp), (1, 6), "negative leftover still floors at 6 A")
         lot, psm, amp = surplus.budget(100000, MIN_A, MAX_A, GROUP_LOT, VOLTS, P3)
@@ -287,7 +293,8 @@ def main():
         assert_eq((psm, amp), (2, 11), "bad force_psm is auto")
         assert_eq(surplus.min_charge_w(0, MIN_A, VOLTS, P3), 1380, "0 W floor is 1-phase 6 A")
         assert_eq(surplus.min_charge_w(4139, MIN_A, VOLTS, P3), 1380, "just under 3-phase min")
-        assert_eq(surplus.min_charge_w(4140, MIN_A, VOLTS, P3), 4140, "at 3-phase min")
+        assert_eq(surplus.min_charge_w(4140, MIN_A, VOLTS, P3), 1380, "4140 W first start is still 1-phase 6 A")
+        assert_eq(surplus.min_charge_w(7590, MIN_A, VOLTS, P3), 4140, "3-phase better than 32 A 1-phase uses 6 A × 3")
 
     def test_unplugged_first_does_not_keep_3kw_steal():
         alloc = surplus.surplus_allocations
@@ -609,6 +616,18 @@ def main():
         assert_eq((done["psm"], done["amp"]), (1, 13), "after hold: 13 A 1-phase")
         floor = surplus.surplus_phase_budget(0, *args, last_psm=2)
         assert_eq((floor["psm"], floor["amp"]), (2, 6), "6 A floor stays 3-phase during hold")
+        stay = surplus.surplus_phase_budget(6000, *args, last_psm=2)
+        assert_eq((stay["psm"], stay["amp"], stay["arm_phase"]), (2, 8, False), "6 kW keeps active 3-phase")
+        assert_eq(stay["wanted_psm"], 2, "3-phase can still offer 6 kW")
+        first6 = surplus.surplus_phase_budget(6000, *args)
+        assert_eq((first6["psm"], first6["amp"], first6["arm_phase"]), (1, 26, False), "first start 6 kW is 1-phase")
+        keep1 = surplus.surplus_phase_budget(5000, *args, last_psm=1)
+        assert_eq((keep1["psm"], keep1["amp"], keep1["arm_phase"]), (1, 21, False), "5 kW keeps active 1-phase")
+        assert_eq(keep1["wanted_psm"], 1, "1-phase can still offer 5 kW")
+        delay = surplus.surplus_phase_budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 10000, last_psm=1)
+        assert_eq((delay["psm"], delay["amp"], delay["wanted_psm"]), (1, 32, 1), "phase3_min_w delays 1→3")
+        still3 = surplus.surplus_phase_budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, 10000, last_psm=2)
+        assert_eq((still3["psm"], still3["wanted_psm"], still3["arm_phase"]), (2, 2, False), "phase3_min_w does not force 3→1")
 
     def test_car_states_plugged_charging_finished():
         assert_eq(surplus.car_plugged("Idle"), False, "Idle is unplugged")
@@ -719,6 +738,11 @@ def main():
             want(4140, 4140, last_amp=6, last_psm=2),
             4140,
             "at cap but leftover cannot raise amp: stay at take",
+        )
+        assert_eq(
+            want(6000, 5520, last_amp=8, last_psm=2),
+            5520,
+            "active 3-phase at 8 A cap does not raise toward 1-phase",
         )
         assert_eq(
             surplus.group_lot_for_amps(17, [], 50),
@@ -869,6 +893,8 @@ def main():
         assert_eq(cmds[B]["psm"], 1, "3 kW is 1-phase")
         dec, cmds = mqtt_for(8000, True, last_psm={A: 1}, serials=[A], plugged={A: True})
         assert_eq((cmds[A]["psm"], cmds[A]["amp"]), (1, 32), "MQTT path holds 1-phase at 32 A")
+        dec, cmds = mqtt_for(6000, True, last_psm={A: 2}, serials=[A], plugged={A: True})
+        assert_eq((cmds[A]["psm"], cmds[A]["amp"]), (2, 8), "MQTT path keeps 3-phase at 6 kW")
 
     def test_idle_mqtt_is_force_off():
         off = const.charger_off_mqtt()

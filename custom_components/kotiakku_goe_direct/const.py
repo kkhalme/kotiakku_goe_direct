@@ -291,7 +291,7 @@ SURPLUS_NUMBER_SPECS = (
     {
         "entity_id": EID_PHASE3_MIN_W,
         "unique_id": "kotiakku_goe_direct_phase3_min_w",
-        "name": "3-phase leftover",
+        "name": "3-phase leftover min",
         "conf": CONF_PHASE3_MIN_W,
         "default": DEFAULT_PHASE3_MIN_W,
         "min": 0,

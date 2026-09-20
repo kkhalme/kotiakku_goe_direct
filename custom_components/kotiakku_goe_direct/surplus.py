@@ -534,7 +534,76 @@ def surplus_decision(
     }
 
 
-def budget(available_w, min_amp, max_amp, group_lot, volts, phase3_min_w, force_psm=None):
+def three_phase_min_w(min_amp, volts):
+    """Watts for official min amp on 3-phase (6 A × V × 3)."""
+    return int(min_amp) * int(volts) * 3
+
+
+def _phase_amp(available_w, phases, min_amp, max_amp, volts):
+    return min(
+        int(max_amp),
+        max(int(min_amp), int(available_w) // (int(volts) * int(phases))),
+    )
+
+
+def _phase_offer_w(available_w, phases, min_amp, max_amp, volts):
+    return _phase_amp(available_w, phases, min_amp, max_amp, volts) * int(volts) * int(
+        phases
+    )
+
+
+def surplus_wanted_psm(
+    available_w,
+    min_amp,
+    max_amp,
+    volts,
+    phase3_min_w,
+    last_psm=None,
+):
+    """1- or 3-phase leftover should run.
+
+    Keep the active phase while it can still offer leftover. 1-phase
+    stays until 3-phase would deliver more watts (1-phase amp is capped).
+    3-phase stays until leftover cannot hold the 6 A 3-phase floor.
+    ``phase3_min_w`` only delays going *to* 3-phase; it does not force
+    3→1. First start prefers 1-phase until 3-phase is strictly better.
+    """
+    min_amp = int(min_amp)
+    max_amp = int(max_amp)
+    volts = int(volts)
+    available_w = int(available_w)
+    three_min = three_phase_min_w(min_amp, volts)
+    try:
+        last = None if last_psm is None else int(last_psm)
+    except (TypeError, ValueError):
+        last = None
+    if last not in (1, 2):
+        last = None
+    if last == 2:
+        return 1 if available_w < three_min else 2
+    if available_w < three_min:
+        return 1
+    try:
+        allow_3 = int(phase3_min_w)
+    except (TypeError, ValueError):
+        allow_3 = three_min
+    if available_w < allow_3:
+        return 1
+    w1 = _phase_offer_w(available_w, 1, min_amp, max_amp, volts)
+    w3 = _phase_offer_w(available_w, 3, min_amp, max_amp, volts)
+    return 2 if w3 > w1 else 1
+
+
+def budget(
+    available_w,
+    min_amp,
+    max_amp,
+    group_lot,
+    volts,
+    phase3_min_w,
+    force_psm=None,
+    last_psm=None,
+):
     min_amp = int(min_amp)
     volts = int(volts)
     min_hold_w = min_amp * volts
@@ -549,7 +618,10 @@ def budget(available_w, min_amp, max_amp, group_lot, volts, phase3_min_w, force_
     elif force_psm == 1:
         phases = 1
     else:
-        phases = 3 if target_w >= int(phase3_min_w) else 1
+        psm_i = surplus_wanted_psm(
+            target_w, min_amp, max_amp, volts, phase3_min_w, last_psm=last_psm
+        )
+        phases = 3 if psm_i == 2 else 1
     psm = 2 if phases == 3 else 1
     lot = min(int(group_lot), max(min_amp, target_w // (volts * phases)))
     amp = min(int(max_amp), lot)
@@ -592,15 +664,22 @@ def surplus_phase_budget(
     last_psm=None,
     hold_expired=False,
 ):
-    """``lot`` / ``psm`` / ``amp`` with 1↔3 hold.
+    """``lot`` / ``psm`` / ``amp`` with sticky phase plus 1↔3 hold.
 
-    ``psm`` may wait ``hold_min``, but ``amp`` is always leftover on the
+    Wanted ``psm`` keeps the last phase while it can still offer leftover.
+    A real 1↔3 change still waits ``hold_min``. ``amp`` is leftover on the
     phase we will actually run — not the pending other-phase amp, and
     not the last take. 1→3: 1-phase leftover (capped at max amp).
     3→1: 3-phase min amp. Holding ``psm`` must not freeze amp.
     """
     _lot, wanted_psm, _wanted_amp = budget(
-        available_w, min_amp, max_amp, group_lot, volts, phase3_min_w
+        available_w,
+        min_amp,
+        max_amp,
+        group_lot,
+        volts,
+        phase3_min_w,
+        last_psm=last_psm,
     )
     hold = phase_hold_psm(wanted_psm, last_psm, hold_expired)
     lot, psm, amp = budget(
@@ -743,12 +822,12 @@ def idle_complete(state, take_w=None):
     return take < KEEP_PROBE_TAKE_W
 
 
-def min_charge_w(remaining, min_amp, volts, phase3_min_w):
+def min_charge_w(remaining, min_amp, volts, phase3_min_w, max_amp=32):
     """Watts for the official 6 A floor at the leftover's 1- or 3-phase."""
     remaining = max(int(remaining), 0)
     min_amp = int(min_amp)
     volts = int(volts)
-    if remaining >= int(phase3_min_w):
+    if surplus_wanted_psm(remaining, min_amp, max_amp, volts, phase3_min_w) == 2:
         return min_amp * volts * 3
     return min_amp * volts
 
@@ -850,7 +929,13 @@ def surplus_want_w(
         return take_w
     take_w = min(take_w, leftover_w)
     _lot, offer_psm, offer_amp = budget(
-        leftover_w, min_amp, max_amp, group_lot, volts, phase3_min_w
+        leftover_w,
+        min_amp,
+        max_amp,
+        group_lot,
+        volts,
+        phase3_min_w,
+        last_psm=last_psm,
     )
     if last_amp is None or last_psm is None:
         return leftover_w

@@ -1708,6 +1708,7 @@ class KotiakkuGoeDirectController:
     def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full, keep_on=None):
         """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
+        last_one = self._surplus_psm.get(surplus[0]) if len(surplus) == 1 else None
         lot, psm, amp = budget(
             target_w,
             self.min_amp,
@@ -1715,6 +1716,7 @@ class KotiakkuGoeDirectController:
             self.group_lot,
             self.volts,
             self.phase3_min_w,
+            last_psm=last_one,
         )
         lot, psm, amp = group_surplus_setpoint(
             lot,
