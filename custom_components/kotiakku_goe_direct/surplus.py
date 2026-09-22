@@ -120,6 +120,19 @@ def keep_take_w(power_w):
     return max(power_w, 0)
 
 
+def surplus_sensor_samples(entity_id, solar_id, controller_id):
+    """True when this sensor may resample leftover watts for ``amp``.
+
+    Solar and Controller Car-power are the ~5 min picture. House and
+    SoC often tick faster. Sampling those locks a collapsed leftover
+    (house already includes the car, Controller mean still lags) and
+    the next 5 min of ``amp`` sits on the 6 A floor.
+    """
+    if not entity_id:
+        return False
+    return entity_id in {eid for eid in (solar_id, controller_id) if eid}
+
+
 def surplus_held_w(
     live_w,
     held_w,
@@ -134,9 +147,11 @@ def surplus_held_w(
 
     First sample and ``refresh`` take ``live_w``. Otherwise keep
     ``held_w`` until ``cadence_s`` (default ``SURPLUS_SETPOINT_S``) has
-    elapsed **and** ``allow_sample`` (controller: a new Kotiakku /
-    Controller reading, or the 15-min safety apply). House ticks faster
-    than that cadence must not retune leftover ``amp``.
+    elapsed **and** ``allow_sample`` (a solar or Controller report;
+    see ``surplus_sensor_samples``). The caller must drop that arm
+    when the cadence has not elapsed yet. Leaving it set would let a
+    later house tick consume it and lock the collapsed leftover.
+    House ticks must not retune leftover ``amp``.
     """
     live_w = int(live_w)
     try:

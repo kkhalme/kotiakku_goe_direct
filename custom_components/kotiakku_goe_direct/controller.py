@@ -141,6 +141,7 @@ from .surplus import (
     leftover_for_surplus,
     keep_take_w,
     surplus_held_w,
+    surplus_sensor_samples,
     idle_complete,
     nrg_should_reschedule,
     nrg_total_w,
@@ -284,7 +285,7 @@ class KotiakkuGoeDirectController:
         self._last_surplus_w = None
         self._surplus_setpoint_w = None
         self._surplus_setpoint_ts = None
-        self._kotiakku_dirty = False
+        self._surplus_sample = False
         self._refreshing = False
         self._surplus_amp = {}
         self._surplus_psm = {}
@@ -941,7 +942,10 @@ class KotiakkuGoeDirectController:
             return
         entity = event.data.get("entity_id")
         if entity in self._kotiakku_ids:
-            self._kotiakku_dirty = True
+            if surplus_sensor_samples(
+                entity, self.solar_entity, self.controller_entity
+            ):
+                self._surplus_sample = True
             self._notify_if_surplus_changed()
             self._schedule_apply()
             return
@@ -1667,9 +1671,7 @@ class KotiakkuGoeDirectController:
             for serial in self.chargers
         }
 
-    def _compute_leftover_plan(
-        self, until_on, keep_on, floor_expired, split_expired, force=False
-    ):
+    def _compute_leftover_plan(self, until_on, keep_on, floor_expired, split_expired):
         """Leftover decision and pubs from current keep switches."""
         now_ts = self._now_ts()
         roles = self._charger_roles(now_ts, until_on, keep_on)
@@ -1678,22 +1680,25 @@ class KotiakkuGoeDirectController:
         keep_serials = [serial for serial in self.chargers if roles[serial] == ROLE_KEEP]
         keep_powers = [self.charger_power_w(serial) for serial in keep_serials]
         live_w = leftover_for_surplus(raw_w, *keep_powers)
-        # Start / stop uses live leftover. While a surplus session is on,
-        # amp and start-hold-stop hold leftover watts at the 5-min
-        # Kotiakku cadence so house ticks cannot bounce 30 A ↔ 6 A.
+        # No session yet, or the 6 A hold just expired: decide from live
+        # leftover. While surplus is on, amp and start-hold-stop stay on
+        # the last solar/Controller sample so a fast house tick cannot
+        # bounce 30 A ↔ 6 A. A sample inside the cadence is dropped so
+        # the next house tick cannot consume it.
         prev_ts = self._surplus_setpoint_ts
+        armed = self._surplus_sample
         held_w, held_ts = surplus_held_w(
             live_w,
             self._surplus_setpoint_w,
             self._surplus_setpoint_ts,
             now_ts,
             refresh=bool(floor_expired) or not self.session,
-            allow_sample=self._kotiakku_dirty or force,
+            allow_sample=armed,
         )
         self._surplus_setpoint_w = held_w
         self._surplus_setpoint_ts = held_ts
-        if held_ts != prev_ts:
-            self._kotiakku_dirty = False
+        if held_ts != prev_ts or armed:
+            self._surplus_sample = False
         snap["live_available_w"] = live_w
         snap["available_w"] = held_w
         dec = surplus_decision(
@@ -1870,7 +1875,7 @@ class KotiakkuGoeDirectController:
         had_leftover_setpoint = set(self._surplus_amp)
         keep_on = {serial: self._keep_on(serial) for serial in self.chargers}
         plan = self._compute_leftover_plan(
-            until_on, keep_on, floor_expired, split_expired, force=force
+            until_on, keep_on, floor_expired, split_expired
         )
         leftover_on = bool(plan["dec"]["write_on"] and plan["surplus"])
         steal = self._keep_steal_victims(
@@ -1895,7 +1900,7 @@ class KotiakkuGoeDirectController:
             self._surplus_setpoint_w = None
             self._surplus_setpoint_ts = None
             plan = self._compute_leftover_plan(
-                until_on, keep_on, floor_expired, split_expired, force=force
+                until_on, keep_on, floor_expired, split_expired
             )
         roles = plan["roles"]
         snap = plan["snap"]

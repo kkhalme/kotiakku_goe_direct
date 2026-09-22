@@ -296,6 +296,25 @@ def main():
                 (6900, 0.0),
                 "sawtooth house leftover %s W at +%ss still holds 30 A watts" % (live, i * 10),
             )
+        samples = surplus.surplus_sensor_samples
+        solar, ctrl, house, soc = (
+            "sensor.solar",
+            "sensor.controller",
+            "sensor.house",
+            "sensor.soc",
+        )
+        assert_true(samples(solar, solar, ctrl), "solar report may resample leftover amp")
+        assert_true(samples(ctrl, solar, ctrl), "Controller report may resample leftover amp")
+        assert_true(not samples(house, solar, ctrl), "house tick must not resample leftover amp")
+        assert_true(not samples(soc, solar, ctrl), "SoC tick must not resample leftover amp")
+        assert_true(not samples(house, None, None), "unset solar/Controller does not sample house")
+        early = hold(0, 6900, 0, 30, allow_sample=True)
+        assert_eq(early, (6900, 0.0), "solar/Controller inside 5 min does not move amp")
+        assert_eq(
+            hold(0, early[0], early[1], 300),
+            (6900, 0.0),
+            "that early report must not arm the later house tick",
+        )
 
     def test_decision_start_hold_stop_and_hysteresis():
         decide = surplus.surplus_decision
