@@ -35,14 +35,6 @@ FINISHED_STATES = {
 # Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
-# Seconds leftover watts for surplus amp / start-hold-stop stay fixed.
-# Kotiakku SoC / solar / house update about every 5 min. The go-e
-# Controller and charger ``nrg`` update much faster. Feeding those into
-# leftover ``amp`` on every tick bounces the pilot (30 A ↔ 6 A) and
-# Tesla will not ramp. Live leftover still updates
-# ``sensor.kotiakku_goe_direct_available_surplus``.
-SURPLUS_SETPOINT_S = 300
-
 # Below this, leftover still offers (nrg often 0 at start). Surplus treats a
 # Charging car as taking leftover (steal / offer-wait). Keep pool subtract
 # counts every watt of keep ``nrg``; it does not use this floor.
@@ -140,39 +132,31 @@ def surplus_held_w(
     held_ts,
     now_ts,
     *,
-    cadence_s=None,
     refresh=False,
     allow_sample=False,
 ):
     """Leftover watts for surplus amp and start/hold/stop.
 
-    First sample and ``refresh`` take ``live_w``. Otherwise keep
-    ``held_w`` until ``cadence_s`` (default ``SURPLUS_SETPOINT_S``) has
-    elapsed **and** ``allow_sample`` (a Kotiakku SoC, solar, or house
-    report; see ``surplus_sensor_samples``). The caller must drop that
-    arm when the cadence has not elapsed yet. Leaving it set would let
-    a later Controller or ``nrg`` tick consume it and move ``amp``.
+    First sample, ``refresh``, and ``allow_sample`` take ``live_w``.
+    ``allow_sample`` is a Kotiakku SoC, solar, or house report
+    (``surplus_sensor_samples``). Those sensors are already about
+    every 5 min, so a report updates ``amp`` immediately — including
+    one that arrives while the 6 A floor is holding an older leftover.
+    Controller and charger ``nrg`` must not set ``allow_sample``.
+    Without it, ``held_w`` stays put so those fast ticks cannot bounce
+    the pilot (30 A ↔ 6 A).
     """
     live_w = int(live_w)
     try:
         now_ts = float(now_ts)
     except (TypeError, ValueError):
         now_ts = 0.0
-    if cadence_s is None:
-        cadence = float(SURPLUS_SETPOINT_S)
-    else:
-        try:
-            cadence = float(cadence_s)
-        except (TypeError, ValueError):
-            cadence = float(SURPLUS_SETPOINT_S)
-    if cadence <= 0 or refresh or held_w is None or held_ts is None:
+    if refresh or allow_sample or held_w is None or held_ts is None:
         return live_w, now_ts
     try:
         held_w = int(held_w)
         held_ts = float(held_ts)
     except (TypeError, ValueError):
-        return live_w, now_ts
-    if (now_ts - held_ts) >= cadence and allow_sample:
         return live_w, now_ts
     return held_w, held_ts
 

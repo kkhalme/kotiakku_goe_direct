@@ -807,16 +807,15 @@ def main():
         assert_eq(surplus.effective_ev_w(0, 3000, controller_usable=False), 3000, "unknown Controller uses nrg")
         assert_eq(surplus.effective_ev_w(3000, None), 3000, "no nrg keeps Controller")
         assert_eq(surplus.effective_ev_w(3000, 0), 3000, "zero nrg is ignored while Controller is usable")
-        assert_eq(surplus.SURPLUS_SETPOINT_S, 300, "leftover amp cadence is 5 min")
         assert_eq(
             surplus.surplus_held_w(0, 6900, 0, 10),
             (6900, 0.0),
-            "house tick must not collapse leftover used for amp",
+            "Controller tick must not collapse leftover used for amp",
         )
         assert_eq(
-            surplus.surplus_held_w(5000, 6900, 0, 300, allow_sample=True),
-            (5000, 300.0),
-            "Kotiakku sample after 5 min takes live leftover",
+            surplus.surplus_held_w(7000, 300, 0, 10, allow_sample=True),
+            (7000, 10.0),
+            "Kotiakku solar report takes live leftover immediately",
         )
         lot, psm, amp = budget(2500, 6, 32, 50, 230, 32)
         assert_eq(lot, 50, "2500 W keeps group lot at the fuse cap")
