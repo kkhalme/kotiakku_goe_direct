@@ -201,7 +201,7 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
 
 
 class AvailableSurplusSensor(HubEntity, SensorEntity):
-    """Leftover watts still free for surplus chargers (after keep take)."""
+    """Held Kotiakku leftover still free for surplus chargers (after keep take)."""
 
     _listen_surplus_only = True
     _attr_device_class = SensorDeviceClass.POWER

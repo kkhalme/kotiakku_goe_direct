@@ -126,6 +126,50 @@ def surplus_sensor_samples(entity_id, *kotiakku_ids):
     return entity_id in {eid for eid in kotiakku_ids if eid}
 
 
+def surplus_sample_armed(old_state, new_state, entity_id, *kotiakku_ids):
+    """True when a Kotiakku state change may move leftover ``amp``.
+
+    Same state string (attribute-only refresh) and an unusable new
+    state do not arm a sample. Those updates are much faster than the
+    5 min Kotiakku value and would bounce ``amp`` and the surplus sensor.
+    """
+    if old_state == new_state:
+        return False
+    if not surplus_sensor_samples(entity_id, *kotiakku_ids):
+        return False
+    return sensor_usable(new_state)
+
+
+def surplus_sensor_w(held_w, *, usable=True):
+    """Watts for ``sensor.kotiakku_goe_direct_available_surplus``.
+
+    This is the held Kotiakku leftover, after keep take. ``None`` until
+    that hold exists, and whenever Kotiakku cannot be read. Controller
+    and charger ``nrg`` must not change this number between reports.
+    """
+    if not usable or held_w is None:
+        return None
+    try:
+        return int(held_w)
+    except (TypeError, ValueError):
+        return None
+
+
+def charger_lot_needs_restore(live_lot, group_lot):
+    """True when charger ``lot`` is not the fuse cap.
+
+    A leftover-sized ``lot`` (for example 19 A) lets go-e load balancing
+    clip the car and bounce allowed current. ``None`` has not been seen
+    yet, so there is nothing to correct.
+    """
+    if live_lot is None:
+        return False
+    try:
+        return int(live_lot) != int(group_lot)
+    except (TypeError, ValueError):
+        return False
+
+
 def surplus_held_w(
     live_w,
     held_w,
@@ -137,14 +181,15 @@ def surplus_held_w(
 ):
     """Leftover watts for surplus amp and start/hold/stop.
 
-    First sample, ``refresh``, and ``allow_sample`` take ``live_w``.
-    ``allow_sample`` is a Kotiakku SoC, solar, or house report
-    (``surplus_sensor_samples``). Those sensors are already about
-    every 5 min, so a report updates ``amp`` immediately — including
-    one that arrives while the 6 A floor is holding an older leftover.
-    Controller and charger ``nrg`` must not set ``allow_sample``.
-    Without it, ``held_w`` stays put so those fast ticks cannot bounce
-    the pilot (30 A ↔ 6 A).
+    First sample (empty hold), ``refresh``, and ``allow_sample`` take
+    ``live_w``. ``allow_sample`` is a Kotiakku SoC, solar, or house
+    report whose state value changed (``surplus_sample_armed``). Those
+    sensors are already about every 5 min, so a report updates ``amp``
+    immediately — including one that arrives while the 6 A floor is
+    holding an older leftover. Controller and charger ``nrg`` must not
+    set ``allow_sample``. A session gap must not set ``refresh`` and
+    must not clear the hold: the next fast tick would otherwise reseed
+    from live leftover and bounce the pilot (30 A ↔ 6 A).
     """
     live_w = int(live_w)
     try:
@@ -164,7 +209,8 @@ def surplus_held_w(
 def leftover_for_surplus(leftover_w, *keep_power_w):
     """Leftover still free for surplus chargers after keep take.
 
-    Exposed as ``sensor.kotiakku_goe_direct_available_surplus``. Pass each
+    The held result is what ``sensor.kotiakku_goe_direct_available_surplus``
+    shows after a Kotiakku sample. Pass each
     keep charger's ``nrg``. Keep MQTT stays at keep amp so leftover does
     not charge that pack, but keep and leftover are the same house pool.
     Subtract the full keep ``nrg`` (0 if unknown). A keep car
@@ -792,25 +838,6 @@ def surplus_phase_budget(
     }
 
 
-def group_lot_for_amps(lot, amps, group_lot, *, overdraw=False):
-    """Raise leftover ``lot`` so a held 1-phase ``amp`` still fits.
-
-    Equal leftover already shares one group ``lot``; do not sum identical
-    amps or two 17 A cars would raise 12 kW leftover to 34 A. Differing
-    amps (priority split or mixed 1-phase / 3-phase hold) still need the
-    sum so both caps fit, at most ``group_lot``. ``overdraw`` sums even
-    identical amps so a pending offer and a taking car can both draw
-    for ``OFFER_WAIT_S``.
-    """
-    lot = int(lot)
-    amps = [int(amp) for amp in amps]
-    if not amps:
-        return lot
-    if not overdraw and len(set(amps)) <= 1:
-        return min(int(group_lot), max(lot, amps[0]))
-    return min(int(group_lot), max(lot, sum(amps)))
-
-
 def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     """MQTT lot/psm/amp for surplus chargers in a load-balancing group.
 
@@ -827,37 +854,6 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     psm = int(psm)
     amp = int(amp)
     return int(group_lot), psm, amp
-
-
-def group_lot_for_allocations(
-    lot,
-    allocations,
-    *,
-    min_amp,
-    max_amp,
-    group_lot,
-    volts,
-    max_1phase_amp,
-    overdraw=False,
-):
-    """Keep leftover ``lot`` when every surplus charger gets the same watts.
-
-    Differing shares (priority split / steal) use 1-phase and 3-phase
-    ``amp`` together. Raise group ``lot`` to the sum of those amps so
-    load balancing can actually deliver both, still at most ``group_lot``.
-    ``overdraw`` sums even identical leftover watts for the 15 s offer wait.
-    """
-    lot = int(lot)
-    if not isinstance(allocations, dict) or len(allocations) < 2:
-        return lot
-    watts_values = [max(int(watts_i), 0) for watts_i in allocations.values()]
-    if not overdraw and len(set(watts_values)) <= 1:
-        return lot
-    amp_sum = sum(
-        int(budget(watts_i, min_amp, max_amp, group_lot, volts, max_1phase_amp)[2])
-        for watts_i in watts_values
-    )
-    return min(int(group_lot), max(lot, amp_sum))
 
 
 def parse_lop(state):
@@ -1161,8 +1157,8 @@ def surplus_allocation_plan(
     first would use it all, keep stealing 3 kW for the hold minutes
     unless ``split_expired`` or leftover is below 6 kW.
     ``lops`` is HA charger priority, not app ``lop``. HA does not write
-    ``lop``. Group ``lot`` uses steal/share watts only, except during
-    the offer-wait over-draw. Whenever a lower-priority eligible
+    ``lop``. Charger ``lot`` stays the fuse cap. ``lot_allocations`` only
+    marks which shares count as taking. Whenever a lower-priority eligible
     charger is allocated leftover, every better HA priority that is
     still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
     so it can start taking again. Those backfills are not group-lot

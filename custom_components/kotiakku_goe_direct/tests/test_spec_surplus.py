@@ -324,6 +324,30 @@ def main():
             (7000, 30.0),
             "that report does not stay armed for a later Controller tick",
         )
+        assert_eq(
+            hold(0, 6900, 0, 50, refresh=False),
+            (6900, 0.0),
+            "a session gap does not resample leftover",
+        )
+        assert_eq(surplus.surplus_sensor_w(6900), 6900, "surplus sensor shows the held sample")
+        assert_eq(surplus.surplus_sensor_w(None), None, "surplus sensor waits for a Kotiakku sample")
+        assert_eq(
+            surplus.surplus_sensor_w(6900, usable=False),
+            None,
+            "unusable Kotiakku clears the surplus sensor",
+        )
+        armed = surplus.surplus_sample_armed
+        assert_true(armed("1000", "8000", solar, *kotiakku), "solar value change samples")
+        assert_true(not armed("8000", "8000", solar, *kotiakku), "same solar value does not sample")
+        assert_true(
+            not armed("8000", "unavailable", solar, *kotiakku),
+            "unavailable blip does not sample",
+        )
+        assert_true(not armed("1", "2", ctrl, *kotiakku), "Controller change does not sample")
+        restore = surplus.charger_lot_needs_restore
+        assert_true(restore(19, 50), "19 A lot is not the 50 A fuse cap")
+        assert_true(not restore(50, 50), "fuse cap lot stays")
+        assert_true(not restore(None, 50), "unknown lot is not rewritten yet")
 
     def test_decision_start_hold_stop_and_hysteresis():
         decide = surplus.surplus_decision
@@ -490,15 +514,6 @@ def main():
             "pending high is a group-lot share until the wait expires",
         )
         assert_eq(
-            surplus.group_lot_for_allocations(
-                11, waiting["lot_allocations"],
-                min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32,
-                overdraw=True,
-            ),
-            22,
-            "over-draw raises lot so both leftover amps fit",
-        )
-        assert_eq(
             alloc(
                 [A, B], leftover_w=8000,
                 take_w={A: 0, B: 0}, states={A: "Complete", B: "Charging"}, **both,
@@ -552,14 +567,6 @@ def main():
             "Idle-armed leftover watts are not a group-lot share",
         )
         assert_eq(lead_plan["taking"], [B], "only the car actually taking is in split")
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, lead_plan["lot_allocations"],
-                min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32,
-            ),
-            26,
-            "9+3 steal raises lot to 13 A + 13 A without the Idle arm",
-        )
         wait_mid = surplus.surplus_allocation_plan(
             [A, B, C], leftover_w=18000,
             take_w={A: 5000, B: 0, C: 0},
@@ -705,20 +712,6 @@ def main():
         assert_eq(setp(10, 1, 10, n_full=0, group_lot=50), (50, 1, 10), "pure surplus keeps group lot 50")
         assert_eq(setp(10, 1, 10, n_full=1, group_lot=50), (50, 1, 10), "mixed: keep group 50, leftover amp")
         assert_eq(setp(25, 2, 25, n_full=1, group_lot=50), (50, 2, 25), "do not cap leftover amp for 32 A")
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, {A: 9000, B: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
-            ),
-            26,
-            "helper can still raise a leftover lot; MQTT does not use it",
-        )
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, {A: 12000, B: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
-            ),
-            17,
-            "equal leftover does not sum amps",
-        )
         pub = surplus.surplus_phase_budget(5000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((pub["lot"], pub["psm"], pub["amp"]), (50, 1, 21), "phase budget lot is fuse cap")
 
@@ -889,28 +882,6 @@ def main():
             want(6000, 5520, last_amp=8, last_psm=2),
             5520,
             "active 3-phase at 8 A cap does not raise toward 1-phase",
-        )
-        assert_eq(
-            surplus.group_lot_for_amps(17, [], 50),
-            17,
-            "no amps keeps leftover lot",
-        )
-        assert_eq(
-            surplus.group_lot_for_amps(11, [11, 11], 50),
-            11,
-            "equal leftover amps do not sum",
-        )
-        assert_eq(
-            surplus.group_lot_for_amps(11, [11, 11], 50, overdraw=True),
-            22,
-            "offer-wait over-draw sums equal leftover amps",
-        )
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, {A: 8000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
-            ),
-            17,
-            "single allocation does not raise lot",
         )
         assert_eq(
             surplus.group_surplus_setpoint(10, 1, 10, n_full=2, group_lot=50),
