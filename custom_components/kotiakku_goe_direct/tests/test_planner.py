@@ -1237,20 +1237,6 @@ def main():
         assert_eq((high_psm, high_amp), (2, 13), "high 9 kW is 3-phase 13 A")
         low_lot, low_psm, low_amp = surplus.budget(3000, 6, 32, 50, 230, 32)
         assert_eq((low_psm, low_amp), (1, 13), "low 3 kW is 1-phase 13 A")
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, {a: 9000, b: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
-            ),
-            26,
-            "9+3 kW: raise group lot to 13 A + 13 A so both amp caps fit",
-        )
-        assert_eq(
-            surplus.group_lot_for_allocations(
-                17, {a: 12000, b: 12000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
-            ),
-            17,
-            "same leftover on both: keep leftover lot",
-        )
         assert_eq(surplus.parse_lop("1"), 1, "lop 1")
         assert_eq(surplus.parse_lop("50"), 50, "lop 50")
         assert_eq(surplus.parse_lop("unknown"), None, "unknown lop")
@@ -1331,25 +1317,8 @@ def main():
         assert_eq((first6["psm"], first6["amp"]), (1, 26), "first start 6 kW prefers 1-phase")
         pref3 = phase(6000, *args, preferred_psm=2)
         assert_eq((pref3["psm"], pref3["amp"]), (2, 8), "preferred 3-phase first start 6 kW is 8 A")
-        assert_eq(surplus.group_lot_for_amps(7, [21], 50), 21, "raise lot so 1-phase 21 A is not clipped")
         floor = phase(0, *args, last_psm=2)
         assert_eq((floor["psm"], floor["amp"]), (2, 6), "6 A floor stays 3-phase during hold")
-        assert_eq(surplus.group_lot_for_amps(11, [32], 50), 32, "raise lot so 1-phase 32 A fits")
-        assert_eq(
-            surplus.group_lot_for_amps(26, [13, 13], 50),
-            26,
-            "same 13 A after split already raised: keep lot",
-        )
-        assert_eq(
-            surplus.group_lot_for_amps(17, [32, 13], 50),
-            45,
-            "1-phase hold 32 A + 3 kW 13 A: raise to the sum",
-        )
-        assert_eq(
-            surplus.group_lot_for_amps(17, [17, 17], 50),
-            17,
-            "equal leftover 17 A must not sum to 34 A",
-        )
 
     case("surplus_allocations_steal_second_charger_floor", test_surplus_allocations_steal_second_charger_floor)
     case("phase_hold_both_directions", test_phase_hold_both_directions)

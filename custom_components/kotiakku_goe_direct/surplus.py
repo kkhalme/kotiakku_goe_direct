@@ -838,25 +838,6 @@ def surplus_phase_budget(
     }
 
 
-def group_lot_for_amps(lot, amps, group_lot, *, overdraw=False):
-    """Raise leftover ``lot`` so a held 1-phase ``amp`` still fits.
-
-    Equal leftover already shares one group ``lot``; do not sum identical
-    amps or two 17 A cars would raise 12 kW leftover to 34 A. Differing
-    amps (priority split or mixed 1-phase / 3-phase hold) still need the
-    sum so both caps fit, at most ``group_lot``. ``overdraw`` sums even
-    identical amps so a pending offer and a taking car can both draw
-    for ``OFFER_WAIT_S``.
-    """
-    lot = int(lot)
-    amps = [int(amp) for amp in amps]
-    if not amps:
-        return lot
-    if not overdraw and len(set(amps)) <= 1:
-        return min(int(group_lot), max(lot, amps[0]))
-    return min(int(group_lot), max(lot, sum(amps)))
-
-
 def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     """MQTT lot/psm/amp for surplus chargers in a load-balancing group.
 
@@ -873,37 +854,6 @@ def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     psm = int(psm)
     amp = int(amp)
     return int(group_lot), psm, amp
-
-
-def group_lot_for_allocations(
-    lot,
-    allocations,
-    *,
-    min_amp,
-    max_amp,
-    group_lot,
-    volts,
-    max_1phase_amp,
-    overdraw=False,
-):
-    """Keep leftover ``lot`` when every surplus charger gets the same watts.
-
-    Differing shares (priority split / steal) use 1-phase and 3-phase
-    ``amp`` together. Raise group ``lot`` to the sum of those amps so
-    load balancing can actually deliver both, still at most ``group_lot``.
-    ``overdraw`` sums even identical leftover watts for the 15 s offer wait.
-    """
-    lot = int(lot)
-    if not isinstance(allocations, dict) or len(allocations) < 2:
-        return lot
-    watts_values = [max(int(watts_i), 0) for watts_i in allocations.values()]
-    if not overdraw and len(set(watts_values)) <= 1:
-        return lot
-    amp_sum = sum(
-        int(budget(watts_i, min_amp, max_amp, group_lot, volts, max_1phase_amp)[2])
-        for watts_i in watts_values
-    )
-    return min(int(group_lot), max(lot, amp_sum))
 
 
 def parse_lop(state):
@@ -1207,8 +1157,8 @@ def surplus_allocation_plan(
     first would use it all, keep stealing 3 kW for the hold minutes
     unless ``split_expired`` or leftover is below 6 kW.
     ``lops`` is HA charger priority, not app ``lop``. HA does not write
-    ``lop``. Group ``lot`` uses steal/share watts only, except during
-    the offer-wait over-draw. Whenever a lower-priority eligible
+    ``lop``. Charger ``lot`` stays the fuse cap. ``lot_allocations`` only
+    marks which shares count as taking. Whenever a lower-priority eligible
     charger is allocated leftover, every better HA priority that is
     still eligible stays in ``allocations`` (leftover MQTT, ``frc=2``)
     so it can start taking again. Those backfills are not group-lot
