@@ -140,6 +140,8 @@ from .surplus import (
     leftover_w,
     leftover_for_surplus,
     keep_take_w,
+    surplus_held_w,
+    surplus_sensor_samples,
     idle_complete,
     nrg_should_reschedule,
     nrg_total_w,
@@ -281,6 +283,9 @@ class KotiakkuGoeDirectController:
         self._last_enough_solar = None
         self._last_gating_day = None
         self._last_surplus_w = None
+        self._surplus_setpoint_w = None
+        self._surplus_setpoint_ts = None
+        self._surplus_sample = False
         self._refreshing = False
         self._surplus_amp = {}
         self._surplus_psm = {}
@@ -936,7 +941,16 @@ class KotiakkuGoeDirectController:
         if self._refreshing:
             return
         entity = event.data.get("entity_id")
+        if entity == self.controller_entity:
+            # Controller is fast. Refresh the live surplus sensor only.
+            # Leftover amp waits for the next Kotiakku sample.
+            self._notify_if_surplus_changed()
+            return
         if entity in self._kotiakku_ids:
+            if surplus_sensor_samples(
+                entity, self.soc_entity, self.solar_entity, self.house_entity
+            ):
+                self._surplus_sample = True
             self._notify_if_surplus_changed()
             self._schedule_apply()
             return
@@ -1395,6 +1409,8 @@ class KotiakkuGoeDirectController:
     def _clear_surplus_session(self):
         self.session = False
         self.split_session = False
+        self._surplus_setpoint_w = None
+        self._surplus_setpoint_ts = None
         self._arm_split(False)
         for serial in list(self._offer_unsub):
             self._arm_offer_wait(serial, False)
@@ -1668,7 +1684,29 @@ class KotiakkuGoeDirectController:
         raw_w = snap["available_w"]
         keep_serials = [serial for serial in self.chargers if roles[serial] == ROLE_KEEP]
         keep_powers = [self.charger_power_w(serial) for serial in keep_serials]
-        snap["available_w"] = leftover_for_surplus(raw_w, *keep_powers)
+        live_w = leftover_for_surplus(raw_w, *keep_powers)
+        # No session yet, or the 6 A hold just expired: decide from live
+        # leftover. While surplus is on, amp and start-hold-stop stay on
+        # the last Kotiakku SoC/solar/house sample. Controller and nrg
+        # update much faster and must not bounce 30 A ↔ 6 A. A Kotiakku
+        # report inside the cadence is dropped so a later fast tick
+        # cannot consume it.
+        prev_ts = self._surplus_setpoint_ts
+        armed = self._surplus_sample
+        held_w, held_ts = surplus_held_w(
+            live_w,
+            self._surplus_setpoint_w,
+            self._surplus_setpoint_ts,
+            now_ts,
+            refresh=bool(floor_expired) or not self.session,
+            allow_sample=armed,
+        )
+        self._surplus_setpoint_w = held_w
+        self._surplus_setpoint_ts = held_ts
+        if held_ts != prev_ts or armed:
+            self._surplus_sample = False
+        snap["live_available_w"] = live_w
+        snap["available_w"] = held_w
         dec = surplus_decision(
             self.session,
             snap["available_w"],
@@ -1717,6 +1755,7 @@ class KotiakkuGoeDirectController:
             "roles": roles,
             "snap": snap,
             "raw_w": raw_w,
+            "live_available_w": live_w,
             "keep_serials": keep_serials,
             "keep_powers": keep_powers,
             "dec": dec,
@@ -1864,12 +1903,15 @@ class KotiakkuGoeDirectController:
             for serial in self.chargers
         }
         if keep_on != keep_before:
+            self._surplus_setpoint_w = None
+            self._surplus_setpoint_ts = None
             plan = self._compute_leftover_plan(
                 until_on, keep_on, floor_expired, split_expired
             )
         roles = plan["roles"]
         snap = plan["snap"]
         raw_w = plan["raw_w"]
+        live_w = plan["live_available_w"]
         keep_serials = plan["keep_serials"]
         keep_powers = plan["keep_powers"]
         dec = plan["dec"]
@@ -1881,25 +1923,27 @@ class KotiakkuGoeDirectController:
                 for s, p in zip(keep_serials, keep_powers)
             )
             _LOGGER.debug(
-                "kotiakku_goe_direct: keep nrg %s leftover %s W → %s W",
+                "kotiakku_goe_direct: keep nrg %s leftover %s W → %s W (setpoint %s W)",
                 parts,
                 raw_w,
+                live_w,
                 snap["available_w"],
             )
-            if snap["available_w"] < 0 and (
+            if live_w < 0 and (
                 self._last_surplus_w is None or self._last_surplus_w >= 0
             ):
                 _LOGGER.info(
                     "kotiakku_goe_direct: keep using leftover pool (%s); leftover %s W → %s W (deficit)",
                     parts,
                     raw_w,
-                    snap["available_w"],
+                    live_w,
                 )
-        self._last_surplus_w = snap["available_w"]
+        self._last_surplus_w = live_w
         _LOGGER.debug(
-            "kotiakku_goe_direct: apply leftover=%sW soc=%s window_ok=%s session=%s "
+            "kotiakku_goe_direct: apply leftover=%sW live=%sW soc=%s window_ok=%s session=%s "
             "write_on=%s write_off=%s floor=%s roles=%s floor_exp=%s split_exp=%s force=%s solar=%sW house=%sW",
             snap["available_w"],
+            live_w,
             snap["soc"],
             snap["window_ok"],
             self.session,

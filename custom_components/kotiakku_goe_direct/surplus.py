@@ -35,6 +35,14 @@ FINISHED_STATES = {
 # Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
+# Seconds leftover watts for surplus amp / start-hold-stop stay fixed.
+# Kotiakku SoC / solar / house update about every 5 min. The go-e
+# Controller and charger ``nrg`` update much faster. Feeding those into
+# leftover ``amp`` on every tick bounces the pilot (30 A ↔ 6 A) and
+# Tesla will not ramp. Live leftover still updates
+# ``sensor.kotiakku_goe_direct_available_surplus``.
+SURPLUS_SETPOINT_S = 300
+
 # Below this, leftover still offers (nrg often 0 at start). Surplus treats a
 # Charging car as taking leftover (steal / offer-wait). Keep pool subtract
 # counts every watt of keep ``nrg``; it does not use this floor.
@@ -60,9 +68,9 @@ def house_includes_ev(house_w, ev_w):
 
     Leftover is ``solar − house + EV`` only in that case (house CT includes
     the car, so EV must be added back). If house is clearly below the EV
-    take — house excludes the charger, or the Controller 5-min mean still
-    has a car that just unplugged — adding EV invents surplus and will
-    keep charging from the grid.
+    take — house excludes the charger, or Kotiakku house has not yet
+    caught a car the Controller already sees — adding EV invents surplus
+    and will keep charging from the grid.
     """
     house_w = int(house_w)
     ev_w = int(ev_w)
@@ -73,15 +81,15 @@ def house_includes_ev(house_w, ev_w):
 
 
 def effective_ev_w(controller_w, nrg_w=None, *, controller_usable=True):
-    """EV watts for leftover: Controller 5-min mean, not instant ``nrg``.
+    """EV watts for leftover: go-e Controller, not instant charger ``nrg``.
 
-    Kotiakku solar/house and Controller Car-power update about every
-    5 min. Instant charger ``nrg`` follows the car. Feeding ``nrg``
-    back into leftover made surplus ``amp`` track the take (16 A ↔
-    21 A) so Tesla stayed at the lower pilot. Use Controller while it
-    is usable so leftover amp only moves on that 5-min cadence.
-    Instant ``nrg`` is the fallback when Controller is unknown.
-    Missing ``nrg`` then is 0.
+    Controller Car-power updates much faster than Kotiakku. Instant
+    ``nrg`` follows the car even more closely. Feeding either straight
+    into surplus ``amp`` made the pilot track the take (16 A ↔ 21 A,
+    or 30 A ↔ 6 A) so Tesla stayed at the lower value. Use Controller
+    while it is usable; the Kotiakku sample hold decides when that
+    number may change ``amp``. Instant ``nrg`` is the fallback when
+    Controller is unknown. Missing ``nrg`` then is 0.
     """
     nrg = None if nrg_w is None else max(int(nrg_w), 0)
     if controller_usable:
@@ -111,6 +119,62 @@ def keep_take_w(power_w):
     except (TypeError, ValueError):
         return 0
     return max(power_w, 0)
+
+
+def surplus_sensor_samples(entity_id, *kotiakku_ids):
+    """True when this sensor may resample leftover watts for ``amp``.
+
+    Pass Kotiakku SoC, solar, and house. Those update about every
+    5 min. The go-e Controller and charger ``nrg`` update much faster
+    and must not be passed: sampling them retunes ``amp`` between
+    Kotiakku reports.
+    """
+    if not entity_id:
+        return False
+    return entity_id in {eid for eid in kotiakku_ids if eid}
+
+
+def surplus_held_w(
+    live_w,
+    held_w,
+    held_ts,
+    now_ts,
+    *,
+    cadence_s=None,
+    refresh=False,
+    allow_sample=False,
+):
+    """Leftover watts for surplus amp and start/hold/stop.
+
+    First sample and ``refresh`` take ``live_w``. Otherwise keep
+    ``held_w`` until ``cadence_s`` (default ``SURPLUS_SETPOINT_S``) has
+    elapsed **and** ``allow_sample`` (a Kotiakku SoC, solar, or house
+    report; see ``surplus_sensor_samples``). The caller must drop that
+    arm when the cadence has not elapsed yet. Leaving it set would let
+    a later Controller or ``nrg`` tick consume it and move ``amp``.
+    """
+    live_w = int(live_w)
+    try:
+        now_ts = float(now_ts)
+    except (TypeError, ValueError):
+        now_ts = 0.0
+    if cadence_s is None:
+        cadence = float(SURPLUS_SETPOINT_S)
+    else:
+        try:
+            cadence = float(cadence_s)
+        except (TypeError, ValueError):
+            cadence = float(SURPLUS_SETPOINT_S)
+    if cadence <= 0 or refresh or held_w is None or held_ts is None:
+        return live_w, now_ts
+    try:
+        held_w = int(held_w)
+        held_ts = float(held_ts)
+    except (TypeError, ValueError):
+        return live_w, now_ts
+    if (now_ts - held_ts) >= cadence and allow_sample:
+        return live_w, now_ts
+    return held_w, held_ts
 
 
 def leftover_for_surplus(leftover_w, *keep_power_w):
@@ -873,7 +937,7 @@ def nrg_should_reschedule(old_w, new_w):
     """True when a charger ``nrg`` change should recompute MQTT.
 
     Watt-by-watt ``nrg`` must not retune leftover ``amp``: leftover is
-    held to Kotiakku solar/house/Controller (about every 5 min). Crossing
+    held to the Kotiakku SoC/solar/house sample (about every 5 min). Crossing
     leftover has-started (``TAKE_MIN_W``) or the idle-Complete band
     (``KEEP_PROBE_TAKE_W``) still must, for offer-wait, steal, and keep.
     """

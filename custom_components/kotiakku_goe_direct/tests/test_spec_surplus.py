@@ -239,6 +239,87 @@ def main():
         assert_eq(resched(None, 50), False, "first nrg still under take and idle band")
         assert_eq(resched(3000, 3000), False, "same watts")
 
+    def test_surplus_held_w_kotiakku_cadence():
+        hold = surplus.surplus_held_w
+        assert_eq(surplus.SURPLUS_SETPOINT_S, 300, "leftover amp follows 5 min Kotiakku cadence")
+        first = hold(6900, None, None, 0)
+        assert_eq(first, (6900, 0.0), "first sample is live leftover")
+        assert_eq(
+            hold(0, 6900, 0, 10),
+            (6900, 0.0),
+            "house tick 10 s later does not retune leftover amp",
+        )
+        assert_eq(
+            hold(0, 6900, 0, 299, allow_sample=True),
+            (6900, 0.0),
+            "1 s under cadence still holds even with a Kotiakku sample",
+        )
+        assert_eq(
+            hold(0, 6900, 0, 300),
+            (6900, 0.0),
+            "cadence elapsed still holds without a Kotiakku sample",
+        )
+        assert_eq(
+            hold(5000, 6900, 0, 300, allow_sample=True),
+            (5000, 300.0),
+            "Kotiakku sample after 5 min takes live leftover",
+        )
+        assert_eq(
+            hold(0, 6900, 0, 10, refresh=True),
+            (0, 10.0),
+            "session start / 6 A hold expiry takes live leftover",
+        )
+        assert_eq(
+            hold(1234, 6900, 0, 10, cadence_s=0),
+            (1234, 10.0),
+            "cadence 0 is always live",
+        )
+        collapsed = surplus.surplus_decision(True, 0, 96, window_ok=True)
+        assert_true(collapsed["use_floor_budget"], "live 0 W would bounce to 6 A")
+        held_dec = surplus.surplus_decision(True, 6900, 96, window_ok=True)
+        assert_true(
+            held_dec["write_on"] and not held_dec["arm_floor"],
+            "held 6900 W keeps tracking leftover, not the 6 A floor",
+        )
+        lot, psm, amp = surplus.budget(6900, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq((lot, psm, amp), (50, 1, 30), "held 6900 W is 30 A, lot 50")
+        floor_lot, floor_psm, floor_amp = surplus.budget(
+            0, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P
+        )
+        assert_eq(floor_amp, 6, "live 0 W would publish the 6 A floor")
+        sawtooth = [0, 2300, 6900, 1380, 7360, 0]
+        w, ts = 6900, 0.0
+        for i, live in enumerate(sawtooth, start=1):
+            w, ts = hold(live, w, ts, i * 10)
+            assert_eq(
+                (w, ts),
+                (6900, 0.0),
+                "sawtooth house leftover %s W at +%ss still holds 30 A watts" % (live, i * 10),
+            )
+        samples = surplus.surplus_sensor_samples
+        solar, ctrl, house, soc = (
+            "sensor.solar",
+            "sensor.controller",
+            "sensor.house",
+            "sensor.soc",
+        )
+        kotiakku = (soc, solar, house)
+        assert_true(samples(solar, *kotiakku), "Kotiakku solar may resample leftover amp")
+        assert_true(samples(house, *kotiakku), "Kotiakku house may resample leftover amp")
+        assert_true(samples(soc, *kotiakku), "Kotiakku SoC may resample leftover amp")
+        assert_true(
+            not samples(ctrl, *kotiakku),
+            "fast Controller must not resample leftover amp",
+        )
+        assert_true(not samples(house), "no Kotiakku ids does not sample house")
+        early = hold(0, 6900, 0, 30, allow_sample=True)
+        assert_eq(early, (6900, 0.0), "Kotiakku report inside 5 min does not move amp")
+        assert_eq(
+            hold(0, early[0], early[1], 300),
+            (6900, 0.0),
+            "that early report must not arm a later Controller tick",
+        )
+
     def test_decision_start_hold_stop_and_hysteresis():
         decide = surplus.surplus_decision
         start = decide(False, 2000, 92, window_ok=True)
@@ -1435,6 +1516,7 @@ def main():
     )
     case("leftover_ev_uses_controller_not_instant_nrg", test_leftover_ev_uses_controller_not_instant_nrg)
     case("nrg_reschedule_only_on_take_or_idle_band", test_nrg_reschedule_only_on_take_or_idle_band)
+    case("surplus_held_w_kotiakku_cadence", test_surplus_held_w_kotiakku_cadence)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
     case("three_kw_is_13a_one_phase_not_a_hold", test_three_kw_is_13a_one_phase_not_a_hold)
     case("unplugged_first_does_not_keep_3kw_steal", test_unplugged_first_does_not_keep_3kw_steal)
