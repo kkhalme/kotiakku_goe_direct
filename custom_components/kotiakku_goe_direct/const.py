@@ -309,7 +309,7 @@ SURPLUS_NUMBER_SPECS = (
     {
         "entity_id": EID_GROUP_LOT,
         "unique_id": GROUP_LOT_UNIQUE_ID,
-        "name": "Group lot",
+        "name": "Group lot (fuse cap)",
         "conf": CONF_GROUP_LOT,
         "default": DEFAULT_GROUP_LOT,
         "min": 6,

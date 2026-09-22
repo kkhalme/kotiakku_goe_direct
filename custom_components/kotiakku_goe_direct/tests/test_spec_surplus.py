@@ -199,18 +199,45 @@ def main():
         assert_eq(live_b["allocations"].get(B), 7000, "live Complete ≥400 W is leftover-eligible")
         assert_eq(live_b["taking"], [A, B], "live Complete is taking")
 
-    def test_ev_prefers_nrg_over_lagged_controller():
+    def test_leftover_ev_uses_controller_not_instant_nrg():
         ev = surplus.effective_ev_w
-        assert_eq(ev(12000, 3000), 3000, "lagged 12 kW Controller vs 3 kW nrg → 3 kW")
+        assert_eq(ev(5000, 3680), 5000, "16 A nrg during 5 kW leftover keeps Controller")
+        assert_eq(ev(5000, 4830), 5000, "21 A nrg does not raise leftover EV either")
+        assert_eq(ev(12000, 3000), 12000, "instant nrg must not pull leftover EV down")
         assert_eq(ev(3000, 3000), 3000, "agree")
         assert_eq(ev(0, 3000, controller_usable=False), 3000, "unknown Controller uses nrg")
         assert_eq(ev(3000, None), 3000, "no nrg keeps Controller")
-        assert_eq(ev(3000, 0), 3000, "zero nrg is missing, keep Controller")
+        assert_eq(ev(3000, 0), 3000, "zero nrg is ignored while Controller is usable")
         assert_eq(ev(0, None, controller_usable=False), 0, "nothing charging")
-        leftover = surplus.leftover_w(3800, 3500, ev(12000, 3000))
-        assert_eq(leftover, 3300, "nrg 3 kW with house 3500: add EV back")
+        leftover = surplus.leftover_w(8000, 8000, ev(5000, 3680))
+        assert_eq(leftover, 5000, "5 kW leftover stays 5 kW while Tesla is still at 16 A")
+        lot, psm, amp = surplus.budget(leftover, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq((lot, psm, amp), (50, 1, 21), "5 kW publishes 21 A with lot at the 50 A fuse cap")
+        lot21, psm21, amp21 = surplus.budget(
+            surplus.leftover_w(8000, 8000, ev(5000, 4830)),
+            MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P,
+        )
+        assert_eq((lot21, psm21, amp21), (lot, psm, amp), "amp does not follow nrg 16 A ↔ 21 A")
+        assert_eq(
+            surplus.leftover_w(3800, 3500, ev(12000, 3000)),
+            300,
+            "12 kW Controller vs house 3500: reject the lag",
+        )
         assert_eq(surplus.leftover_w(3800, 3500, 12000), 300, "12 kW Controller vs house 3500: reject the lag")
-        assert_eq(surplus.leftover_w(3800, 3500, 3000), 3300, "3 kW nrg with house containing it")
+        assert_eq(surplus.leftover_w(3800, 3500, 3000), 3300, "3 kW Controller with house containing it")
+
+    def test_nrg_reschedule_only_on_take_or_idle_band():
+        resched = surplus.nrg_should_reschedule
+        assert_eq(resched(3680, 4830), False, "watt-by-watt while taking does not retune amp")
+        assert_eq(resched(4830, 3680), False, "21 A → 16 A nrg does not retune leftover amp")
+        assert_eq(resched(50, 150), True, "crossing 100 W take starts leftover has-started")
+        assert_eq(resched(150, 50), True, "dropping under 100 W ends has-started")
+        assert_eq(resched(500, 350), True, "crossing 400 W idle-Complete band")
+        assert_eq(resched(350, 200), False, "already idle Complete, still above 100 W")
+        assert_eq(resched(80, 50), False, "already under take and idle band")
+        assert_eq(resched(None, 3000), True, "first nrg while taking must apply")
+        assert_eq(resched(None, 50), False, "first nrg still under take and idle band")
+        assert_eq(resched(3000, 3000), False, "same watts")
 
     def test_decision_start_hold_stop_and_hysteresis():
         decide = surplus.surplus_decision
@@ -289,6 +316,11 @@ def main():
         assert_eq((psm, amp), (1, 6), "negative leftover still floors at 6 A")
         lot, psm, amp = surplus.budget(100000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
         assert_eq((lot, amp), (50, 32), "group_lot then max_amp clip a huge leftover")
+        lot, psm, amp = surplus.budget(3000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq(lot, 50, "3 kW leftover keeps group lot at the fuse cap")
+        assert_eq((psm, amp), (1, 13), "3 kW is 1-phase 13 A")
+        five = surplus.budget(5000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq(five, (50, 1, 21), "5 kW is 21 A leftover amp, lot 50")
         lot, psm, amp = surplus.budget(8000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P, force_psm="x")
         assert_eq((psm, amp), (2, 11), "bad force_psm is auto")
         assert_eq(surplus.min_charge_w(0, MIN_A, VOLTS, MAX_1P), 1380, "0 W floor is 1-phase 6 A")
@@ -582,9 +614,9 @@ def main():
         assert_true(mid["use_floor_budget"], "hold hysteresis")
         assert_eq(mid_cmds[B]["amp"], 6, "still 6 A at 1500 W while hold is active")
 
-    def test_group_lot_does_not_shrink_full_power():
+    def test_group_lot_stays_at_fuse_cap():
         setp = surplus.group_surplus_setpoint
-        assert_eq(setp(10, 1, 10, n_full=0, group_lot=50), (10, 1, 10), "pure surplus leftover lot")
+        assert_eq(setp(10, 1, 10, n_full=0, group_lot=50), (50, 1, 10), "pure surplus keeps group lot 50")
         assert_eq(setp(10, 1, 10, n_full=1, group_lot=50), (50, 1, 10), "mixed: keep group 50, leftover amp")
         assert_eq(setp(25, 2, 25, n_full=1, group_lot=50), (50, 2, 25), "do not cap leftover amp for 32 A")
         assert_eq(
@@ -592,7 +624,7 @@ def main():
                 17, {A: 9000, B: 3000}, min_amp=6, max_amp=32, group_lot=50, volts=230, max_1phase_amp=32
             ),
             26,
-            "9+3 kW raises lot to 13 A + 13 A",
+            "helper can still raise a leftover lot; MQTT does not use it",
         )
         assert_eq(
             surplus.group_lot_for_allocations(
@@ -601,6 +633,8 @@ def main():
             17,
             "equal leftover does not sum amps",
         )
+        pub = surplus.surplus_phase_budget(5000, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq((pub["lot"], pub["psm"], pub["amp"]), (50, 1, 21), "phase budget lot is fuse cap")
 
     def test_phase_hold_tracks_amp_on_held_phase():
         args = (MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
@@ -747,7 +781,7 @@ def main():
         assert_eq(surplus.parse_lop("1.6"), 2, "lop rounds")
         assert_eq(surplus.sensor_usable("nan"), False, "nan")
         assert_eq(surplus.sensor_usable(" none "), False, "none")
-        assert_eq(surplus.effective_ev_w(3000, 12000), 3000, "nrg higher than Controller: keep the lower")
+        assert_eq(surplus.effective_ev_w(3000, 12000), 3000, "higher nrg is ignored while Controller is usable")
         assert_eq(surplus.effective_ev_w(3000, -50), 3000, "negative nrg is missing")
         assert_eq(surplus.leftover_w(0, 0, 0), 0, "all zero")
         assert_eq(surplus.leftover_w(0, 1000, 0), -1000, "house-only deficit")
@@ -796,6 +830,11 @@ def main():
             surplus.group_surplus_setpoint(10, 1, 10, n_full=2, group_lot=50),
             (50, 1, 10),
             "two full-power chargers still keep group_lot",
+        )
+        assert_eq(
+            surplus.group_surplus_setpoint(21, 1, 21, n_full=0, group_lot=50),
+            (50, 1, 21),
+            "pure surplus 21 A leftover amp still writes lot 50",
         )
         assert_eq(surplus.phase_hold_psm(2, "x")["arm"], False, "bad last psm is first-start")
         assert_eq(surplus.phase_hold_psm(2, 0), {"psm": 2, "arm": False}, "last psm 0 is not held")
@@ -907,6 +946,11 @@ def main():
         assert_true(dec["write_on"] and not dec["use_floor_budget"], "start at 2000 W tracks leftover")
         assert_eq(cmds[A]["amp"], 8, "2000 W publishes 8 A, not the 6 A floor")
         assert_eq(cmds[A]["psm"], 1, "2000 W is 1-phase")
+        assert_eq(cmds[A]["lot"], GROUP_LOT, "leftover MQTT lot is the fuse cap")
+        five, five_cmds = mqtt_for(5000, True, serials=[A], plugged={A: True})
+        assert_true(five["write_on"] and not five["use_floor_budget"], "5 kW tracks leftover")
+        assert_eq(five_cmds[A]["amp"], 21, "5 kW publishes 21 A")
+        assert_eq(five_cmds[A]["lot"], GROUP_LOT, "5 kW does not shrink lot to 21 A")
         dec, cmds = mqtt_for(
             12000,
             True,
@@ -1389,12 +1433,13 @@ def main():
         "steal_victim_worse_priority_while_other_takes",
         test_steal_victim_worse_priority_while_other_takes,
     )
-    case("ev_prefers_nrg_over_lagged_controller", test_ev_prefers_nrg_over_lagged_controller)
+    case("leftover_ev_uses_controller_not_instant_nrg", test_leftover_ev_uses_controller_not_instant_nrg)
+    case("nrg_reschedule_only_on_take_or_idle_band", test_nrg_reschedule_only_on_take_or_idle_band)
     case("decision_start_hold_stop_and_hysteresis", test_decision_start_hold_stop_and_hysteresis)
     case("three_kw_is_13a_one_phase_not_a_hold", test_three_kw_is_13a_one_phase_not_a_hold)
     case("unplugged_first_does_not_keep_3kw_steal", test_unplugged_first_does_not_keep_3kw_steal)
     case("reported_300w_surplus_does_not_publish_13a", test_reported_300w_surplus_does_not_publish_13a)
-    case("group_lot_does_not_shrink_full_power", test_group_lot_does_not_shrink_full_power)
+    case("group_lot_stays_at_fuse_cap", test_group_lot_stays_at_fuse_cap)
     case("phase_hold_tracks_amp_on_held_phase", test_phase_hold_tracks_amp_on_held_phase)
     case("car_states_plugged_charging_finished", test_car_states_plugged_charging_finished)
     case("enough_solar_and_offsun_hours", test_enough_solar_and_offsun_hours)

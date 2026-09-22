@@ -127,7 +127,6 @@ from .surplus import (
     DEFAULT_LON,
     OFFER_WAIT_S,
     TAKE_MIN_W,
-    budget,
     car_finished,
     car_plugged,
     charger_take_w,
@@ -141,10 +140,8 @@ from .surplus import (
     leftover_w,
     leftover_for_surplus,
     keep_take_w,
-    group_lot_for_allocations,
-    group_lot_for_amps,
-    group_surplus_setpoint,
     idle_complete,
+    nrg_should_reschedule,
     nrg_total_w,
     parse_lop,
     sensor_usable,
@@ -1016,10 +1013,15 @@ class KotiakkuGoeDirectController:
                 )
             self._schedule_apply()
             return
-        if entity in self._priority_ids or entity in self._power_ids:
-            if entity in self._power_ids:
-                self._notify_if_surplus_changed()
+        if entity in self._priority_ids:
             self._schedule_apply()
+            return
+        if entity in self._power_ids:
+            self._notify_if_surplus_changed()
+            old_s, new_s = _event_states(event)
+            if nrg_should_reschedule(nrg_total_w(old_s), nrg_total_w(new_s)):
+                self._schedule_apply()
+            return
 
     async def _on_price(self, _event):
         if self._refreshing:
@@ -1342,7 +1344,8 @@ class KotiakkuGoeDirectController:
             )
         if old != value:
             self._notify_if_surplus_changed()
-            self._schedule_apply()
+            if nrg_should_reschedule(old, value):
+                self._schedule_apply()
 
     @callback
     def _on_status_mqtt(self, msg):
@@ -1724,26 +1727,13 @@ class KotiakkuGoeDirectController:
         }
 
     def _leftover_pubs(self, surplus, dec, snap, split_expired, n_full, keep_on=None):
-        """Per-serial leftover psm/lot/amp. Empty if leftover is not writing."""
+        """Per-serial leftover psm/lot/amp. Empty if leftover is not writing.
+
+        Surplus energy is per-charger ``amp``. Group ``lot`` stays at the
+        fuse cap (``group_lot``) whether or not another charger is
+        full-power or keep (``n_full`` is accepted for callers).
+        """
         target_w = 0 if dec["use_floor_budget"] else snap["available_w"]
-        last_one = self._surplus_psm.get(surplus[0]) if len(surplus) == 1 else None
-        lot, psm, amp = budget(
-            target_w,
-            self.min_amp,
-            self.max_amp,
-            self.group_lot,
-            self.volts,
-            self.max_1phase_amp,
-            last_psm=last_one,
-            preferred_psm=self.preferred_start_psm,
-        )
-        lot, psm, amp = group_surplus_setpoint(
-            lot,
-            psm,
-            amp,
-            n_full=n_full,
-            group_lot=self.group_lot,
-        )
         ctx = self._surplus_alloc_context(surplus, snap["available_w"], keep_on)
         lops = ctx["lops"]
         plugged = ctx["plugged"]
@@ -1791,21 +1781,7 @@ class KotiakkuGoeDirectController:
                 serial in allocated and not taking_now,
                 taking=taking_now,
             )
-        lot_alloc = allocations.get("lot_allocations")
-        if lot_alloc is None:
-            lot_alloc = allocations["allocations"]
         overdraw = bool(allocations.get("overdraw"))
-        if not dec["use_floor_budget"]:
-            lot = group_lot_for_allocations(
-                lot,
-                lot_alloc,
-                min_amp=self.min_amp,
-                max_amp=self.max_amp,
-                group_lot=self.group_lot,
-                volts=self.volts,
-                max_1phase_amp=self.max_1phase_amp,
-                overdraw=overdraw,
-            )
         targets = {}
         for serial in surplus:
             watts_i = allocations["allocations"].get(serial)
@@ -1841,20 +1817,8 @@ class KotiakkuGoeDirectController:
             )
             targets[serial] = pub
             self._arm_phase(serial, pub["arm_phase"])
-        if n_full <= 0:
-            lot_serials = set(lot_alloc)
-            lot = group_lot_for_amps(
-                lot,
-                [
-                    pub["amp"]
-                    for serial, pub in targets.items()
-                    if serial in lot_serials
-                ],
-                self.group_lot,
-                overdraw=overdraw,
-            )
         for pub in targets.values():
-            pub["lot"] = lot
+            pub["lot"] = self.group_lot
         _LOGGER.debug(
             "kotiakku_goe_direct: leftover alloc %sW floor=%s taking=%s remainder=%sW overdraw=%s pending=%s pubs=%s",
             snap["available_w"],

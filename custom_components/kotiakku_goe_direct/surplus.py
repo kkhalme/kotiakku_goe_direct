@@ -73,21 +73,20 @@ def house_includes_ev(house_w, ev_w):
 
 
 def effective_ev_w(controller_w, nrg_w=None, *, controller_usable=True):
-    """EV watts for leftover: instant charger ``nrg`` when known.
+    """EV watts for leftover: Controller 5-min mean, not instant ``nrg``.
 
-    Controller Car-power is a 5-min mean. After a car unplugs or amp
-    drops, that mean stays high while house has already fallen. Prefer
-    the lower of Controller and summed charger ``nrg`` so leftover is
-    not inflated. Unknown Controller with ``nrg`` uses ``nrg``. Missing
-    ``nrg`` keeps Controller (or 0).
+    Kotiakku solar/house and Controller Car-power update about every
+    5 min. Instant charger ``nrg`` follows the car. Feeding ``nrg``
+    back into leftover made surplus ``amp`` track the take (16 A ↔
+    21 A) so Tesla stayed at the lower pilot. Use Controller while it
+    is usable so leftover amp only moves on that 5-min cadence.
+    Instant ``nrg`` is the fallback when Controller is unknown.
+    Missing ``nrg`` then is 0.
     """
     nrg = None if nrg_w is None else max(int(nrg_w), 0)
-    ctrl = max(int(controller_w or 0), 0) if controller_usable else None
-    if nrg:
-        if ctrl:
-            return min(ctrl, nrg)
-        return nrg
-    return ctrl or 0
+    if controller_usable:
+        return max(int(controller_w or 0), 0)
+    return nrg or 0
 
 
 def leftover_w(solar_w, house_w, ev_w):
@@ -659,9 +658,12 @@ def budget(
         )
         phases = 3 if psm_i == 2 else 1
     psm = 2 if phases == 3 else 1
-    lot = min(int(group_lot), max(min_amp, target_w // (volts * phases)))
+    leftover_amp = max(min_amp, target_w // (volts * phases))
     amp_cap = one_cap if phases == 1 else int(max_amp)
-    amp = min(amp_cap, lot)
+    # Surplus energy is per-charger ``amp``. Group ``lot`` stays at the
+    # fuse cap so load balancing does not clip Tesla below leftover amp.
+    amp = min(amp_cap, leftover_amp, int(group_lot))
+    lot = int(group_lot)
     return lot, psm, amp
 
 
@@ -707,9 +709,10 @@ def surplus_phase_budget(
     Wanted ``psm`` keeps the last phase while it can still offer leftover.
     A real 1↔3 change still waits ``hold_min``. ``amp`` is leftover on the
     phase we will actually run — not the pending other-phase amp, and
-    not the last take. 1→3: 1-phase leftover (capped at max 1-phase amp).
-    3→1: 3-phase min amp. Holding ``psm`` must not freeze amp. First start
-    uses ``preferred_psm`` when both phases can still offer leftover.
+    not the last take. ``lot`` stays at ``group_lot`` (fuse cap). 1→3:
+    1-phase leftover (capped at max 1-phase amp). 3→1: 3-phase min amp.
+    Holding ``psm`` must not freeze amp. First start uses
+    ``preferred_psm`` when both phases can still offer leftover.
     """
     _lot, wanted_psm, _wanted_amp = budget(
         available_w,
@@ -763,25 +766,18 @@ def group_lot_for_amps(lot, amps, group_lot, *, overdraw=False):
 def group_surplus_setpoint(lot, psm, amp, *, n_full, group_lot):
     """MQTT lot/psm/amp for surplus chargers in a load-balancing group.
 
-    Pure surplus: leftover ``lot`` is the group total when every surplus
-    charger gets the same leftover. Differing per-charger ``amp`` shares
-    may raise that ``lot`` so both caps fit. go-e load balancing and the
-    app's charger priorities (``lop``) still apply to the 50 A group.
-    HA leftover split uses HA priority numbers, not app ``lop``. HA does
-    not write ``lop``.
-
-    Mixed (another charger is full-power or 6 A keep): do not write leftover
-    ``lot`` — last writer would shrink the shared group. Keep ``lot`` at
-    group_lot and keep leftover ``amp`` / ``psm`` as that charger's leftover
-    cap. Combined demand may exceed the group; app priorities split it. Do
-    not reserve current for the full-power charger by capping surplus
-    ``amp``.
+    ``lot`` is always the group fuse cap (``group_lot``, default 50 A).
+    HA already sets each charger's leftover ``amp`` / ``psm``, so load
+    balancing must not be used as a surplus energy cap — shrinking
+    ``lot`` to leftover amps lets go-e clip Tesla below that ``amp``.
+    ``n_full`` is kept for callers; it does not change ``lot``. App
+    ``lop`` still applies inside the 50 A group. HA leftover split uses
+    HA priority numbers. HA does not write ``lop``. Combined demand may
+    exceed the group; app priorities split it. Do not reserve current
+    for a full-power charger by capping surplus ``amp``.
     """
-    lot = int(lot)
     psm = int(psm)
     amp = int(amp)
-    if int(n_full) <= 0:
-        return lot, psm, amp
     return int(group_lot), psm, amp
 
 
@@ -871,6 +867,34 @@ def min_charge_w(remaining, min_amp, volts, max_1phase_amp=32, max_amp=32):
     if surplus_wanted_psm(remaining, min_amp, max_amp, volts, max_1phase_amp) == 2:
         return min_amp * volts * 3
     return min_amp * volts
+
+
+def nrg_should_reschedule(old_w, new_w):
+    """True when a charger ``nrg`` change should recompute MQTT.
+
+    Watt-by-watt ``nrg`` must not retune leftover ``amp``: leftover is
+    held to Kotiakku solar/house/Controller (about every 5 min). Crossing
+    leftover has-started (``TAKE_MIN_W``) or the idle-Complete band
+    (``KEEP_PROBE_TAKE_W``) still must, for offer-wait, steal, and keep.
+    """
+
+    def _take(value):
+        if value is None:
+            return False
+        try:
+            return int(value) >= TAKE_MIN_W
+        except (TypeError, ValueError):
+            return False
+
+    def _idle_band(value):
+        if value is None:
+            return True
+        try:
+            return int(value) < KEEP_PROBE_TAKE_W
+        except (TypeError, ValueError):
+            return True
+
+    return _take(old_w) != _take(new_w) or _idle_band(old_w) != _idle_band(new_w)
 
 
 def nrg_total_w(payload):
