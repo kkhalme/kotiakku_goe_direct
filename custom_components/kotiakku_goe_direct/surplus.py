@@ -126,6 +126,50 @@ def surplus_sensor_samples(entity_id, *kotiakku_ids):
     return entity_id in {eid for eid in kotiakku_ids if eid}
 
 
+def surplus_sample_armed(old_state, new_state, entity_id, *kotiakku_ids):
+    """True when a Kotiakku state change may move leftover ``amp``.
+
+    Same state string (attribute-only refresh) and an unusable new
+    state do not arm a sample. Those updates are much faster than the
+    5 min Kotiakku value and would bounce ``amp`` and the surplus sensor.
+    """
+    if old_state == new_state:
+        return False
+    if not surplus_sensor_samples(entity_id, *kotiakku_ids):
+        return False
+    return sensor_usable(new_state)
+
+
+def surplus_sensor_w(held_w, *, usable=True):
+    """Watts for ``sensor.kotiakku_goe_direct_available_surplus``.
+
+    This is the held Kotiakku leftover, after keep take. ``None`` until
+    that hold exists, and whenever Kotiakku cannot be read. Controller
+    and charger ``nrg`` must not change this number between reports.
+    """
+    if not usable or held_w is None:
+        return None
+    try:
+        return int(held_w)
+    except (TypeError, ValueError):
+        return None
+
+
+def charger_lot_needs_restore(live_lot, group_lot):
+    """True when charger ``lot`` is not the fuse cap.
+
+    A leftover-sized ``lot`` (for example 19 A) lets go-e load balancing
+    clip the car and bounce allowed current. ``None`` has not been seen
+    yet, so there is nothing to correct.
+    """
+    if live_lot is None:
+        return False
+    try:
+        return int(live_lot) != int(group_lot)
+    except (TypeError, ValueError):
+        return False
+
+
 def surplus_held_w(
     live_w,
     held_w,
@@ -137,14 +181,15 @@ def surplus_held_w(
 ):
     """Leftover watts for surplus amp and start/hold/stop.
 
-    First sample, ``refresh``, and ``allow_sample`` take ``live_w``.
-    ``allow_sample`` is a Kotiakku SoC, solar, or house report
-    (``surplus_sensor_samples``). Those sensors are already about
-    every 5 min, so a report updates ``amp`` immediately — including
-    one that arrives while the 6 A floor is holding an older leftover.
-    Controller and charger ``nrg`` must not set ``allow_sample``.
-    Without it, ``held_w`` stays put so those fast ticks cannot bounce
-    the pilot (30 A ↔ 6 A).
+    First sample (empty hold), ``refresh``, and ``allow_sample`` take
+    ``live_w``. ``allow_sample`` is a Kotiakku SoC, solar, or house
+    report whose state value changed (``surplus_sample_armed``). Those
+    sensors are already about every 5 min, so a report updates ``amp``
+    immediately — including one that arrives while the 6 A floor is
+    holding an older leftover. Controller and charger ``nrg`` must not
+    set ``allow_sample``. A session gap must not set ``refresh`` and
+    must not clear the hold: the next fast tick would otherwise reseed
+    from live leftover and bounce the pilot (30 A ↔ 6 A).
     """
     live_w = int(live_w)
     try:
@@ -164,7 +209,8 @@ def surplus_held_w(
 def leftover_for_surplus(leftover_w, *keep_power_w):
     """Leftover still free for surplus chargers after keep take.
 
-    Exposed as ``sensor.kotiakku_goe_direct_available_surplus``. Pass each
+    The held result is what ``sensor.kotiakku_goe_direct_available_surplus``
+    shows after a Kotiakku sample. Pass each
     keep charger's ``nrg``. Keep MQTT stays at keep amp so leftover does
     not charge that pack, but keep and leftover are the same house pool.
     Subtract the full keep ``nrg`` (0 if unknown). A keep car

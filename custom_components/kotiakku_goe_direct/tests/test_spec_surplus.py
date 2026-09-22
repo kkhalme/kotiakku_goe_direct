@@ -324,6 +324,30 @@ def main():
             (7000, 30.0),
             "that report does not stay armed for a later Controller tick",
         )
+        assert_eq(
+            hold(0, 6900, 0, 50, refresh=False),
+            (6900, 0.0),
+            "a session gap does not resample leftover",
+        )
+        assert_eq(surplus.surplus_sensor_w(6900), 6900, "surplus sensor shows the held sample")
+        assert_eq(surplus.surplus_sensor_w(None), None, "surplus sensor waits for a Kotiakku sample")
+        assert_eq(
+            surplus.surplus_sensor_w(6900, usable=False),
+            None,
+            "unusable Kotiakku clears the surplus sensor",
+        )
+        armed = surplus.surplus_sample_armed
+        assert_true(armed("1000", "8000", solar, *kotiakku), "solar value change samples")
+        assert_true(not armed("8000", "8000", solar, *kotiakku), "same solar value does not sample")
+        assert_true(
+            not armed("8000", "unavailable", solar, *kotiakku),
+            "unavailable blip does not sample",
+        )
+        assert_true(not armed("1", "2", ctrl, *kotiakku), "Controller change does not sample")
+        restore = surplus.charger_lot_needs_restore
+        assert_true(restore(19, 50), "19 A lot is not the 50 A fuse cap")
+        assert_true(not restore(50, 50), "fuse cap lot stays")
+        assert_true(not restore(None, 50), "unknown lot is not rewritten yet")
 
     def test_decision_start_hold_stop_and_hysteresis():
         decide = surplus.surplus_decision

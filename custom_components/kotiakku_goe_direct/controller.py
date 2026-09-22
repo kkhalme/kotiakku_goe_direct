@@ -137,11 +137,12 @@ from .surplus import (
     gating_solar_kwh as forecast_gating_kwh,
     last_sun_end_ts as forecast_last_sun_end,
     last_usable_solar_end_ts as forecast_last_usable_end,
+    charger_lot_needs_restore,
     leftover_w,
     leftover_for_surplus,
-    keep_take_w,
     surplus_held_w,
-    surplus_sensor_samples,
+    surplus_sample_armed,
+    surplus_sensor_w,
     idle_complete,
     nrg_should_reschedule,
     nrg_total_w,
@@ -264,7 +265,8 @@ class KotiakkuGoeDirectController:
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._listeners = []
         self._surplus_listeners = []
-        self._last_surplus_sensor_w = object()
+        self._surplus_sensor_w = None
+        self._surplus_sensor_attrs = None
         self._unsubs = []
         self._apply_unsub = None
         self._floor_unsub = None
@@ -328,15 +330,29 @@ class KotiakkuGoeDirectController:
             callbacks = list(self._surplus_listeners)
         else:
             callbacks = list(self._listeners) + list(self._surplus_listeners)
-            self._last_surplus_sensor_w = self.available_surplus_w
         for callback in callbacks:
             callback()
 
-    def _notify_if_surplus_changed(self):
-        current = self.available_surplus_w
-        if current != self._last_surplus_sensor_w:
-            self._last_surplus_sensor_w = current
-            self.notify(surplus_only=True)
+    def _remember_surplus_sensor(self, held_w, snap, *, raw_w, usable):
+        """Publish the surplus sensor from the Kotiakku hold, once per sample."""
+        value = surplus_sensor_w(held_w, usable=usable)
+        if value is None:
+            attrs = {"usable": False, "window_ok": False}
+        else:
+            raw_i = int(raw_w)
+            attrs = {
+                "solar_w": snap.get("solar_w"),
+                "house_w": snap.get("house_w"),
+                "leftover_w": raw_i,
+                "keep_take_w": raw_i - int(held_w),
+                "window_ok": bool(snap.get("window_ok")),
+                "usable": True,
+            }
+        if value == self._surplus_sensor_w and attrs == self._surplus_sensor_attrs:
+            return
+        self._surplus_sensor_w = value
+        self._surplus_sensor_attrs = attrs
+        self.notify(surplus_only=True)
 
     def policy_entity(self, serial):
         return f"select.kotiakku_goe_direct_policy_{serial}"
@@ -588,26 +604,13 @@ class KotiakkuGoeDirectController:
 
     @property
     def available_surplus_w(self):
-        """Leftover watts free for surplus chargers. None if Kotiakku is unusable."""
-        if self._kotiakku_problems():
-            return None
-        snap = self._snapshot()
-        return leftover_for_surplus(snap["available_w"], *self._keep_powers_for_surplus())
+        """Held Kotiakku leftover for surplus chargers. None until that sample."""
+        return self._surplus_sensor_w
 
     def available_surplus_attrs(self):
-        if self._kotiakku_problems():
+        if self._surplus_sensor_attrs is None:
             return {"usable": False, "window_ok": False}
-        snap = self._snapshot()
-        keep_powers = self._keep_powers_for_surplus()
-        keep_take = sum(keep_take_w(power) for power in keep_powers)
-        return {
-            "solar_w": snap["solar_w"],
-            "house_w": snap["house_w"],
-            "leftover_w": snap["available_w"],
-            "keep_take_w": keep_take,
-            "window_ok": True,
-            "usable": True,
-        }
+        return dict(self._surplus_sensor_attrs)
 
     def _forecast_kwh(self, entity_id):
         st = self._ha_state(entity_id)
@@ -942,17 +945,20 @@ class KotiakkuGoeDirectController:
             return
         entity = event.data.get("entity_id")
         if entity == self.controller_entity:
-            # Controller is fast. Refresh the live surplus sensor only.
-            # Leftover amp waits for the next Kotiakku sample.
-            self._notify_if_surplus_changed()
+            # Controller is fast. It must not move amp or the surplus sensor.
             return
         if entity in self._kotiakku_ids:
-            if surplus_sensor_samples(
-                entity, self.soc_entity, self.solar_entity, self.house_entity
+            old_s, new_s = _event_states(event)
+            if surplus_sample_armed(
+                old_s,
+                new_s,
+                entity,
+                self.soc_entity,
+                self.solar_entity,
+                self.house_entity,
             ):
                 self._surplus_sample = True
-            self._notify_if_surplus_changed()
-            self._schedule_apply()
+                self._schedule_apply()
             return
         if entity in self._forecast_ids:
             old_s, new_s = _event_states(event)
@@ -1031,7 +1037,6 @@ class KotiakkuGoeDirectController:
             self._schedule_apply()
             return
         if entity in self._power_ids:
-            self._notify_if_surplus_changed()
             old_s, new_s = _event_states(event)
             if nrg_should_reschedule(nrg_total_w(old_s), nrg_total_w(new_s)):
                 self._schedule_apply()
@@ -1356,10 +1361,8 @@ class KotiakkuGoeDirectController:
                 old,
                 value,
             )
-        if old != value:
-            self._notify_if_surplus_changed()
-            if nrg_should_reschedule(old, value):
-                self._schedule_apply()
+        if old != value and nrg_should_reschedule(old, value):
+            self._schedule_apply()
 
     @callback
     def _on_status_mqtt(self, msg):
@@ -1376,6 +1379,15 @@ class KotiakkuGoeDirectController:
         bucket = self._charger_mqtt.setdefault(serial, {})
         old = bucket.get(key)
         bucket[key] = value
+        if key == "lot" and charger_lot_needs_restore(value, self.group_lot):
+            if old != value:
+                _LOGGER.info(
+                    "kotiakku_goe_direct: %s load balancing lot %s A, writing fuse cap %s A",
+                    serial,
+                    value,
+                    self.group_lot,
+                )
+            self._schedule_apply(force=True)
         if key == "frc" and old != value:
             _LOGGER.debug(
                 "kotiakku_goe_direct: %s live frc %s → %s",
@@ -1409,8 +1421,8 @@ class KotiakkuGoeDirectController:
     def _clear_surplus_session(self):
         self.session = False
         self.split_session = False
-        self._surplus_setpoint_w = None
-        self._surplus_setpoint_ts = None
+        # Keep the Kotiakku hold. Clearing it made the next fast apply
+        # reseed from Controller/nrg and bounce amp.
         self._arm_split(False)
         for serial in list(self._offer_unsub):
             self._arm_offer_wait(serial, False)
@@ -1685,26 +1697,33 @@ class KotiakkuGoeDirectController:
         keep_serials = [serial for serial in self.chargers if roles[serial] == ROLE_KEEP]
         keep_powers = [self.charger_power_w(serial) for serial in keep_serials]
         live_w = leftover_for_surplus(raw_w, *keep_powers)
-        # No session yet, or the 6 A hold just expired: decide from live
-        # leftover. While surplus is on, amp and start-hold-stop stay on
-        # the last Kotiakku SoC/solar/house sample and move on the next
-        # one, including out of the 6 A floor. Controller and nrg update
-        # much faster and must not bounce 30 A ↔ 6 A. The sample arm is
-        # consumed here so a later fast tick cannot reuse it.
+        # Amp, start/hold/stop, and the surplus sensor stay on the last
+        # Kotiakku SoC/solar/house sample and move on the next one,
+        # including out of the 6 A floor. An empty hold takes one live
+        # sample. Session gaps and the 6 A timer do not resample:
+        # Controller and nrg are much faster and would bounce 30 A ↔ 6 A.
+        # The sample arm is consumed here so a later fast tick cannot reuse it.
         prev_ts = self._surplus_setpoint_ts
         armed = self._surplus_sample
+        raw_for_sensor = snap["available_w"]
         held_w, held_ts = surplus_held_w(
             live_w,
             self._surplus_setpoint_w,
             self._surplus_setpoint_ts,
             now_ts,
-            refresh=bool(floor_expired) or not self.session,
             allow_sample=armed,
         )
         self._surplus_setpoint_w = held_w
         self._surplus_setpoint_ts = held_ts
         if held_ts != prev_ts or armed:
             self._surplus_sample = False
+        if held_ts != prev_ts:
+            self._remember_surplus_sensor(
+                held_w,
+                snap,
+                raw_w=raw_for_sensor,
+                usable=snap["window_ok"],
+            )
         snap["live_available_w"] = live_w
         snap["available_w"] = held_w
         dec = surplus_decision(
@@ -1903,8 +1922,6 @@ class KotiakkuGoeDirectController:
             for serial in self.chargers
         }
         if keep_on != keep_before:
-            self._surplus_setpoint_w = None
-            self._surplus_setpoint_ts = None
             plan = self._compute_leftover_plan(
                 until_on, keep_on, floor_expired, split_expired
             )
@@ -2068,8 +2085,6 @@ class KotiakkuGoeDirectController:
         if changed:
             await self._save()
             self.notify()
-        else:
-            self._notify_if_surplus_changed()
 
     async def _migrate_legacy_until_unplug(self):
         for serial in list(self.legacy_until_unplug):
