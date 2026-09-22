@@ -25,7 +25,7 @@ PROBE = planner.KEEP_PROBE_S
 BAND = surplus.KEEP_PROBE_TAKE_W
 
 WINDOW = {"raw_windows": [{"start": 1000, "end": 2000}]}
-LEFTOVER = {"psm": 2, "lot": 11, "amp": 11}
+LEFTOVER = {"psm": 2, "lot": 50, "amp": 11}
 
 
 class KeepSim:
@@ -494,7 +494,7 @@ def main():
         )
         assert_eq(
             cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=LEFTOVER),
-            ("on", 2, 11, 11),
+            ("on", 2, 50, 11),
             "leftover command is frc=2, not force off",
         )
 
@@ -694,7 +694,7 @@ def main():
         )
         assert_eq(
             cmd(planner.ROLE_SURPLUS, surplus_on=True, surplus_pub=LEFTOVER),
-            ("on", 2, 11, 11),
+            ("on", 2, 50, 11),
             "B leftover command",
         )
 
