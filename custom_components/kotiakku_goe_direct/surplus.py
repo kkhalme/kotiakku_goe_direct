@@ -35,6 +35,13 @@ FINISHED_STATES = {
 # Seconds to wait after leftover MQTT before cutting a charger. Over-draw is allowed.
 OFFER_WAIT_S = 15
 
+# Seconds leftover watts for surplus amp / start-hold-stop stay fixed.
+# Kotiakku solar/house and Controller Car-power update about every 5 min.
+# Faster house ticks while Tesla ramps collapse leftover (house already
+# includes the car, Controller still lags) and bounce amp 30 A ↔ 6 A.
+# Live leftover still updates ``sensor.kotiakku_goe_direct_available_surplus``.
+SURPLUS_SETPOINT_S = 300
+
 # Below this, leftover still offers (nrg often 0 at start). Surplus treats a
 # Charging car as taking leftover (steal / offer-wait). Keep pool subtract
 # counts every watt of keep ``nrg``; it does not use this floor.
@@ -111,6 +118,48 @@ def keep_take_w(power_w):
     except (TypeError, ValueError):
         return 0
     return max(power_w, 0)
+
+
+def surplus_held_w(
+    live_w,
+    held_w,
+    held_ts,
+    now_ts,
+    *,
+    cadence_s=None,
+    refresh=False,
+    allow_sample=False,
+):
+    """Leftover watts for surplus amp and start/hold/stop.
+
+    First sample and ``refresh`` take ``live_w``. Otherwise keep
+    ``held_w`` until ``cadence_s`` (default ``SURPLUS_SETPOINT_S``) has
+    elapsed **and** ``allow_sample`` (controller: a new Kotiakku /
+    Controller reading, or the 15-min safety apply). House ticks faster
+    than that cadence must not retune leftover ``amp``.
+    """
+    live_w = int(live_w)
+    try:
+        now_ts = float(now_ts)
+    except (TypeError, ValueError):
+        now_ts = 0.0
+    if cadence_s is None:
+        cadence = float(SURPLUS_SETPOINT_S)
+    else:
+        try:
+            cadence = float(cadence_s)
+        except (TypeError, ValueError):
+            cadence = float(SURPLUS_SETPOINT_S)
+    if cadence <= 0 or refresh or held_w is None or held_ts is None:
+        return live_w, now_ts
+    try:
+        held_w = int(held_w)
+        held_ts = float(held_ts)
+    except (TypeError, ValueError):
+        return live_w, now_ts
+    if (now_ts - held_ts) >= cadence and allow_sample:
+        return live_w, now_ts
+    return held_w, held_ts
 
 
 def leftover_for_surplus(leftover_w, *keep_power_w):
