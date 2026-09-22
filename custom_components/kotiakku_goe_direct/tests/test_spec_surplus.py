@@ -303,17 +303,21 @@ def main():
             "sensor.house",
             "sensor.soc",
         )
-        assert_true(samples(solar, solar, ctrl), "solar report may resample leftover amp")
-        assert_true(samples(ctrl, solar, ctrl), "Controller report may resample leftover amp")
-        assert_true(not samples(house, solar, ctrl), "house tick must not resample leftover amp")
-        assert_true(not samples(soc, solar, ctrl), "SoC tick must not resample leftover amp")
-        assert_true(not samples(house, None, None), "unset solar/Controller does not sample house")
+        kotiakku = (soc, solar, house)
+        assert_true(samples(solar, *kotiakku), "Kotiakku solar may resample leftover amp")
+        assert_true(samples(house, *kotiakku), "Kotiakku house may resample leftover amp")
+        assert_true(samples(soc, *kotiakku), "Kotiakku SoC may resample leftover amp")
+        assert_true(
+            not samples(ctrl, *kotiakku),
+            "fast Controller must not resample leftover amp",
+        )
+        assert_true(not samples(house), "no Kotiakku ids does not sample house")
         early = hold(0, 6900, 0, 30, allow_sample=True)
-        assert_eq(early, (6900, 0.0), "solar/Controller inside 5 min does not move amp")
+        assert_eq(early, (6900, 0.0), "Kotiakku report inside 5 min does not move amp")
         assert_eq(
             hold(0, early[0], early[1], 300),
             (6900, 0.0),
-            "that early report must not arm the later house tick",
+            "that early report must not arm a later Controller tick",
         )
 
     def test_decision_start_hold_stop_and_hysteresis():

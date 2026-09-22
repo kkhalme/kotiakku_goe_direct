@@ -941,9 +941,14 @@ class KotiakkuGoeDirectController:
         if self._refreshing:
             return
         entity = event.data.get("entity_id")
+        if entity == self.controller_entity:
+            # Controller is fast. Refresh the live surplus sensor only.
+            # Leftover amp waits for the next Kotiakku sample.
+            self._notify_if_surplus_changed()
+            return
         if entity in self._kotiakku_ids:
             if surplus_sensor_samples(
-                entity, self.solar_entity, self.controller_entity
+                entity, self.soc_entity, self.solar_entity, self.house_entity
             ):
                 self._surplus_sample = True
             self._notify_if_surplus_changed()
@@ -1682,9 +1687,10 @@ class KotiakkuGoeDirectController:
         live_w = leftover_for_surplus(raw_w, *keep_powers)
         # No session yet, or the 6 A hold just expired: decide from live
         # leftover. While surplus is on, amp and start-hold-stop stay on
-        # the last solar/Controller sample so a fast house tick cannot
-        # bounce 30 A ↔ 6 A. A sample inside the cadence is dropped so
-        # the next house tick cannot consume it.
+        # the last Kotiakku SoC/solar/house sample. Controller and nrg
+        # update much faster and must not bounce 30 A ↔ 6 A. A Kotiakku
+        # report inside the cadence is dropped so a later fast tick
+        # cannot consume it.
         prev_ts = self._surplus_setpoint_ts
         armed = self._surplus_sample
         held_w, held_ts = surplus_held_w(

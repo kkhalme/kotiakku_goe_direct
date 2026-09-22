@@ -23,7 +23,7 @@ The integration does not assume entity ids. **Add integration** and **Configure*
 | LUNA SoC | Battery state of charge |
 | PV power | Solar production |
 | House power | House load **including** EV |
-| Controller Car-power 5-min mean | go-e Controller EV watts for leftover math. Unknown → **0 W**. Do **not** keep last sample. Never written to. |
+| Controller Car-power | go-e Controller EV watts for leftover math. This sensor updates faster than Kotiakku; it does not move surplus `amp` between Kotiakku samples. Unknown → **0 W**. Do **not** keep last sample. Never written to. |
 | Charger entities | Charger 1 is required; 2–4 are optional. Any entity on each charger device (car state is ideal), then that charger’s MQTT serial and a unique leftover priority |
 | Spot-price sensor | Needs `raw_today` / `raw_tomorrow` (HACS Nordpool) |
 | Solar today | Optional. Forecast.Solar / Solcast **full-day** today kWh (example `sensor.energy_production_today`). SolarPriority. This is today's production, not leftover-from-now. |
@@ -37,7 +37,7 @@ Leftover:
 available_w = |solar_w| − |house_w| + |ev_w|
 ```
 
-Solar is generation, house is consumption (including the cars). EV watts for leftover come from the **Controller** Car-power 5-min mean, the same cadence as Kotiakku solar/house (typically **5 min**). Instant charger `nrg` is **not** fed back into leftover: that made surplus `amp` track the car (16 A ↔ 21 A) so Tesla stayed at the lower pilot. Instant `nrg` is still used for take / steal / keep / Complete. Use the magnitude of solar, house, and EV (an inverted CT can make Car negative). **Do not abs `available_w`.** A negative leftover is a deficit.
+Solar is generation, house is consumption (including the cars). EV watts for leftover come from the **go-e Controller** Car-power sensor. Kotiakku SoC / solar / house update about every **5 min**. The Controller and charger `nrg` update much faster. Instant `nrg` is **not** fed back into leftover: that made surplus `amp` track the car (16 A ↔ 21 A) so Tesla stayed at the lower pilot. Instant `nrg` is still used for take / steal / keep / Complete. Use the magnitude of solar, house, and EV (an inverted CT can make Car negative). **Do not abs `available_w`.** A negative leftover is a deficit.
 
 Leftover is `solar − house + EV` only when house already contains the car. If house is clearly below the EV take (house CT misses the charger, or the Controller mean still includes a car that unplugged), EV is **not** added back — that would invent ~3 kW of surplus and keep charging from the grid.
 
@@ -45,7 +45,7 @@ If the Controller mean is `unknown` (typical when nothing is charging) and no ch
 
 `available_w` (`leftover_w` on the sensor) is that leftover before keep take. Watts still free for surplus chargers after subtracting keep `nrg` are `sensor.kotiakku_goe_direct_available_surplus`. Unknown when Kotiakku SoC / solar / house cannot be read.
 
-Unknown SoC, solar, or house → treat as a blocked window. MQTT waits **2 s** after the first intended write (later sensor ticks in that window do not restart the timer). At flush, 22 kW is recomputed from current Kotiakku / Controller sensors. Surplus **start** uses live leftover. While surplus is on, hold/stop and leftover `amp` stay on the last **solar or Controller** sample, and move again only when one of those reports **and** at least **5 min** have passed. A report inside that 5 min is dropped, so a later house tick cannot consume it. House and SoC ticks do not move `amp` — house including the car while the Controller 5-min mean lags would otherwise bounce `amp` (30 A ↔ 6 A). Live leftover still updates `sensor.kotiakku_goe_direct_available_surplus` every tick. The 15 min interval republishes MQTT from the held leftover; it does not resample it. Instant charger `nrg` does not retune leftover `amp` unless take-started (100 W) or idle-Complete (400 W) crossed. The same command is sent only if live go-e `frc` / `amp` / `lot` / `psm` differ.
+Unknown SoC, solar, or house → treat as a blocked window. MQTT waits **2 s** after the first intended write (later sensor ticks in that window do not restart the timer). At flush, 22 kW is recomputed from current sensors. Surplus **start** uses live leftover. While surplus is on, hold/stop and leftover `amp` stay on the last **Kotiakku** sample (SoC, solar, or house), and move again only when one of those reports **and** at least **5 min** have passed. A Kotiakku report inside that 5 min is dropped, so a later Controller tick cannot consume it. Controller and charger `nrg` do not move `amp`. Live leftover still updates `sensor.kotiakku_goe_direct_available_surplus` on those faster ticks. The 15 min interval republishes MQTT from the held leftover; it does not resample it. Instant charger `nrg` does not retune leftover `amp` unless take-started (100 W) or idle-Complete (400 W) crossed. The same command is sent only if live go-e `frc` / `amp` / `lot` / `psm` differ.
 
 The official Controller API has no combined-power key. Combined current is the charger key **`lot`**. HA always writes group `lot` at the fuse cap (default **50 A**) and controls surplus with per-charger `amp`. Do not shrink `lot` to leftover amps — go-e load balancing then caps Tesla below that `amp`. **Who actually charges** inside the 50 A group is still app `lop`. **Which surplus charger is offered leftover watts** is the HA leftover priority on each charger (`number.kotiakku_goe_direct_priority_<serial>`; 1 is highest, 99 is lowest; each value unique). HA does not write `lop`, `loe`, or `loty`. It does not read MQTT `lop`.
 
@@ -57,7 +57,7 @@ When one charger is full-power (`lot` 50 / `amp` 32) or after-charge-complete ke
 
 `amp` cannot be 0 (official range 6–32). Stopping surplus-style or full-power charging is **`frc=1`** (force off), not `amp=0` and not **`frc=0`** (Neutral). In Basic/default charging mode Neutral keeps charging (`ChargingBecauseFallbackDefault`). Cheap-hour and surplus start still use **`frc=2`**. `amp`/`psm` alone do not start a session.
 
-Budget from leftover watts (floored amps, Finnish 230 V). While surplus is on, `amp` and hold/stop use the last solar or Controller leftover sample, at most once per **5 min**. House ticks and instant charger `nrg` do not move it. House can include the car while the Controller 5-min mean lags: live leftover then collapses and would bounce `amp` (30 A ↔ 6 A) every few seconds. Holding the solar/Controller sample avoids that; Tesla can ramp. Up to 5 min of grid over-draw is accepted. `sensor.kotiakku_goe_direct_available_surplus` stays live. Group `lot` stays at the fuse cap (default **50 A**). Keep the **active** phase while it can still offer leftover:
+Budget from leftover watts (floored amps, Finnish 230 V). While surplus is on, `amp` and hold/stop use the last Kotiakku leftover sample (SoC, solar, or house), at most once per **5 min**. The go-e Controller and instant charger `nrg` update faster and do not move it. Following those ticks bounced `amp` (30 A ↔ 6 A, or 16 A ↔ 21 A) and Tesla would not ramp. Up to 5 min of grid over-draw is accepted. `sensor.kotiakku_goe_direct_available_surplus` stays live. Group `lot` stays at the fuse cap (default **50 A**). Keep the **active** phase while it can still offer leftover:
 
 1. Active **3-phase** stays 3-phase while leftover ≥ 6 A × 230 V × 3 (4140 W). 8 kW → 6 kW stays `psm=2`, `amp = leftover // (230 × 3)` (11 A → 8 A), `lot` 50. Drop to 1-phase only when leftover cannot hold that 6 A 3-phase floor.
 2. Active **1-phase** stays 1-phase until 3-phase would deliver **more watts** than 1-phase. 1-phase amp is capped at `number.kotiakku_goe_direct_max_1phase_amp` (default **32 A**, so 32 A × 230 V = 7360 W 1-phase vs 11 A × 230 V × 3 = 7590 W 3-phase). Then `psm=2`, `amp = leftover // (230 × 3)`, `lot` 50. Lowering that cap makes 3-phase better sooner. It does not force 3→1.
@@ -88,7 +88,7 @@ Do **not** copy the whole repo into `custom_components/`. Only the inner `kotiak
 
 - MQTT in Home Assistant can **publish** to `go-eCharger/<serial>/<key>/set`. This integration depends on the MQTT integration.
 - Chargers: MQTT writes allowed (`mcr=false`), load balancing on (`loe=true`), group total 50 A, charger max 32 A. Set a unique leftover priority on the HA device (`number.kotiakku_goe_direct_priority_<serial>`). App `lop` still applies to the 50 A group.
-- Sensors you will pick already exist: Nordpool (with `raw_today` / `raw_tomorrow`), go-e Controller Car-power 5-min mean, Kotiakku SoC / solar / house, charger entities. Optional: solar today (full-day kWh) and tomorrow kWh.
+- Sensors you will pick already exist: Nordpool (with `raw_today` / `raw_tomorrow`), go-e Controller Car-power, Kotiakku SoC / solar / house, charger entities. Optional: solar today (full-day kWh) and tomorrow kWh.
 - The go-e Controller is read-only. Never publish to `go-eController/…`.
 
 ### A. HACS custom repository (recommended)
@@ -229,7 +229,7 @@ Full-power MQTT on that charger: `fup` false, `psm=2`, `amp=32`, `lot=50`, `frc=
 | `number.kotiakku_goe_direct_low_hold_w` | 1000 W | Leftover below this is the 6 A low hold |
 | `number.kotiakku_goe_direct_settle_s` | 5 s | Legacy Gridle settle knob (unused for MQTT) |
 | MQTT apply | 2 s | Wait after the first intended write. Later events join that window. Flush uses the held leftover setpoint for surplus `amp` and sends only if live go-e state needs it |
-| Leftover amp cadence | 5 min | While surplus is on, hold/stop and leftover `amp` move when solar or Controller reports, and not again for 5 min. House and SoC ticks do not resample. A report inside the 5 min is dropped. The 15 min interval republishes the hold; it does not resample. Live leftover stays on `sensor.kotiakku_goe_direct_available_surplus` |
+| Leftover amp cadence | 5 min | While surplus is on, hold/stop and leftover `amp` move when Kotiakku SoC, solar, or house reports, and not again for 5 min. Controller and charger `nrg` do not resample. A Kotiakku report inside the 5 min is dropped. The 15 min interval republishes the hold; it does not resample. Live leftover stays on `sensor.kotiakku_goe_direct_available_surplus` |
 | Offer wait | 15 s | After leftover MQTT, wait this long before `frc=1` on anyone **and** before steal / a further car. Over-draw is allowed. High stays on; unused leftover still goes to the next |
 | `number.kotiakku_goe_direct_hold_minutes` | 15 min | Hold duration (leftover, SoC, second-car leftover gone, or 1↔3 `psm`) |
 | `number.kotiakku_goe_direct_voltage_v` / `kotiakku_goe_direct_min_a` / `kotiakku_goe_direct_max_a` | 230 / 6 / 32 | Budget math |
