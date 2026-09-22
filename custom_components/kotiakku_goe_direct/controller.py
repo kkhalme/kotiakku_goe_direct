@@ -1687,10 +1687,10 @@ class KotiakkuGoeDirectController:
         live_w = leftover_for_surplus(raw_w, *keep_powers)
         # No session yet, or the 6 A hold just expired: decide from live
         # leftover. While surplus is on, amp and start-hold-stop stay on
-        # the last Kotiakku SoC/solar/house sample. Controller and nrg
-        # update much faster and must not bounce 30 A ↔ 6 A. A Kotiakku
-        # report inside the cadence is dropped so a later fast tick
-        # cannot consume it.
+        # the last Kotiakku SoC/solar/house sample and move on the next
+        # one, including out of the 6 A floor. Controller and nrg update
+        # much faster and must not bounce 30 A ↔ 6 A. The sample arm is
+        # consumed here so a later fast tick cannot reuse it.
         prev_ts = self._surplus_setpoint_ts
         armed = self._surplus_sample
         held_w, held_ts = surplus_held_w(

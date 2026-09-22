@@ -241,38 +241,27 @@ def main():
 
     def test_surplus_held_w_kotiakku_cadence():
         hold = surplus.surplus_held_w
-        assert_eq(surplus.SURPLUS_SETPOINT_S, 300, "leftover amp follows 5 min Kotiakku cadence")
         first = hold(6900, None, None, 0)
         assert_eq(first, (6900, 0.0), "first sample is live leftover")
         assert_eq(
             hold(0, 6900, 0, 10),
             (6900, 0.0),
-            "house tick 10 s later does not retune leftover amp",
-        )
-        assert_eq(
-            hold(0, 6900, 0, 299, allow_sample=True),
-            (6900, 0.0),
-            "1 s under cadence still holds even with a Kotiakku sample",
+            "Controller tick 10 s later does not retune leftover amp",
         )
         assert_eq(
             hold(0, 6900, 0, 300),
             (6900, 0.0),
-            "cadence elapsed still holds without a Kotiakku sample",
+            "time passing does not resample without a Kotiakku report",
         )
         assert_eq(
-            hold(5000, 6900, 0, 300, allow_sample=True),
-            (5000, 300.0),
-            "Kotiakku sample after 5 min takes live leftover",
+            hold(7000, 300, 0, 10, allow_sample=True),
+            (7000, 10.0),
+            "Kotiakku solar report takes live leftover immediately",
         )
         assert_eq(
             hold(0, 6900, 0, 10, refresh=True),
             (0, 10.0),
             "session start / 6 A hold expiry takes live leftover",
-        )
-        assert_eq(
-            hold(1234, 6900, 0, 10, cadence_s=0),
-            (1234, 10.0),
-            "cadence 0 is always live",
         )
         collapsed = surplus.surplus_decision(True, 0, 96, window_ok=True)
         assert_true(collapsed["use_floor_budget"], "live 0 W would bounce to 6 A")
@@ -287,6 +276,22 @@ def main():
             0, MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P
         )
         assert_eq(floor_amp, 6, "live 0 W would publish the 6 A floor")
+        solar_step = hold(7000, 300, 0, 10, allow_sample=True)
+        assert_eq(solar_step, (7000, 10.0), "8 kW solar step is the new leftover hold")
+        left_floor = surplus.surplus_decision(
+            True, solar_step[0], 96, window_ok=True, hold_active=True, hold_exit_w=2000
+        )
+        assert_true(
+            left_floor["write_on"] and not left_floor["use_floor_budget"],
+            "7 kW Kotiakku sample leaves the 6 A floor",
+        )
+        raised = surplus.budget(solar_step[0], MIN_A, MAX_A, GROUP_LOT, VOLTS, MAX_1P)
+        assert_eq(raised, (50, 1, 30), "7 kW publishes 30 A, not the 6 A floor")
+        assert_eq(
+            hold(0, solar_step[0], solar_step[1], 20),
+            (7000, 10.0),
+            "Controller tick after the solar sample does not pull amp back to 6 A",
+        )
         sawtooth = [0, 2300, 6900, 1380, 7360, 0]
         w, ts = 6900, 0.0
         for i, live in enumerate(sawtooth, start=1):
@@ -312,12 +317,12 @@ def main():
             "fast Controller must not resample leftover amp",
         )
         assert_true(not samples(house), "no Kotiakku ids does not sample house")
-        early = hold(0, 6900, 0, 30, allow_sample=True)
-        assert_eq(early, (6900, 0.0), "Kotiakku report inside 5 min does not move amp")
+        taken = hold(7000, 6900, 0, 30, allow_sample=True)
+        assert_eq(taken, (7000, 30.0), "Kotiakku report moves amp without waiting 5 min")
         assert_eq(
-            hold(0, early[0], early[1], 300),
-            (6900, 0.0),
-            "that early report must not arm a later Controller tick",
+            hold(0, taken[0], taken[1], 40),
+            (7000, 30.0),
+            "that report does not stay armed for a later Controller tick",
         )
 
     def test_decision_start_hold_stop_and_hysteresis():
