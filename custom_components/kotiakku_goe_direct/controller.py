@@ -101,6 +101,7 @@ from .planner import (
     MQTT_APPLY_S,
     epoch_seen_step,
     past_day_kwh,
+    price_cache_view,
     price_epoch_day,
     remember_price_day,
     charger_full_power as policy_full_power,
@@ -653,6 +654,21 @@ class KotiakkuGoeDirectController:
         source = self.hass.states.get(price_entity) if price_entity else None
         attrs = None if source is None else dict(source.attributes)
         return planner_tomorrow_prices_ok(self.clock, attrs)
+
+    def price_cache(self):
+        """Stored spot-price days and epoch first-seen times, shaped for a sensor."""
+        return price_cache_view(
+            self.clock, self._price_days, self._epoch_seen, self.clock.now()
+        )
+
+    @property
+    def price_unit(self):
+        """Unit of the picked price sensor (for example EUR/kWh), or None."""
+        price_entity = self.price_entity_id()
+        source = self.hass.states.get(price_entity) if price_entity else None
+        if source is None or source.attributes is None:
+            return None
+        return source.attributes.get("unit_of_measurement")
 
     @property
     def enough_solar(self):

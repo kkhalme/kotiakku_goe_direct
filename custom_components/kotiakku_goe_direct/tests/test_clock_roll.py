@@ -985,6 +985,34 @@ def main():
         )
         assert_eq(len(seen5), 1, "old epochs pruned when a new one is recorded")
 
+    def test_price_cache_view():
+        ymd = (2026, 3, 15)
+        d1, day_d, day_d1 = midnight_days(ymd)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *ymd, 21), tz=HELSINKI)
+        evening = {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}
+        state.plan(clock, evening, today_kwh=12.5, tomorrow_kwh=8.0, **fixed_2h)
+        clock.set(at_local(HELSINKI, *d1, 0, 30))
+        rolled = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        state.plan(clock, rolled, today_kwh=8.0, **fixed_2h)
+        view = planner.price_cache_view(clock, state.days, state.seen, clock.now())
+        assert_eq(len(view["raw_yesterday"]), 96, "yesterday's slots")
+        assert_eq(view["raw_yesterday"][0], day_d[0], "Nordpool slot shape and values")
+        assert_eq(len(view["raw_today"]), 96, "today's cached slots")
+        assert_eq(view["raw_day_before_yesterday"], [], "day before not cached")
+        assert_eq(round(view["yesterday_avg"], 6), round((0.02 * 4 + 0.10 * 92) / 96, 6), "weighted avg")
+        assert_eq([d["date"] for d in view["days"]], ["2026-03-15", "2026-03-16"], "days by date")
+        assert_eq([d["kwh"] for d in view["days"]], [12.5, 8.0], "cached kWh")
+        assert_eq((view["days"][0]["min"], view["days"][0]["max"]), (0.02, 0.10), "min / max")
+        assert_eq(
+            view["epoch_seen"],
+            {iso(at_local(HELSINKI, *d1, 0).timestamp()): iso(at_local(HELSINKI, *ymd, 21).timestamp())},
+            "epoch first-seen as ISO",
+        )
+        empty = planner.price_cache_view(clock, {}, {}, clock.now())
+        assert_eq(empty["yesterday_avg"], None, "no cache: no state")
+        assert_eq(empty["raw_yesterday"], [], "no cache: empty slots")
+
     case("roll_uniform_plan_and_active", test_roll_uniform_plan_and_active)
     case("window_does_not_slide_on_falling_prices", test_window_does_not_slide_on_falling_prices)
     case("tomorrow_switch_then_holds", test_tomorrow_switch_then_holds)
@@ -1012,6 +1040,7 @@ def main():
     case("started_window_carried_on_arrival", test_started_window_carried_on_arrival)
     case("tomorrow_switch_keeps_running_plateau", test_tomorrow_switch_keeps_running_plateau)
     case("price_cache_and_epoch_seen", test_price_cache_and_epoch_seen)
+    case("price_cache_view", test_price_cache_view)
 
     run()
 

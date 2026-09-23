@@ -466,6 +466,64 @@ def remember_price_day(clock, days, attrs, now_dt, today_kwh):
     return out
 
 
+_CACHE_DAY_NAMES = {0: "today", -1: "yesterday", -2: "day_before_yesterday"}
+
+
+def price_cache_view(clock, days, seen, now_dt):
+    """The price-day cache and epoch first-seen map, shaped for a sensor.
+
+    ``raw_<day>`` use the Nordpool ``raw_today`` slot shape
+    (``{"start", "end", "value"}`` ISO) so a chart can concatenate
+    ``raw_day_before_yesterday``, ``raw_yesterday``, and the live curve.
+    ``yesterday_avg`` is the duration-weighted average of yesterday's
+    cached slots, or ``None`` when yesterday is not cached.
+    """
+    view = {"yesterday_avg": None, "days": [], "epoch_seen": {}}
+    for name in _CACHE_DAY_NAMES.values():
+        view["raw_%s" % name] = []
+    try:
+        starts = {
+            k: float(clock.as_timestamp(local_day_start(clock, now_dt, k)))
+            for k in _CACHE_DAY_NAMES
+        }
+    except Exception:
+        starts = {}
+    entries = []
+    for key, entry in (days or {}).items():
+        parsed = history_days({"days": {key: entry}})
+        if parsed:
+            entries.append((str(key), parsed[0]))
+    entries.sort(key=lambda item: item[1][0])
+    for key, (start, slots, kwh) in entries:
+        avg = _avg_span(slots, slots[0][0], slots[-1][1]) if slots else None
+        view["days"].append(
+            {
+                "date": key,
+                "start": _iso(clock, start),
+                "kwh": kwh,
+                "slot_count": len(slots),
+                "avg": avg,
+                "min": min(slot[2] for slot in slots) if slots else None,
+                "max": max(slot[2] for slot in slots) if slots else None,
+            }
+        )
+        for offset, day_ts in starts.items():
+            if abs(start - day_ts) > 1:
+                continue
+            view["raw_%s" % _CACHE_DAY_NAMES[offset]] = [
+                {"start": _iso(clock, s), "end": _iso(clock, e), "value": p}
+                for s, e, p in slots
+            ]
+            if offset == -1:
+                view["yesterday_avg"] = avg
+    for key, value in sorted((seen or {}).items(), key=lambda item: str(item[0])):
+        day_ts = _to_price(key)
+        seen_ts = _to_price(value)
+        if day_ts is not None and seen_ts is not None:
+            view["epoch_seen"][_iso(clock, day_ts)] = _iso(clock, seen_ts)
+    return view
+
+
 def epoch_seen_step(clock, seen, epoch_day, now_dt):
     """Record when the epoch named by ``epoch_day`` was first seen.
 

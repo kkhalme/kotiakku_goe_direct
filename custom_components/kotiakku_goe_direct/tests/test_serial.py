@@ -623,6 +623,16 @@ def main():
             "available surplus unique id",
         )
         assert_eq(
+            const.EID_SPOT_PRICE_HISTORY,
+            "sensor.kotiakku_goe_direct_spot_price_history",
+            "spot price history",
+        )
+        assert_eq(
+            const.SPOT_PRICE_HISTORY_UNIQUE_ID,
+            "kotiakku_goe_direct_spot_price_history",
+            "spot price history unique id",
+        )
+        assert_eq(
             const.EID_WINDOW_ACTIVE,
             "binary_sensor.kotiakku_goe_direct_window_active",
             "window active",
