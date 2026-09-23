@@ -546,12 +546,15 @@ def surplus_hour_ranges(
     hour_kwh,
     lat=DEFAULT_LAT,
     lon=DEFAULT_LON,
+    past_kwh=None,
 ):
     """Hours whose expected forecast energy is at least ``hour_kwh``.
 
     Today's full-day kWh is spread over the local day (midnight–midnight);
-    tomorrow kWh over the next local day. Spot windows stay independent of
-    Kotiakku leftover. Unknown energy or a non-positive hour threshold
+    tomorrow kWh over the next local day. ``past_kwh`` is ``{offset: kwh}``
+    for cached earlier days (-1 is yesterday), so a plan still searching
+    yesterday keeps yesterday's off-sun hours. Spot windows stay independent
+    of Kotiakku leftover. Unknown energy or a non-positive hour threshold
     excludes nothing (SolarPriority then searches every price slot).
     """
     try:
@@ -568,6 +571,16 @@ def surplus_hour_ranges(
     except Exception:
         return []
     hours = []
+    for offset, kwh in sorted((past_kwh or {}).items()):
+        try:
+            noon = today_start.replace(hour=12) + datetime.timedelta(days=int(offset))
+            day_start = clock.start_of_local_day(noon)
+            day_end = clock.start_of_local_day(noon + datetime.timedelta(days=1))
+        except Exception:
+            continue
+        if day_start >= today_start:
+            continue
+        hours.extend(expected_hour_kwh(clock, day_start, day_end, kwh, lat, lon))
     hours.extend(
         expected_hour_kwh(clock, today_start, today_end, today_kwh, lat, lon)
     )

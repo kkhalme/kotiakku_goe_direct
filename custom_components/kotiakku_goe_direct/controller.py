@@ -99,6 +99,11 @@ from .const import (
 from .hass_hints import collect_serial_hints, device_entities
 from .planner import (
     MQTT_APPLY_S,
+    epoch_seen_step,
+    past_day_kwh,
+    price_cache_view,
+    price_epoch_day,
+    remember_price_day,
     charger_full_power as policy_full_power,
     charger_mqtt_command,
     charger_mqtt_publish_action,
@@ -246,6 +251,8 @@ class KotiakkuGoeDirectController:
         self._config_price = data.get(CONF_PRICE_ENTITY, "") or ""
         self.clock = HassClock()
         self.window_result = None
+        self._price_days = {}
+        self._epoch_seen = {}
         self.session = False
         self.split_session = False
         self.restore = {s: POLICY_FORCE_OFF for s in self.chargers}
@@ -648,6 +655,21 @@ class KotiakkuGoeDirectController:
         attrs = None if source is None else dict(source.attributes)
         return planner_tomorrow_prices_ok(self.clock, attrs)
 
+    def price_cache(self):
+        """Stored spot-price days and epoch first-seen times, shaped for a sensor."""
+        return price_cache_view(
+            self.clock, self._price_days, self._epoch_seen, self.clock.now()
+        )
+
+    @property
+    def price_unit(self):
+        """Unit of the picked price sensor (for example EUR/kWh), or None."""
+        price_entity = self.price_entity_id()
+        source = self.hass.states.get(price_entity) if price_entity else None
+        if source is None or source.attributes is None:
+            return None
+        return source.attributes.get("unit_of_measurement")
+
     @property
     def enough_solar(self):
         lat, lon = self._site_lat_lon()
@@ -828,6 +850,17 @@ class KotiakkuGoeDirectController:
                     self._keep_probe_since[serial] = float(raw)
                 except (TypeError, ValueError):
                     self._keep_probe_since[serial] = None
+            price_days = stored.get("price_days")
+            if isinstance(price_days, dict):
+                self._price_days = dict(price_days)
+            epoch_seen = stored.get("epoch_seen")
+            if isinstance(epoch_seen, dict):
+                self._epoch_seen = {}
+                for key, raw in epoch_seen.items():
+                    try:
+                        self._epoch_seen[str(key)] = float(raw)
+                    except (TypeError, ValueError):
+                        continue
         await self._refresh_source_entities()
         track = [
             self.soc_entity,
@@ -926,6 +959,8 @@ class KotiakkuGoeDirectController:
                 "keep_min_seen": self._keep_min_seen,
                 "keep_min_phase": self._keep_min_phase,
                 "keep_probe_since": self._keep_probe_since,
+                "price_days": self._price_days,
+                "epoch_seen": self._epoch_seen,
             }
         )
 
@@ -1213,6 +1248,27 @@ class KotiakkuGoeDirectController:
         self._schedule_apply()
         self._schedule_boundaries()
 
+    def _remember_price_day(self, attrs, now_dt, today_kwh):
+        """Cache today's spot slots and kWh. True when the cache changed."""
+        days = remember_price_day(self.clock, self._price_days, attrs, now_dt, today_kwh)
+        if days == self._price_days:
+            return False
+        self._price_days = days
+        return True
+
+    def _epoch_seen_ts(self, epoch_day, now_dt):
+        """``(epoch_seen_ts, changed)`` for the epoch named by ``epoch_day``."""
+        seen_map, seen_ts = epoch_seen_step(self.clock, self._epoch_seen, epoch_day, now_dt)
+        if epoch_day is None or seen_map == self._epoch_seen:
+            return seen_ts, False
+        self._epoch_seen = seen_map
+        _LOGGER.info(
+            "kotiakku_goe_direct: price epoch through %s first seen at %s",
+            self.clock.utc_from_timestamp(epoch_day).isoformat(),
+            self.clock.now().isoformat(),
+        )
+        return seen_ts, True
+
     async def async_plan(self):
         price_entity = self.price_entity_id()
         source = self.hass.states.get(price_entity) if price_entity else None
@@ -1223,14 +1279,30 @@ class KotiakkuGoeDirectController:
         flex_pct = self._float_entity(EID_FLEX_PCT, DEFAULT_FLEX_PCT)
         flex_euro = self._float_entity(EID_FLEX_EUR, DEFAULT_FLEX_EUR)
         lat, lon = self._site_lat_lon()
+        now_dt = self.clock.now()
+        today_kwh = self.today_kwh
+        tomorrow_kwh = self.tomorrow_kwh
+        changed = self._remember_price_day(attrs, now_dt, today_kwh)
+        history = {"days": self._price_days}
         blocked = surplus_hour_ranges(
             self.clock,
-            self.today_kwh,
-            self.tomorrow_kwh,
+            today_kwh,
+            tomorrow_kwh,
             self.offsun_hour_kwh,
             lat,
             lon,
+            past_kwh=past_day_kwh(self.clock, history, now_dt),
         )
+        epoch_day = None
+        if attrs is not None:
+            epoch_day = price_epoch_day(
+                self.clock,
+                attrs,
+                history=history,
+                today_kwh=today_kwh,
+                tomorrow_kwh=tomorrow_kwh,
+            )
+        epoch_seen_ts, seen_changed = self._epoch_seen_ts(epoch_day, now_dt)
         self.window_result = plan(
             self.clock,
             attrs,
@@ -1241,9 +1313,13 @@ class KotiakkuGoeDirectController:
             flex_euro=flex_euro,
             source_entity=price_entity,
             blocked=blocked,
-            today_kwh=self.today_kwh,
-            tomorrow_kwh=self.tomorrow_kwh,
+            today_kwh=today_kwh,
+            tomorrow_kwh=tomorrow_kwh,
+            history=history,
+            epoch_seen_ts=epoch_seen_ts,
         )
+        if changed or seen_changed:
+            await self._save()
         windows = self.window_result.get("windows") or []
         spans = ",".join(
             "%s→%s" % (w.get("start"), w.get("end")) for w in windows

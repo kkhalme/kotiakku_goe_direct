@@ -5,20 +5,32 @@ Find the cheapest contiguous windowMinHours seed on the
 at a time toward the cheaper neighbor while the duration-weighted average
 stays under flex headroom and at most windowMaxHours. That is window 1.
 
-When tomorrow's prices are in the search set and that first window does
-not overlap local today 22:00 through the end of tomorrow, a second
-window is planned: its seed lies entirely in tomorrow's hours, then the
-same grow may walk into today (typically the evening). Overlapping or
+When the epoch's second day has prices in the search set and that first
+window does not overlap the first day's 22:00 through the end of the
+second day, a second window is planned: its seed lies entirely in the
+second day, then the same grow may walk into the first day (typically
+the evening). Overlapping or
 abutting windows are a union for 22 kW; chargers do not stop on a
 shared boundary.
 
 The price ceiling is a safety abort on the seed average and a hard-no
 on grow neighbors; it does not score the seed.
 
+The search set is a two-day price epoch anchored on the newest price
+day: today plus tomorrow once tomorrow's (forecast-clipped) prices are
+in, otherwise yesterday plus today from the controller's cached
+yesterday prices and kWh. Midnight alone brings no new prices, so the
+plan the evening chose (including a window across midnight) is the plan
+until tomorrow's curve arrives.
+
+When the epoch moves, previous-epoch windows that were running at the
+moment the new epoch was first seen are kept until they end. That
+first-seen time is an input like the prices; no window is stored.
+
 The chosen windows are a function of prices, solar clip, the off-sun
-mask, and knobs. Clock time does not move them: a cheapest window that
-has already ended stays the plan (visible in the past) and is not used
-for 22 kW.
+mask, knobs, and when the epoch was first seen. Clock time does not move
+them: a cheapest window that has already ended stays the plan (visible
+in the past) and is not used for 22 kW.
 """
 
 from __future__ import annotations
@@ -31,6 +43,7 @@ TARGET_EPS_S = 30
 HOUR_EPS = 0.001
 PRICE_EPS = 0.0000001
 MAX_WINDOWS = 16
+PAST_DAYS = 2
 MQTT_APPLY_S = 2
 DEFAULT_MIN_HOURS = 2.0
 DEFAULT_MAX_HOURS = 5.0
@@ -253,12 +266,13 @@ def drop_blocked(slots, blocked):
     ]
 
 
-def clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt):
+def clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt, past_kwh=None):
     """Keep price slots on days that have solar kWh.
 
     ``today_kwh`` is today's full-day production estimate. If both forecast
     values are missing, return all price slots (prices-only fallback). A day
-    stays only when that day's kWh is present.
+    stays only when that day's kWh is present. ``past_kwh`` is
+    ``[(day_start_ts, day_end_ts, kwh)]`` for cached earlier days.
     """
     if today_kwh is None and tomorrow_kwh is None:
         return slots
@@ -272,15 +286,278 @@ def clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt):
     except Exception:
         return slots
     day_after = tomorrow_start + 86400.0
+    past = [
+        (float(lo), float(hi))
+        for lo, hi, kwh in (past_kwh or ())
+        if kwh is not None
+    ]
     out = []
     for slot in slots:
         start = slot[0]
-        if today_kwh is not None and start < tomorrow_start - 1:
-            if start >= today_start - 1:
+        if start < today_start - 1:
+            if any(lo - 1 <= start < hi - 1 for lo, hi in past):
                 out.append(slot)
-        elif tomorrow_kwh is not None and tomorrow_start - 1 <= start < day_after:
+        elif start < tomorrow_start - 1:
+            if today_kwh is not None:
+                out.append(slot)
+        elif tomorrow_kwh is not None and start < day_after:
             out.append(slot)
     return out
+
+
+def local_day_start(clock, now_dt, offset=0):
+    """Local midnight ``offset`` days from ``now_dt``'s local day.
+
+    Steps from local noon so a 23 h or 25 h DST day cannot skip or repeat
+    a date.
+    """
+    today = clock.start_of_local_day(now_dt)
+    noon = today.replace(hour=12, minute=0, second=0, microsecond=0)
+    return clock.start_of_local_day(noon + datetime.timedelta(days=offset))
+
+
+def history_days(history):
+    """Cached local days ``[(day_start_ts, slots, kwh)]`` from the controller store."""
+    days = _dict_get(history, "days") if history else None
+    if not days:
+        return []
+    items = list(days.values()) if isinstance(days, dict) else list(days)
+    out = []
+    for item in items:
+        start = _to_price(_dict_get(item, "start"))
+        if start is None:
+            continue
+        slots = []
+        for raw in _dict_get(item, "slots") or []:
+            try:
+                slot = [float(raw[0]), float(raw[1]), float(raw[2])]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if slot[1] > slot[0]:
+                slots.append(slot)
+        out.append((start, slots, _to_price(_dict_get(item, "kwh"))))
+    out.sort(key=lambda day: day[0])
+    return out
+
+
+def past_day_kwh(clock, history, now_dt):
+    """``{offset: kwh}`` for cached days before today (offset -1 is yesterday)."""
+    out = {}
+    try:
+        starts = {
+            k: float(clock.as_timestamp(local_day_start(clock, now_dt, k)))
+            for k in range(-PAST_DAYS, 0)
+        }
+    except Exception:
+        return out
+    for start, _slots, kwh in history_days(history):
+        for k, day_ts in starts.items():
+            if abs(start - day_ts) <= 1:
+                out[k] = kwh
+    return out
+
+
+def price_epoch(clock, attrs, *, history=None, today_kwh=None, tomorrow_kwh=None, now_dt=None):
+    """Price slots and the two-day epoch the plan searches.
+
+    Returns ``{"offset", "starts", "slots"}``. ``starts`` maps a day offset
+    from today (-2 … 2) to its local midnight. ``slots`` are live prices plus
+    cached earlier days (live wins on overlap), forecast-clipped. The anchor
+    ``offset`` is 0 (today + tomorrow) once tomorrow has a searchable slot,
+    else -1 (yesterday + today) when yesterday has one, else 0. ``starts``
+    is ``None`` if the clock cannot produce local midnights.
+    """
+    if now_dt is None:
+        now_dt = clock.now()
+    live = collect_slots(clock, attrs, now_dt) if attrs is not None else []
+    try:
+        starts = {
+            k: float(clock.as_timestamp(local_day_start(clock, now_dt, k)))
+            for k in range(-PAST_DAYS, 3)
+        }
+    except Exception:
+        return {
+            "offset": 0,
+            "starts": None,
+            "slots": clip_slots_to_forecast(clock, live, today_kwh, tomorrow_kwh, now_dt),
+        }
+    merged = list(live)
+    past_kwh = []
+    for start, slots, kwh in history_days(history):
+        for k in range(-PAST_DAYS, 0):
+            if abs(start - starts[k]) > 1:
+                continue
+            lo, hi = starts[k], starts[k + 1]
+            past_kwh.append((lo, hi, kwh))
+            for slot in slots:
+                if not lo - 1 <= slot[0] < hi - 1:
+                    continue
+                if any(_overlaps(slot, other[0], other[1]) for other in live):
+                    continue
+                merged.append(slot)
+    merged.sort()
+    slots = clip_slots_to_forecast(
+        clock, merged, today_kwh, tomorrow_kwh, now_dt, past_kwh=past_kwh
+    )
+    if any(slot[0] >= starts[1] - 1 for slot in slots):
+        offset = 0
+    elif any(starts[-1] - 1 <= slot[0] < starts[0] - 1 for slot in slots):
+        offset = -1
+    else:
+        offset = 0
+    return {"offset": offset, "starts": starts, "slots": slots}
+
+
+def price_epoch_day(clock, attrs, *, history=None, today_kwh=None, tomorrow_kwh=None):
+    """Local midnight (timestamp) of the epoch's newest searchable price day.
+
+    This names the epoch: it moves when a new day's prices become
+    searchable (typically ~14:00), not at midnight. ``None`` if the clock
+    cannot produce local midnights.
+    """
+    epoch = price_epoch(
+        clock,
+        attrs,
+        history=history,
+        today_kwh=today_kwh,
+        tomorrow_kwh=tomorrow_kwh,
+    )
+    starts = epoch["starts"]
+    if starts is None:
+        return None
+    offset = epoch["offset"]
+    lo, hi = starts[offset + 1], starts[offset + 2]
+    if any(lo - 1 <= slot[0] < hi - 1 for slot in epoch["slots"]):
+        return lo
+    return starts[offset]
+
+
+def remember_price_day(clock, days, attrs, now_dt, today_kwh):
+    """Return the price-day cache with today's spot slots and kWh.
+
+    ``days`` is ``{local date: {"start", "slots", "kwh"}}``. Days older than
+    ``PAST_DAYS`` before today are dropped. An empty curve never replaces a
+    cached day, and a briefly unknown forecast keeps the last known kWh.
+    """
+    try:
+        day = local_day_start(clock, now_dt, 0)
+        start = float(clock.as_timestamp(day))
+        end = float(clock.as_timestamp(local_day_start(clock, now_dt, 1)))
+        oldest = float(clock.as_timestamp(local_day_start(clock, now_dt, -PAST_DAYS)))
+    except Exception:
+        return dict(days or {})
+    out = {}
+    for key, entry in (days or {}).items():
+        entry_start = _to_price(_dict_get(entry, "start"))
+        if entry_start is not None and entry_start >= oldest - 1:
+            out[key] = entry
+    slots = []
+    if attrs is not None:
+        slots = [
+            [slot[0], slot[1], slot[2]]
+            for slot in collect_slots(clock, attrs, now_dt)
+            if start - 1 <= slot[0] < end - 1
+        ]
+    if slots:
+        key = day.date().isoformat()
+        previous = out.get(key) or {}
+        kwh = today_kwh if today_kwh is not None else _dict_get(previous, "kwh")
+        out[key] = {"start": start, "slots": slots, "kwh": kwh}
+    return out
+
+
+_CACHE_DAY_NAMES = {0: "today", -1: "yesterday", -2: "day_before_yesterday"}
+
+
+def price_cache_view(clock, days, seen, now_dt):
+    """The price-day cache and epoch first-seen map, shaped for a sensor.
+
+    ``raw_<day>`` use the Nordpool ``raw_today`` slot shape
+    (``{"start", "end", "value"}`` ISO) so a chart can concatenate
+    ``raw_day_before_yesterday``, ``raw_yesterday``, and the live curve.
+    ``yesterday_avg`` is the duration-weighted average of yesterday's
+    cached slots, or ``None`` when yesterday is not cached.
+    """
+    view = {"yesterday_avg": None, "days": [], "epoch_seen": {}}
+    for name in _CACHE_DAY_NAMES.values():
+        view["raw_%s" % name] = []
+    try:
+        starts = {
+            k: float(clock.as_timestamp(local_day_start(clock, now_dt, k)))
+            for k in _CACHE_DAY_NAMES
+        }
+    except Exception:
+        starts = {}
+    entries = []
+    for key, entry in (days or {}).items():
+        parsed = history_days({"days": {key: entry}})
+        if parsed:
+            entries.append((str(key), parsed[0]))
+    entries.sort(key=lambda item: item[1][0])
+    for key, (start, slots, kwh) in entries:
+        avg = _avg_span(slots, slots[0][0], slots[-1][1]) if slots else None
+        view["days"].append(
+            {
+                "date": key,
+                "start": _iso(clock, start),
+                "kwh": kwh,
+                "slot_count": len(slots),
+                "avg": avg,
+                "min": min(slot[2] for slot in slots) if slots else None,
+                "max": max(slot[2] for slot in slots) if slots else None,
+            }
+        )
+        for offset, day_ts in starts.items():
+            if abs(start - day_ts) > 1:
+                continue
+            view["raw_%s" % _CACHE_DAY_NAMES[offset]] = [
+                {"start": _iso(clock, s), "end": _iso(clock, e), "value": p}
+                for s, e, p in slots
+            ]
+            if offset == -1:
+                view["yesterday_avg"] = avg
+    for key, value in sorted((seen or {}).items(), key=lambda item: str(item[0])):
+        day_ts = _to_price(key)
+        seen_ts = _to_price(value)
+        if day_ts is not None and seen_ts is not None:
+            view["epoch_seen"][_iso(clock, day_ts)] = _iso(clock, seen_ts)
+    return view
+
+
+def epoch_seen_step(clock, seen, epoch_day, now_dt):
+    """Record when the epoch named by ``epoch_day`` was first seen.
+
+    Returns ``(seen_map, epoch_seen_ts)``. ``seen_map`` is
+    ``{str(int(epoch_day)): first_seen_ts}``, pruned to recent days when a
+    new epoch is recorded. ``epoch_seen_ts`` is ``None`` for the first epoch
+    ever on record, so an upgrade or first install does not carry a window
+    it never planned.
+    """
+    seen = dict(seen or {})
+    if epoch_day is None:
+        return seen, None
+    key = str(int(round(float(epoch_day))))
+    first = _to_price(seen.get(key))
+    if first is None:
+        first = float(clock.as_timestamp(now_dt))
+        try:
+            oldest = float(
+                clock.as_timestamp(local_day_start(clock, now_dt, -PAST_DAYS - 1))
+            )
+        except Exception:
+            oldest = None
+        kept = {}
+        for k, v in seen.items():
+            day_ts = _to_price(k)
+            if day_ts is not None and (oldest is None or day_ts >= oldest - 1):
+                kept[k] = v
+        kept[key] = first
+        seen = kept
+    earlier = any(
+        day_ts is not None and day_ts < float(epoch_day) - 1
+        for day_ts in (_to_price(k) for k in seen)
+    )
+    return seen, (first if earlier else None)
 
 
 def _avg_span(slots, start, end):
@@ -551,6 +828,80 @@ def choose(
             if follow is not None:
                 new_windows.append(follow)
     return _choice(new_windows, horizon, "planned")
+
+
+def choose_epoch(
+    clock,
+    epoch,
+    offset,
+    now_dt,
+    min_hours,
+    max_hours,
+    ceiling,
+    blocked=None,
+    flex_pct=DEFAULT_FLEX_PCT,
+    flex_euro=DEFAULT_FLEX_EUR,
+):
+    """``choose`` on the two local days starting ``offset`` days from today.
+
+    Returns ``(search_slots, choice)``. Overnight span and follow-up are
+    anchored on the epoch's first day, not on the clock's today.
+    """
+    starts = epoch["starts"]
+    if starts is None:
+        search = list(epoch["slots"])
+        bounds = local_overnight_bounds(clock, now_dt)
+    else:
+        lo = starts[offset]
+        hi = starts[offset + 2]
+        search = [slot for slot in epoch["slots"] if lo - 1 <= slot[0] < hi - 1]
+        try:
+            anchor = local_day_start(clock, now_dt, offset)
+            noon = anchor.replace(hour=12, minute=0, second=0, microsecond=0)
+        except Exception:
+            noon = None
+        bounds = None if noon is None else local_overnight_bounds(clock, noon)
+    overnight = None
+    tomorrow_start = None
+    day_after = None
+    if bounds is not None:
+        evening_22, tomorrow_start, day_after = bounds
+        overnight = (evening_22, day_after)
+    chosen = choose(
+        search,
+        min_hours,
+        max_hours,
+        ceiling,
+        blocked=blocked,
+        flex_pct=flex_pct,
+        flex_euro=flex_euro,
+        overnight=overnight,
+        tomorrow_start=tomorrow_start,
+        day_after=day_after,
+    )
+    return search, chosen
+
+
+def carry_windows(windows, previous, seen_ts):
+    """Previous-epoch windows that were running when this epoch was first seen.
+
+    A window already inside one of ``windows`` is not repeated. Windows that
+    had not started by ``seen_ts`` are never carried, so a dropped later
+    window does not come back when its start time arrives.
+    """
+    if seen_ts is None:
+        return []
+    out = []
+    for w in previous:
+        if not w["start"] <= seen_ts < w["end"]:
+            continue
+        if any(
+            c["start"] <= w["start"] + 1 and c["end"] >= w["end"] - 1
+            for c in list(windows) + out
+        ):
+            continue
+        out.append(w)
+    return out
 
 
 def clamp_hours(min_hours, max_hours):
@@ -1043,6 +1394,9 @@ def _empty_result(
         "blocked": [],
         "raw_windows": [],
         "horizon_ts": None,
+        "epoch_start": None,
+        "epoch_seen": None,
+        "carried": 0,
     }
 
 
@@ -1059,7 +1413,16 @@ def plan(
     blocked=None,
     today_kwh=None,
     tomorrow_kwh=None,
+    history=None,
+    epoch_seen_ts=None,
 ):
+    """Plan the epoch's windows.
+
+    ``history`` is the controller's cache of earlier local days
+    (``{"days": {date: {"start", "slots", "kwh"}}}``). ``epoch_seen_ts`` is
+    when this epoch (named by ``price_epoch_day``) was first seen; without
+    it nothing is carried from the previous epoch.
+    """
     min_hours, max_hours = clamp_hours(min_hours, max_hours)
     flex_pct, flex_euro = clamp_flex(flex_pct, flex_euro)
     ceiling = _to_price(ceiling)
@@ -1071,30 +1434,36 @@ def plan(
     )
     if attrs is None:
         return empty
-    slots = collect_slots(clock, attrs, now_dt)
-    slots = clip_slots_to_forecast(clock, slots, today_kwh, tomorrow_kwh, now_dt)
-    bounds = local_overnight_bounds(clock, now_dt)
-    overnight = None
-    tomorrow_start = None
-    day_after = None
-    if bounds is not None:
-        today_22, tomorrow_start, day_after = bounds
-        overnight = (today_22, day_after)
-    chosen = choose(
-        slots,
-        min_hours,
-        max_hours,
-        ceiling,
-        blocked=blocked,
-        flex_pct=flex_pct,
-        flex_euro=flex_euro,
-        overnight=overnight,
-        tomorrow_start=tomorrow_start,
-        day_after=day_after,
+    epoch = price_epoch(
+        clock,
+        attrs,
+        history=history,
+        today_kwh=today_kwh,
+        tomorrow_kwh=tomorrow_kwh,
+        now_dt=now_dt,
     )
-    iso_ws = iso_windows(clock, chosen["windows"])
-    planned = chosen["windows"][0] if chosen["windows"] else None
+    offset = epoch["offset"]
+    knobs = (min_hours, max_hours, ceiling, blocked, flex_pct, flex_euro)
+    search, chosen = choose_epoch(clock, epoch, offset, now_dt, *knobs)
+    windows = list(chosen["windows"])
+    reason = chosen["reason"]
+    carried = []
+    if epoch["starts"] is not None and epoch_seen_ts is not None:
+        _prev_search, previous = choose_epoch(
+            clock, epoch, offset - 1, now_dt, *knobs
+        )
+        carried = carry_windows(windows, previous["windows"], float(epoch_seen_ts))
+        if carried and not windows:
+            reason = "planned"
+        windows.extend(carried)
+    iso_ws = iso_windows(clock, windows)
+    planned = windows[0] if windows else None
     blocked_ts = _norm_blocked(blocked)
+    if epoch["starts"] is not None:
+        blocked_ts = [
+            (start, end) for start, end in blocked_ts if end > epoch["starts"][0]
+        ]
+    epoch_start = None if epoch["starts"] is None else epoch["starts"][offset]
     result = {
         "windows": iso_ws,
         "count": len(iso_ws),
@@ -1104,20 +1473,23 @@ def plan(
         "flex_pct": flex_pct,
         "flex_euro": flex_euro,
         "horizon": _iso(clock, chosen["horizon"]),
-        "reason": chosen["reason"],
-        "tomorrow_ok": tomorrow_ok(clock, attrs, slots),
+        "reason": reason,
+        "tomorrow_ok": tomorrow_ok(clock, attrs, epoch["slots"]),
         "source_entity": source_entity,
-        "slot_count": len(slots),
+        "slot_count": len(search),
         "start": None,
         "end": None,
         "avg": None,
-        "raw_windows": chosen["windows"],
+        "raw_windows": windows,
         "horizon_ts": chosen["horizon"],
         "blocked_ts": blocked_ts,
         "blocked": [
             {"start": _iso(clock, start), "end": _iso(clock, end)}
             for start, end in blocked_ts
         ],
+        "epoch_start": _iso(clock, epoch_start),
+        "epoch_seen": _iso(clock, epoch_seen_ts),
+        "carried": len(carried),
     }
     if planned is not None:
         result["start"] = _iso(clock, planned["start"])

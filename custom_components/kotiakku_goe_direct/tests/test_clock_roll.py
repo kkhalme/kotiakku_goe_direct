@@ -63,6 +63,69 @@ def plan_once(clock, attrs, result, min_hours=2.0, max_hours=5.0, ceiling=0.2, b
     )
 
 
+class PlanState:
+    """Price-day cache and epoch first-seen map, stepped like ``async_plan``."""
+
+    def __init__(self):
+        self.days = {}
+        self.seen = {}
+
+    def plan(self, clock, attrs, min_hours=2.0, max_hours=5.0, ceiling=0.2, blocked=None, **extra):
+        now_dt = clock.now()
+        today_kwh = extra.get("today_kwh")
+        tomorrow_kwh = extra.get("tomorrow_kwh")
+        self.days = planner.remember_price_day(clock, self.days, attrs, now_dt, today_kwh)
+        history = {"days": self.days}
+        offsun = extra.get("offsun_kwh")
+        if offsun is not None:
+            past = planner.past_day_kwh(clock, history, now_dt)
+            blocked = surplus.surplus_hour_ranges(
+                clock,
+                today_kwh,
+                tomorrow_kwh,
+                offsun,
+                60.17,
+                24.94,
+                past_kwh=past if extra.get("past_mask", True) else None,
+            )
+        epoch_day = planner.price_epoch_day(
+            clock, attrs, history=history, today_kwh=today_kwh, tomorrow_kwh=tomorrow_kwh
+        )
+        self.seen, seen_ts = planner.epoch_seen_step(clock, self.seen, epoch_day, now_dt)
+        return planner.plan(
+            clock,
+            attrs,
+            min_hours=min_hours,
+            max_hours=max_hours,
+            ceiling=ceiling,
+            flex_pct=extra.get("flex_pct", 20),
+            flex_euro=extra.get("flex_euro", 0.02),
+            source_entity="sensor.price",
+            blocked=blocked,
+            today_kwh=today_kwh,
+            tomorrow_kwh=tomorrow_kwh,
+            history=history,
+            epoch_seen_ts=seen_ts,
+        )
+
+
+def local_day(tz, year, month, day, price_at):
+    """One local day of quarter-hour slots; ``price_at(local_dt)`` per slot."""
+    start = datetime.datetime(year, month, day, tzinfo=tz)
+    end = (start + datetime.timedelta(days=1)).timestamp()
+    out = []
+    t = start.timestamp()
+    while t < end:
+        local = datetime.datetime.fromtimestamp(t, tz)
+        out.append({"start": iso(t), "end": iso(t + SLOT), "value": price_at(local)})
+        t += SLOT
+    return out
+
+
+def at_local(tz, year, month, day, hour, minute=0):
+    return datetime.datetime(year, month, day, hour, minute, tzinfo=tz)
+
+
 def until_unplug_tick(override, plugged, seen):
     """Same override rules as KotiakkuGoeDirectController.async_charge for one charger."""
     return until_unplug_step(override, plugged, seen)
@@ -635,6 +698,321 @@ def main():
             assert_eq(result["reason"], "planned", "hourly plan stays put every 15 min")
             assert_eq(result["raw_windows"][0]["start"], start0, "hourly start does not slide")
 
+    def spans_of(result):
+        return [(w["start"], w["end"]) for w in result["raw_windows"]]
+
+    def active_at(result, dt):
+        return now_in_windows(result["raw_windows"], dt.timestamp())
+
+    def next_day(ymd, days=1):
+        d = datetime.date(*ymd) + datetime.timedelta(days=days)
+        return (d.year, d.month, d.day)
+
+    fixed_2h = dict(min_hours=2.0, max_hours=2.0, flex_pct=0, flex_euro=0)
+
+    def midnight_days(ymd):
+        d1 = next_day(ymd)
+        day_d = local_day(HELSINKI, *ymd, lambda t: 0.02 if t.hour == 23 else 0.10)
+        day_d1 = local_day(
+            HELSINKI,
+            *d1,
+            lambda t: 0.02 if t.hour == 0 else (0.03 if t.hour >= 22 else 0.10),
+        )
+        return d1, day_d, day_d1
+
+    def check_midnight_keeps_window(ymd):
+        d1, day_d, day_d1 = midnight_days(ymd)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *ymd, 21), tz=HELSINKI)
+        evening = {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}
+        result = state.plan(clock, evening, **fixed_2h)
+        across = (
+            at_local(HELSINKI, *ymd, 23).timestamp(),
+            at_local(HELSINKI, *d1, 1).timestamp(),
+        )
+        assert_eq(spans_of(result), [across], "%s evening: 23:00→01:00" % (ymd,))
+
+        clock.set(at_local(HELSINKI, *d1, 0) + datetime.timedelta(seconds=30))
+        rolled = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        result = state.plan(clock, rolled, **fixed_2h)
+        assert_eq(spans_of(result), [across], "%s midnight keeps the window" % (ymd,))
+        half_past = at_local(HELSINKI, *d1, 0, 30)
+        clock.set(half_past)
+        result = state.plan(clock, rolled, **fixed_2h)
+        assert_true(active_at(result, half_past), "%s active at 00:30" % (ymd,))
+        assert_eq(
+            charger_full_power(POLICY_SOLAR_PRIORITY, result, half_past.timestamp()),
+            True,
+            "%s SolarPriority still 22 kW at 00:30" % (ymd,),
+        )
+        one = at_local(HELSINKI, *d1, 1)
+        clock.set(one)
+        result = state.plan(clock, rolled, **fixed_2h)
+        assert_eq(spans_of(result), [across], "%s plan held after it ends" % (ymd,))
+        assert_true(not active_at(result, one), "%s off at 01:00" % (ymd,))
+
+        control = plan_once(clock, rolled, None, **fixed_2h)
+        assert_eq(
+            control["raw_windows"][0]["start"],
+            at_local(HELSINKI, *d1, 22).timestamp(),
+            "%s without yesterday's prices the window jumps to 22:00" % (ymd,),
+        )
+        assert_true(not active_at(control, half_past), "%s control is off at 00:30" % (ymd,))
+
+    def test_midnight_keeps_window_across_midnight():
+        check_midnight_keeps_window((2026, 3, 15))
+
+    def test_midnight_keeps_window_dst():
+        check_midnight_keeps_window((2026, 3, 28))
+        check_midnight_keeps_window((2026, 10, 24))
+
+    def test_midnight_keeps_yesterday_offsun_mask():
+        ymd = (2026, 3, 15)
+        d1 = next_day(ymd)
+
+        def price_d(t):
+            if 11 <= t.hour < 13:
+                return 0.01
+            return 0.02 if t.hour == 23 else 0.10
+
+        day_d = local_day(HELSINKI, *ymd, price_d)
+        _d1, _day_d, day_d1 = midnight_days(ymd)
+        kw = dict(fixed_2h, offsun_kwh=1.0)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *ymd, 21), tz=HELSINKI)
+        evening = {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}
+        result = state.plan(clock, evening, today_kwh=50.0, tomorrow_kwh=50.0, **kw)
+        across = (
+            at_local(HELSINKI, *ymd, 23).timestamp(),
+            at_local(HELSINKI, *d1, 1).timestamp(),
+        )
+        assert_eq(spans_of(result), [across], "sunny midday dip is off-sun; 23:00 wins")
+
+        half_past = at_local(HELSINKI, *d1, 0, 30)
+        rolled = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        clock.set(half_past)
+        kept = PlanState()
+        kept.days, kept.seen = dict(state.days), dict(state.seen)
+        result = kept.plan(clock, rolled, today_kwh=50.0, tomorrow_kwh=None, **kw)
+        assert_eq(spans_of(result), [across], "yesterday's off-sun hours still masked")
+        assert_true(active_at(result, half_past), "active at 00:30")
+
+        unmasked = PlanState()
+        unmasked.days, unmasked.seen = dict(state.days), dict(state.seen)
+        result = unmasked.plan(
+            clock, rolled, today_kwh=50.0, tomorrow_kwh=None, past_mask=False, **kw
+        )
+        assert_true(
+            not active_at(result, half_past),
+            "without yesterday's kWh the finished midday dip would win",
+        )
+
+    def test_arrival_keeps_running_window():
+        d0, d1, d2 = (2026, 1, 13), (2026, 1, 14), (2026, 1, 15)
+        kw = dict(min_hours=3.0, max_hours=3.0, flex_pct=0, flex_euro=0)
+        day_d = local_day(HELSINKI, *d0, lambda t: 0.10)
+        day_d1 = local_day(HELSINKI, *d1, lambda t: 0.03 if 12 <= t.hour < 15 else 0.10)
+        day_d2 = local_day(HELSINKI, *d2, lambda t: 0.01 if 1 <= t.hour < 4 else 0.10)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *d0, 20), tz=HELSINKI)
+        state.plan(clock, {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}, **kw)
+        noon = (
+            at_local(HELSINKI, *d1, 12).timestamp(),
+            at_local(HELSINKI, *d1, 15).timestamp(),
+        )
+        morning = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        clock.set(at_local(HELSINKI, *d1, 13))
+        result = state.plan(clock, morning, **kw)
+        assert_eq(spans_of(result), [noon], "midday window from last evening")
+        assert_true(active_at(result, clock.now()), "running at 13:00")
+
+        arrival = at_local(HELSINKI, *d1, 14, 10)
+        clock.set(arrival)
+        arrived = {"raw_today": day_d1, "raw_tomorrow": day_d2, "tomorrow_valid": True}
+        result = state.plan(clock, arrived, **kw)
+        night = (
+            at_local(HELSINKI, *d2, 1).timestamp(),
+            at_local(HELSINKI, *d2, 4).timestamp(),
+        )
+        assert_eq(spans_of(result), [night, noon], "new window plus the running one")
+        assert_eq(result["carried"], 1, "one carried window")
+        assert_eq(result["start"], iso(night[0]), "window 1 is the new epoch's")
+        for hour, minute, on in ((14, 30, True), (14, 59, True), (15, 0, False), (22, 0, False)):
+            when = at_local(HELSINKI, *d1, hour, minute)
+            clock.set(when)
+            result = state.plan(clock, arrived, **kw)
+            assert_eq(spans_of(result), [night, noon], "carried set holds @ %s" % when)
+            assert_eq(active_at(result, when), on, "active @ %s" % when)
+        clock.set(at_local(HELSINKI, *d2, 2))
+        result = state.plan(clock, arrived, **kw)
+        assert_true(active_at(result, clock.now()), "new window runs at 02:00")
+
+        clock.set(at_local(HELSINKI, *d1, 14, 30))
+        no_seen = planner.plan(
+            clock,
+            arrived,
+            source_entity="sensor.price",
+            history={"days": state.days},
+            **kw,
+        )
+        assert_eq(spans_of(no_seen), [night], "without epoch_seen the running window is replaced")
+
+    def test_arrival_does_not_carry_unstarted_window():
+        d0, d1, d2 = (2026, 1, 20), (2026, 1, 21), (2026, 1, 22)
+        day_d = local_day(HELSINKI, *d0, lambda t: 0.10)
+        day_d1 = local_day(HELSINKI, *d1, lambda t: 0.03 if t.hour >= 22 else 0.10)
+        day_d2 = local_day(HELSINKI, *d2, lambda t: 0.01 if 3 <= t.hour < 5 else 0.10)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *d0, 20), tz=HELSINKI)
+        result = state.plan(
+            clock, {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}, **fixed_2h
+        )
+        evening_d1 = (
+            at_local(HELSINKI, *d1, 22).timestamp(),
+            at_local(HELSINKI, *d2, 0).timestamp(),
+        )
+        assert_eq(spans_of(result), [evening_d1], "previous epoch picks 22:00")
+        clock.set(at_local(HELSINKI, *d1, 10))
+        morning = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        assert_eq(spans_of(state.plan(clock, morning, **fixed_2h)), [evening_d1], "held overnight")
+        clock.set(at_local(HELSINKI, *d1, 14, 10))
+        arrived = {"raw_today": day_d1, "raw_tomorrow": day_d2, "tomorrow_valid": True}
+        night = (
+            at_local(HELSINKI, *d2, 3).timestamp(),
+            at_local(HELSINKI, *d2, 5).timestamp(),
+        )
+        result = state.plan(clock, arrived, **fixed_2h)
+        assert_eq(spans_of(result), [night], "not-yet-started 22:00 is replaced")
+        late = at_local(HELSINKI, *d1, 22, 30)
+        clock.set(late)
+        result = state.plan(clock, arrived, **fixed_2h)
+        assert_eq(spans_of(result), [night], "22:00 does not come back at its start")
+        assert_eq(result["carried"], 0, "nothing carried")
+        assert_true(not active_at(result, late), "off at 22:30")
+
+    def test_midnight_without_cache_plans_today_only():
+        ymd = (2026, 3, 15)
+        d1, _day_d, day_d1 = midnight_days(ymd)
+        clock = Clock(at_local(HELSINKI, *d1, 0) + datetime.timedelta(seconds=30), tz=HELSINKI)
+        rolled = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        state = PlanState()
+        result = state.plan(clock, rolled, **fixed_2h)
+        control = plan_once(clock, rolled, None, **fixed_2h)
+        assert_eq(spans_of(result), spans_of(control), "no cache: today-only plan")
+        assert_eq(result["epoch_seen"], None, "first epoch on record carries nothing")
+        assert_eq(result["carried"], 0, "nothing carried")
+
+    def test_started_window_carried_on_arrival():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.09] * 48)
+        clock = Clock(day)
+        state = PlanState()
+        result = state.plan(clock, {"raw_today": today}, flex_pct=0, flex_euro=0)
+        started = spans_of(result)[0]
+        assert_true(started[0] <= day.timestamp() < started[1], "window has already started")
+        clock.advance(minutes=15)
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.02] * 16),
+            "tomorrow_valid": True,
+        }
+        result = state.plan(clock, attrs, flex_pct=0, flex_euro=0)
+        assert_true(result["raw_windows"][0]["start"] >= tomorrow_start - 1, "window 1 moved to tomorrow")
+        assert_eq(spans_of(result)[1:], [started], "running window carried")
+        assert_true(active_at(result, clock.now()), "still 22 kW at 10:15")
+        switched = spans_of(result)
+        for _ in range(12):
+            clock.advance(minutes=15)
+            result = state.plan(clock, attrs, flex_pct=0, flex_euro=0)
+            assert_eq(spans_of(result), switched, "carried set does not slide")
+        assert_true(not active_at(result, clock.now()), "carried window ended at 12:00")
+
+    def test_tomorrow_switch_keeps_running_plateau():
+        day = datetime.datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
+        today_start = datetime.datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        tomorrow_start = today_start + 24 * 3600
+        today = slots_from(today_start + 10 * 3600, [0.09] * 48)
+        clock = Clock(day)
+        state = PlanState()
+        attrs = {"raw_today": today, "tomorrow_valid": False}
+        plateau = spans_of(state.plan(clock, attrs))[0]
+        clock.advance(hours=4)
+        attrs = {
+            "raw_today": today,
+            "raw_tomorrow": slots_from(tomorrow_start, [0.02] * 16),
+            "tomorrow_valid": True,
+        }
+        result = state.plan(clock, attrs)
+        assert_true(result["raw_windows"][0]["start"] >= tomorrow_start - 1, "window 1 is tomorrow")
+        assert_eq(spans_of(result)[1:], [plateau], "running plateau carried past 14:00")
+        assert_true(active_at(result, clock.now()), "still 22 kW at 14:00")
+
+    def test_price_cache_and_epoch_seen():
+        clock = Clock(at_local(HELSINKI, 2026, 3, 15, 12), tz=HELSINKI)
+        day = local_day(HELSINKI, 2026, 3, 15, lambda t: 0.05)
+        days = planner.remember_price_day(clock, {}, {"raw_today": day}, clock.now(), 12.0)
+        assert_eq(list(days), ["2026-03-15"], "keyed by local date")
+        assert_eq(len(days["2026-03-15"]["slots"]), 96, "whole local day cached")
+        assert_eq(days["2026-03-15"]["kwh"], 12.0, "kWh cached")
+        again = planner.remember_price_day(clock, days, {"raw_today": day}, clock.now(), None)
+        assert_eq(again["2026-03-15"]["kwh"], 12.0, "unknown forecast keeps last kWh")
+        empty = planner.remember_price_day(clock, days, {"raw_today": []}, clock.now(), 12.0)
+        assert_eq(len(empty["2026-03-15"]["slots"]), 96, "empty curve does not replace the day")
+        clock.set(at_local(HELSINKI, 2026, 3, 18, 12))
+        pruned = planner.remember_price_day(clock, days, None, clock.now(), None)
+        assert_eq(pruned, {}, "days older than two back are dropped")
+
+        today = at_local(HELSINKI, 2026, 3, 18, 0).timestamp()
+        tomorrow = at_local(HELSINKI, 2026, 3, 19, 0).timestamp()
+        seen, ts = planner.epoch_seen_step(clock, {}, today, clock.now())
+        assert_eq(ts, None, "first epoch on record")
+        later = clock.as_timestamp(clock.now()) + 3600
+        clock.set(datetime.datetime.fromtimestamp(later, tz=HELSINKI))
+        seen2, ts2 = planner.epoch_seen_step(clock, seen, today, clock.now())
+        assert_eq(seen2, seen, "same epoch is not re-recorded")
+        assert_eq(ts2, None, "still the first epoch")
+        seen3, ts3 = planner.epoch_seen_step(clock, seen2, tomorrow, clock.now())
+        assert_eq(ts3, later, "next epoch is first seen now")
+        seen4, ts4 = planner.epoch_seen_step(
+            clock, seen3, tomorrow, clock.now() + datetime.timedelta(hours=5)
+        )
+        assert_eq((seen4, ts4), (seen3, later), "first-seen time does not move")
+        far = at_local(HELSINKI, 2026, 3, 30, 12)
+        seen5, _ts5 = planner.epoch_seen_step(
+            clock, seen4, at_local(HELSINKI, 2026, 3, 31, 0).timestamp(), far
+        )
+        assert_eq(len(seen5), 1, "old epochs pruned when a new one is recorded")
+
+    def test_price_cache_view():
+        ymd = (2026, 3, 15)
+        d1, day_d, day_d1 = midnight_days(ymd)
+        state = PlanState()
+        clock = Clock(at_local(HELSINKI, *ymd, 21), tz=HELSINKI)
+        evening = {"raw_today": day_d, "raw_tomorrow": day_d1, "tomorrow_valid": True}
+        state.plan(clock, evening, today_kwh=12.5, tomorrow_kwh=8.0, **fixed_2h)
+        clock.set(at_local(HELSINKI, *d1, 0, 30))
+        rolled = {"raw_today": day_d1, "raw_tomorrow": [], "tomorrow_valid": False}
+        state.plan(clock, rolled, today_kwh=8.0, **fixed_2h)
+        view = planner.price_cache_view(clock, state.days, state.seen, clock.now())
+        assert_eq(len(view["raw_yesterday"]), 96, "yesterday's slots")
+        assert_eq(view["raw_yesterday"][0], day_d[0], "Nordpool slot shape and values")
+        assert_eq(len(view["raw_today"]), 96, "today's cached slots")
+        assert_eq(view["raw_day_before_yesterday"], [], "day before not cached")
+        assert_eq(round(view["yesterday_avg"], 6), round((0.02 * 4 + 0.10 * 92) / 96, 6), "weighted avg")
+        assert_eq([d["date"] for d in view["days"]], ["2026-03-15", "2026-03-16"], "days by date")
+        assert_eq([d["kwh"] for d in view["days"]], [12.5, 8.0], "cached kWh")
+        assert_eq((view["days"][0]["min"], view["days"][0]["max"]), (0.02, 0.10), "min / max")
+        assert_eq(
+            view["epoch_seen"],
+            {iso(at_local(HELSINKI, *d1, 0).timestamp()): iso(at_local(HELSINKI, *ymd, 21).timestamp())},
+            "epoch first-seen as ISO",
+        )
+        empty = planner.price_cache_view(clock, {}, {}, clock.now())
+        assert_eq(empty["yesterday_avg"], None, "no cache: no state")
+        assert_eq(empty["raw_yesterday"], [], "no cache: empty slots")
+
     case("roll_uniform_plan_and_active", test_roll_uniform_plan_and_active)
     case("window_does_not_slide_on_falling_prices", test_window_does_not_slide_on_falling_prices)
     case("tomorrow_switch_then_holds", test_tomorrow_switch_then_holds)
@@ -653,6 +1031,16 @@ def main():
     case("later_island_not_planned_after_first_ends", test_later_island_not_planned_after_first_ends)
     case("min_hours_change_replans_during_roll", test_min_hours_change_replans_during_roll)
     case("hourly_curve_holds_on_hour_steps", test_hourly_curve_holds_on_hour_steps)
+    case("midnight_keeps_window_across_midnight", test_midnight_keeps_window_across_midnight)
+    case("midnight_keeps_window_dst", test_midnight_keeps_window_dst)
+    case("midnight_keeps_yesterday_offsun_mask", test_midnight_keeps_yesterday_offsun_mask)
+    case("arrival_keeps_running_window", test_arrival_keeps_running_window)
+    case("arrival_does_not_carry_unstarted_window", test_arrival_does_not_carry_unstarted_window)
+    case("midnight_without_cache_plans_today_only", test_midnight_without_cache_plans_today_only)
+    case("started_window_carried_on_arrival", test_started_window_carried_on_arrival)
+    case("tomorrow_switch_keeps_running_plateau", test_tomorrow_switch_keeps_running_plateau)
+    case("price_cache_and_epoch_seen", test_price_cache_and_epoch_seen)
+    case("price_cache_view", test_price_cache_view)
 
     run()
 

@@ -14,12 +14,14 @@ from .const import (
     EID_SOLAR_KWH,
     EID_SOLAR_TODAY_KWH,
     EID_SOLAR_TOMORROW_KWH,
+    EID_SPOT_PRICE_HISTORY,
     EID_WINDOW,
     SOLAR_GATING_DAY_UNIQUE_ID,
     SOLAR_GATING_KWH_UNIQUE_ID,
     SOLAR_KWH_UNIQUE_ID,
     SOLAR_TODAY_UNIQUE_ID,
     SOLAR_TOMORROW_UNIQUE_ID,
+    SPOT_PRICE_HISTORY_UNIQUE_ID,
     WINDOW_SENSOR_UNIQUE_ID,
     migrate_group_lot_entities,
     migrate_max_1phase_amp_entities,
@@ -53,6 +55,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SolarTomorrowSensor(controller),
             SolarGatingKwhSensor(controller),
             SolarGatingDaySensor(controller),
+            SpotPriceHistorySensor(controller),
         ]
     )
 
@@ -198,6 +201,44 @@ class SolarGatingDaySensor(HubEntity, SensorEntity):
             "usable_end": self._controller.usable_solar_end_iso,
             "tomorrow_ok": self._controller.tomorrow_prices_ok,
         }
+
+
+class SpotPriceHistorySensor(HubEntity, SensorEntity):
+    """Stored spot-price days the planner searches after midnight.
+
+    State is yesterday's average cached price. Slot lists stay out of the
+    recorder: three days of quarter-hours exceed its 16 KB attribute limit.
+    """
+
+    _attr_icon = "mdi:database-clock"
+    _attr_suggested_display_precision = 4
+    _unrecorded_attributes = frozenset(
+        {"raw_day_before_yesterday", "raw_yesterday", "raw_today"}
+    )
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self.entity_id = EID_SPOT_PRICE_HISTORY
+        self._attr_unique_id = SPOT_PRICE_HISTORY_UNIQUE_ID
+        self._attr_name = "Spot price history"
+
+    @property
+    def native_value(self):
+        avg = self._controller.price_cache()["yesterday_avg"]
+        if avg is None:
+            return None
+        return round(float(avg), 6)
+
+    @property
+    def native_unit_of_measurement(self):
+        return self._controller.price_unit
+
+    @property
+    def extra_state_attributes(self):
+        view = self._controller.price_cache()
+        view.pop("yesterday_avg", None)
+        view["source_entity"] = self._controller.price_entity_id() or None
+        return view
 
 
 class AvailableSurplusSensor(HubEntity, SensorEntity):
