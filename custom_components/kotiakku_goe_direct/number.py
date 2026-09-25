@@ -1,227 +1,84 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfElectricCurrent,
-    UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTime,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .config import apply_unique_priority, clamp_priority, entry_config
-from .const import (
-    DEFAULT_CEILING,
-    DEFAULT_FLEX_EUR,
-    DEFAULT_FLEX_PCT,
-    DEFAULT_MAX_HOURS,
-    DEFAULT_MIN_HOURS,
-    DOMAIN,
-    EID_CEILING,
-    EID_FLEX_EUR,
-    EID_FLEX_PCT,
-    EID_MAX,
-    EID_MIN,
-    EID_SOLAR_ENOUGH_KWH,
-    EID_OFFSUN_HOUR_KWH,
-    PRIORITY_MAX,
-    PRIORITY_MIN,
-    SURPLUS_NUMBER_SPECS,
-    default_charger_priority,
-    priority_entity_id,
-)
-from .device import hub_device_info
+from .entity import HubEntity
 
-_UNITS = {
-    "percent": PERCENTAGE,
-    "W": UnitOfPower.WATT,
-    "s": UnitOfTime.SECONDS,
-    "min": UnitOfTime.MINUTES,
-    "V": UnitOfElectricPotential.VOLT,
-    "A": UnitOfElectricCurrent.AMPERE,
-    "kWh": UnitOfEnergy.KILO_WATT_HOUR,
-}
+
+@dataclass(frozen=True)
+class Knob:
+    key: str
+    name: str
+    low: float
+    high: float
+    step: float
+    unit: str | None
+    icon: str
+
+
+KNOBS = (
+    Knob("window_min_h", "Window min", 0.25, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline"),
+    Knob("window_max_h", "Window max", 0.25, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline"),
+    Knob("electricity_price_ceiling", "Electricity price ceiling", -1, 5, 0.001, None, "mdi:currency-eur"),
+    Knob("window_flex_pct", "Window price flex", 0, 100, 1, PERCENTAGE, "mdi:percent-outline"),
+    Knob("window_flex_eur", "Window price flex euro", 0, 1, 0.001, None, "mdi:currency-eur"),
+    Knob("soc_on_pct", "Surplus SoC on", 0, 100, 1, PERCENTAGE, "mdi:battery-charging-80"),
+    Knob("soc_hyst_pct", "Surplus SoC hysteresis", 0, 20, 1, PERCENTAGE, "mdi:battery-minus"),
+    Knob("surplus_start_w", "Surplus start leftover", 0, 50000, 50, UnitOfPower.WATT, "mdi:lightning-bolt"),
+    Knob("hold_minutes", "Hold", 1, 120, 1, UnitOfTime.MINUTES, "mdi:timer-outline"),
+    Knob("max_a", "Per-charger amp cap", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
+    Knob("max_1phase_amp", "Surplus max 1-phase amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
+    Knob("group_lot_a", "Group lot (fuse cap)", 6, 64, 1, UnitOfElectricCurrent.AMPERE, "mdi:tune"),
+    Knob("solar_enough_kwh", "Enough solar", 0, 500, 1, UnitOfEnergy.KILO_WATT_HOUR, "mdi:solar-power"),
+    Knob("offsun_hour_kwh", "Off-sun hour", 0, 20, 0.1, UnitOfEnergy.KILO_WATT_HOUR, "mdi:weather-sunny-off"),
+    Knob("after_charge_complete_keep_a", "After charge complete keep amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
+)
+PRIORITY = Knob("priority", "priority", 1, 99, 1, None, "mdi:order-numeric-ascending")
+HUB_KEYS = tuple(knob.key for knob in KNOBS)
+CHARGER_KEYS = (PRIORITY.key,)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [
-        WindowHours(controller, EID_MIN, "kotiakku_goe_direct_window_min_h", "Window min", DEFAULT_MIN_HOURS),
-        WindowHours(controller, EID_MAX, "kotiakku_goe_direct_window_max_h", "Window max", DEFAULT_MAX_HOURS),
-        PriceCeiling(controller),
-        WindowFlexPct(controller),
-        WindowFlexEuro(controller),
-    ]
-    cfg = entry_config(entry)
-    entities.extend(SurplusNumber(controller, spec, cfg) for spec in SURPLUS_NUMBER_SPECS)
-    for index, row in enumerate(cfg.get("chargers") or ()):
-        serial = row.get("serial")
-        if not serial:
-            continue
-        entities.append(
-            ChargerPriorityNumber(
-                controller,
-                serial,
-                clamp_priority(row.get("priority"), default_charger_priority(index)),
-            )
-        )
+    hub = entry.runtime_data
+    entities = [KnobNumber(hub, knob) for knob in KNOBS]
+    entities += [KnobNumber(hub, PRIORITY, serial) for serial in hub.serials]
     async_add_entities(entities)
 
 
-class _HubNumber(NumberEntity, RestoreEntity):
-    _attr_has_entity_name = True
+class KnobNumber(HubEntity, RestoreEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
-    _attr_should_poll = False
 
-    def __init__(self, controller):
-        self._controller = controller
-        self._attr_device_info = hub_device_info()
+    def __init__(self, hub, knob: Knob, serial: str | None = None):
+        super().__init__(hub, "number", knob.key, knob.name, serial)
+        self._attr_native_min_value = knob.low
+        self._attr_native_max_value = knob.high
+        self._attr_native_step = knob.step
+        self._attr_native_unit_of_measurement = knob.unit
+        self._attr_icon = knob.icon
 
-    async def async_added_to_hass(self):
+    async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is None:
-            return
         try:
-            self._attr_native_value = float(last.state)
-        except (TypeError, ValueError):
-            pass
+            value = float(last.state) if last is not None else None
+        except ValueError:
+            value = None
+        if value is not None and self.native_min_value <= value <= self.native_max_value:
+            self.put(value)
 
-    async def async_set_native_value(self, value: float):
-        self._attr_native_value = value
-        self.async_write_ha_state()
-        await self._on_changed()
+    @property
+    def native_value(self) -> float:
+        return self.get()
 
-    async def _on_changed(self):
-        await self._controller.async_plan()
-        self._controller._schedule_apply()
-
-
-class WindowHours(_HubNumber):
-    _attr_native_min_value = 0.25
-    _attr_native_max_value = 24
-    _attr_native_step = 0.25
-    _attr_native_unit_of_measurement = UnitOfTime.HOURS
-    _attr_icon = "mdi:timer-outline"
-
-    def __init__(self, controller, entity_id, unique_id, name, default):
-        super().__init__(controller)
-        self._default = default
-        self._attr_native_value = default
-        self.entity_id = entity_id
-        self._attr_unique_id = unique_id
-        self._attr_name = name
-
-
-class PriceCeiling(_HubNumber):
-    _attr_native_min_value = -1
-    _attr_native_max_value = 5
-    _attr_native_step = 0.001
-    _attr_icon = "mdi:currency-eur"
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self._attr_native_value = DEFAULT_CEILING
-        self.entity_id = EID_CEILING
-        self._attr_unique_id = "kotiakku_goe_direct_electricity_price_ceiling"
-        self._attr_name = "Electricity price ceiling"
-
-
-class WindowFlexPct(_HubNumber):
-    _attr_native_min_value = 0
-    _attr_native_max_value = 100
-    _attr_native_step = 1
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_icon = "mdi:percent-outline"
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self._attr_native_value = DEFAULT_FLEX_PCT
-        self.entity_id = EID_FLEX_PCT
-        self._attr_unique_id = "kotiakku_goe_direct_window_flex_pct"
-        self._attr_name = "Window price flex"
-
-
-class WindowFlexEuro(_HubNumber):
-    _attr_native_min_value = 0
-    _attr_native_max_value = 1
-    _attr_native_step = 0.001
-    _attr_icon = "mdi:currency-eur"
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self._attr_native_value = DEFAULT_FLEX_EUR
-        self.entity_id = EID_FLEX_EUR
-        self._attr_unique_id = "kotiakku_goe_direct_window_flex_eur"
-        self._attr_name = "Window price flex euro"
-
-
-class SurplusNumber(_HubNumber):
-    def __init__(self, controller, spec, cfg):
-        super().__init__(controller)
-        self._default = float(cfg.get(spec["conf"], spec["default"]))
-        self._attr_native_value = self._default
-        self._attr_native_min_value = spec["min"]
-        self._attr_native_max_value = spec["max"]
-        self._attr_native_step = spec["step"]
-        self._attr_native_unit_of_measurement = _UNITS[spec["unit"]]
-        self._attr_icon = spec["icon"]
-        self.entity_id = spec["entity_id"]
-        self._attr_unique_id = spec["unique_id"]
-        self._attr_name = spec["name"]
-
-    async def async_added_to_hass(self):
-        await super().async_added_to_hass()
-        try:
-            value = float(self._attr_native_value)
-        except (TypeError, ValueError):
-            self._attr_native_value = self._default
-            return
-        if value < self._attr_native_min_value or value > self._attr_native_max_value:
-            self._attr_native_value = self._default
-
-    async def _on_changed(self):
-        if self.entity_id in (EID_SOLAR_ENOUGH_KWH, EID_OFFSUN_HOUR_KWH):
-            await self._controller.async_plan()
-        self._controller._schedule_apply()
-
-
-class ChargerPriorityNumber(_HubNumber):
-    _attr_native_min_value = PRIORITY_MIN
-    _attr_native_max_value = PRIORITY_MAX
-    _attr_native_step = 1
-    _attr_icon = "mdi:order-numeric-ascending"
-
-    def __init__(self, controller, serial, default):
-        super().__init__(controller)
-        self._serial = serial
-        self._attr_native_value = float(default)
-        self.entity_id = priority_entity_id(serial)
-        self._attr_unique_id = f"kotiakku_goe_direct_priority_{serial}"
-        self._attr_name = f"{serial} priority"
-        self._controller.register_priority_number(self)
-
-    def apply_swapped_priority(self, value: int) -> None:
-        self._attr_native_value = float(clamp_priority(value, PRIORITY_MIN))
-        if self.hass is not None:
-            self.async_write_ha_state()
-
-    async def async_set_native_value(self, value: float):
-        current = self._controller.charger_priority_values()
-        updated = apply_unique_priority(self._serial, value, current)
-        self._attr_native_value = float(updated[self._serial])
-        self.async_write_ha_state()
-        for serial, prio in updated.items():
-            if serial == self._serial:
-                continue
-            if current.get(serial) == prio:
-                continue
-            peer = self._controller.priority_number(serial)
-            if peer is not None:
-                peer.apply_swapped_priority(prio)
-        await self._on_changed()
-
-    async def _on_changed(self):
-        self._controller._schedule_apply()
+    async def async_set_native_value(self, value: float) -> None:
+        self.change(value)

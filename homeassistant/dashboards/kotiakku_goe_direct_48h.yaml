@@ -8,8 +8,8 @@
 # UI dashboard's raw editor.
 #
 # Edit only the leftover chart inputs (solar / house / Controller mean)
-# and charger serials 111111 / 222222. Spot uses
-# `text.kotiakku_goe_direct_electricity_price_sensor` from the integration.
+# and charger serials 111111 / 222222. Spot uses the `source_entity`
+# attribute of `sensor.kotiakku_goe_direct_window` (the configured price sensor).
 #
 # configuration.yaml (optional YAML dashboard):
 #   lovelace:
@@ -30,7 +30,7 @@ views:
         cards:
           - type: markdown
             content: >
-              {% set price = states('text.kotiakku_goe_direct_electricity_price_sensor') | trim %}
+              {% set price = state_attr('sensor.kotiakku_goe_direct_window', 'source_entity') or '' %}
               {% set leftover_w = states('sensor.kotiakku_goe_direct_available_surplus') %}
               {% set leftover = (leftover_w | float(0) / 1000) if leftover_w | is_number else none %}
               **48 h from local midnight** · green = SolarPriority window · orange = off-sun · red = price ceiling.
@@ -55,28 +55,31 @@ views:
                 name: Enough solar
               - entity: select.kotiakku_goe_direct_policy_111111
                 name: Charger 1
-              - entity: binary_sensor.kotiakku_goe_direct_111111_full_power
-                name: 1 full power
+              - entity: sensor.kotiakku_goe_direct_role_111111
+                name: 1 role
               - entity: select.kotiakku_goe_direct_policy_222222
                 name: Charger 2
+              - entity: sensor.kotiakku_goe_direct_role_222222
+                name: 2 role
 
-          - type: glance
-            show_name: true
-            show_state: true
-            columns: 6
+          - type: entities
             entities:
-              - entity: sensor.kotiakku_goe_direct_solar_today_kwh
+              - type: attribute
+                entity: binary_sensor.kotiakku_goe_direct_solar_enough
+                attribute: today_kwh
                 name: Solar today
-              - entity: sensor.kotiakku_goe_direct_solar_tomorrow_kwh
+                suffix: kWh
+              - type: attribute
+                entity: binary_sensor.kotiakku_goe_direct_solar_enough
+                attribute: tomorrow_kwh
                 name: Solar tomorrow
-              - entity: sensor.kotiakku_goe_direct_solar_gating_kwh
-                name: Solar gating
-              - entity: sensor.kotiakku_goe_direct_solar_gating_day
+                suffix: kWh
+              - type: attribute
+                entity: binary_sensor.kotiakku_goe_direct_solar_enough
+                attribute: gating_day
                 name: Gating day
               - entity: sensor.kotiakku_goe_direct_available_surplus
                 name: Available surplus
-              - entity: sensor.kotiakku_goe_direct_solar_kwh
-                name: Forecast solar
 
           - type: custom:apexcharts-card
             header:
@@ -133,17 +136,10 @@ views:
                         if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
                       }
                     }
-                    if (!out.length && attrs) {
-                      for (let i = 1; i <= 16; i++) {
-                        const s = parseTs(attrs['window_' + i + '_start']);
-                        const e = parseTs(attrs['window_' + i + '_end']);
-                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
-                      }
-                    }
                     return out;
                   }
                   function priceSlots() {
-                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const raw = String((((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {}).source_entity || '').trim();
                     const id = raw || 'sensor.nordpool_kwh_fi';
                     const a = ((hass.states[id] || {}).attributes) || {};
                     return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
@@ -197,7 +193,7 @@ views:
                     return out;
                   }
                   function priceSlots() {
-                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const raw = String((((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {}).source_entity || '').trim();
                     const id = raw || 'sensor.nordpool_kwh_fi';
                     const a = ((hass.states[id] || {}).attributes) || {};
                     return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
@@ -219,7 +215,7 @@ views:
                     pts.push([t, on ? slotVal(entry) : 0]);
                   }
                   return pts;
-              - entity: text.kotiakku_goe_direct_electricity_price_sensor
+              - entity: sensor.kotiakku_goe_direct_window
                 name: Spot
                 yaxis_id: price
                 type: line
@@ -238,7 +234,7 @@ views:
                       return v < 1e12 ? v * 1000 : v;
                     return Date.parse(v);
                   }
-                  const raw = String((entity.state || '')).trim();
+                  const raw = String((entity.attributes || {}).source_entity || '').trim();
                   const id = raw || 'sensor.nordpool_kwh_fi';
                   const a = ((hass.states[id] || {}).attributes) || {};
                   const slots = [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
@@ -321,17 +317,10 @@ views:
                         if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
                       }
                     }
-                    if (!out.length && attrs) {
-                      for (let i = 1; i <= 16; i++) {
-                        const s = parseTs(attrs['window_' + i + '_start']);
-                        const e = parseTs(attrs['window_' + i + '_end']);
-                        if (Number.isFinite(s) && Number.isFinite(e)) out.push([s, e]);
-                      }
-                    }
                     return out;
                   }
                   function priceSlots() {
-                    const raw = String(((hass.states['text.kotiakku_goe_direct_electricity_price_sensor'] || {}).state) || '').trim();
+                    const raw = String((((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {}).source_entity || '').trim();
                     const id = raw || 'sensor.nordpool_kwh_fi';
                     const a = ((hass.states[id] || {}).attributes) || {};
                     return [].concat(a.raw_today || a.today || [], a.raw_tomorrow || a.tomorrow || []);
@@ -342,28 +331,22 @@ views:
                     }
                     return false;
                   }
-                  function kwhOf(id) {
-                    const n = Number(((hass.states[id] || {}).state));
-                    return Number.isFinite(n) ? n : null;
+                  function numOrNull(v) {
+                    const n = Number(v);
+                    return v != null && Number.isFinite(n) ? n : null;
                   }
                   function enoughAt(t) {
                     const thr = Number(((hass.states['number.kotiakku_goe_direct_solar_enough_kwh'] || {}).state));
                     if (!Number.isFinite(thr) || thr <= 0) return false;
-                    const today = kwhOf('sensor.kotiakku_goe_direct_solar_today_kwh');
-                    const tom = kwhOf('sensor.kotiakku_goe_direct_solar_tomorrow_kwh');
-                    const daySt = hass.states['sensor.kotiakku_goe_direct_solar_gating_day'] || {};
-                    const usable = parseTs((daySt.attributes || {}).usable_end);
-                    const prices = (daySt.attributes || {}).tomorrow_ok;
-                    const pricesOn = prices === true || prices === 'on' || prices === 'true';
+                    const se = ((hass.states['binary_sensor.kotiakku_goe_direct_solar_enough'] || {}).attributes) || {};
+                    const usable = parseTs(se.usable_end);
                     const solarLeft = Number.isFinite(usable) && t < usable;
-                    let day = String(daySt.state || '');
-                    day = (!solarLeft && pricesOn) ? 'tomorrow' : 'today';
-                    const v = day === 'tomorrow' ? tom : today;
+                    const v = numOrNull(!solarLeft && se.tomorrow_ok === true ? se.tomorrow_kwh : se.today_kwh);
                     return v != null && v >= thr;
                   }
                   const serial = entity.entity_id.split('_').pop();
                   const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
-                  const solar = ['SolarPriority', 'Cheapest', 'Supercheap', 'Longest', 'Earliest'].indexOf(policy) >= 0;
+                  const solar = policy === 'SolarPriority';
                   const solarAndGrid = policy === 'SolarAndGrid';
                   const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
                   const force = policy === 'Force on' || until;
@@ -398,7 +381,7 @@ views:
                   in_header: false
                   legend_value: false
                 data_generator: *full_power_kw
-              - entity: sensor.kotiakku_goe_direct_solar_kwh
+              - entity: sensor.kotiakku_goe_direct_available_surplus
                 name: Leftover
                 yaxis_id: kw
                 type: area
@@ -512,18 +495,15 @@ views:
               - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_enable_111111
               - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_111111
               - entity: number.kotiakku_goe_direct_priority_111111
+              - entity: sensor.kotiakku_goe_direct_role_111111
               - entity: select.kotiakku_goe_direct_policy_222222
               - entity: switch.kotiakku_goe_direct_until_unplug_222222
               - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_enable_222222
               - entity: switch.kotiakku_goe_direct_after_charge_complete_keep_222222
               - entity: number.kotiakku_goe_direct_priority_222222
+              - entity: sensor.kotiakku_goe_direct_role_222222
               - entity: sensor.kotiakku_goe_direct_window
               - entity: binary_sensor.kotiakku_goe_direct_solar_enough
-              - entity: sensor.kotiakku_goe_direct_solar_today_kwh
-              - entity: sensor.kotiakku_goe_direct_solar_tomorrow_kwh
-              - entity: sensor.kotiakku_goe_direct_solar_gating_kwh
-              - entity: sensor.kotiakku_goe_direct_solar_gating_day
-              - entity: sensor.kotiakku_goe_direct_solar_kwh
               - entity: number.kotiakku_goe_direct_window_min_h
               - entity: number.kotiakku_goe_direct_window_max_h
               - entity: number.kotiakku_goe_direct_window_flex_pct
@@ -535,4 +515,3 @@ views:
               - entity: number.kotiakku_goe_direct_after_charge_complete_keep_a
               - entity: select.kotiakku_goe_direct_surplus_preferred_start_phase
               - entity: number.kotiakku_goe_direct_max_1phase_amp
-              - entity: text.kotiakku_goe_direct_electricity_price_sensor
