@@ -95,6 +95,38 @@ def price_slots(attrs: Mapping | None, now: datetime) -> list[Slot]:
     return sorted(slots)
 
 
+def imported_price_cache(stored: dict | None) -> tuple[dict, dict]:
+    """v1 ``price_days`` / ``epoch_seen`` in the new store's ``days`` / ``seen`` shape.
+
+    The legacy ``seen`` map is surplus state, not the price epoch, and is ignored.
+    """
+    if not isinstance(stored, dict):
+        return {}, {}
+    days = {}
+    for key, entry in (stored.get("price_days") or {}).items():
+        if not isinstance(entry, dict) or entry.get("start") is None:
+            continue
+        slots = []
+        for raw in entry.get("slots") or []:
+            try:
+                slot = [float(raw[0]), float(raw[1]), float(raw[2])]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if slot[1] > slot[0]:
+                slots.append(slot)
+        if not slots:
+            continue
+        kwh = entry.get("kwh")
+        days[str(key)] = {"start": float(entry["start"]), "slots": slots, "kwh": None if kwh is None else float(kwh)}
+    seen = {}
+    for key, raw in (stored.get("epoch_seen") or {}).items():
+        try:
+            seen[str(key)] = float(raw)
+        except (TypeError, ValueError):
+            continue
+    return days, seen
+
+
 def remember_day(days: dict | None, now: datetime, live: list[Slot], today_kwh: float | None) -> dict:
     """Cache today's spot slots and last known solar kWh. Empty curves do not erase a day."""
     start, end = day_start(now, 0).timestamp(), day_start(now, 1).timestamp()

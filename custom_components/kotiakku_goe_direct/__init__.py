@@ -12,7 +12,9 @@ from .const import (
     LEGACY_STORE_KEY,
     OPTIONAL_ENTITIES,
     REQUIRED_ENTITIES,
+    STORE_KEY,
 )
+from .core import planner
 from .entity import unique_id
 from .hub import Hub
 
@@ -50,7 +52,17 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         serials = [str(row.get("serial") or "").strip() for row in rows]
         data.update(zip(CONF_CHARGER_SERIALS, [s for s in serials if s]))
         hass.config_entries.async_update_entry(entry, data=data, options={}, version=2)
-        await Store(hass, 1, LEGACY_STORE_KEY).async_remove()
+        legacy = Store(hass, 1, LEGACY_STORE_KEY)
+        days, seen = planner.imported_price_cache(await legacy.async_load())
+        if days or seen:
+            store = Store(hass, 1, STORE_KEY)
+            current = await store.async_load() or {}
+            if days and not current.get("days"):
+                current["days"] = days
+            if seen and not current.get("seen"):
+                current["seen"] = seen
+            await store.async_save(current)
+        await legacy.async_remove()
     return True
 
 

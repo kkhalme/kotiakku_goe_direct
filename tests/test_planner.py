@@ -237,6 +237,26 @@ def test_midnight_keeps_the_window_from_cached_yesterday():
     assert (after.windows[0].start, after.windows[0].end) == (before.windows[0].start, before.windows[0].end)
 
 
+def test_imported_v1_cache_keeps_the_active_overnight_window():
+    cheap = [0.01] * 8
+    evening_day = date(2026, 3, 15)
+    start, today = _day_attrs(evening_day, [0.2] * 88 + cheap)
+    _tomorrow_start, tomorrow = _day_attrs(date(2026, 3, 16), cheap + [0.2] * 88)
+    evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
+    knobs = {"window_min_h": 4, "window_max_h": 4, "window_flex_pct": 0, "window_flex_eur": 0}
+    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow}, now=evening, **knobs)
+    cached = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), 12.0)
+    days, seen = planner.imported_price_cache(
+        {"price_days": cached, "epoch_seen": {"1": evening.timestamp()}, "seen": {"surplus": True}}
+    )
+    assert seen == {"1": evening.timestamp()}
+    assert days["2026-03-15"]["kwh"] == 12.0
+    after_midnight = datetime(2026, 3, 16, 0, 30, tzinfo=UTC)
+    after = run_plan({"raw_today": tomorrow}, now=after_midnight, history=days, **knobs)
+    assert (after.windows[0].start, after.windows[0].end) == (before.windows[0].start, before.windows[0].end)
+    assert after.windows[0].start == start.replace(hour=22)
+
+
 def test_new_epoch_keeps_only_the_window_already_running():
     running = (datetime(2026, 3, 16, 12, tzinfo=UTC).timestamp(), datetime(2026, 3, 16, 16, tzinfo=UTC).timestamp(), 0.05)
     later = (datetime(2026, 3, 16, 22, tzinfo=UTC).timestamp(), datetime(2026, 3, 17, 0, tzinfo=UTC).timestamp(), 0.04)
