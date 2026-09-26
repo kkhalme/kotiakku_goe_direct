@@ -45,3 +45,15 @@ class HubEntity(CoordinatorEntity[Hub]):
         self.put(value)
         self.async_write_ha_state()
         self.coordinator.request()
+
+
+class SettingEntity(HubEntity):
+    """A knob whose value lives in ``hub.settings``, not in the cycle result.
+
+    It must stay available when a cycle fails: Home Assistant drops service calls
+    to unavailable entities, and a restored ``unavailable`` state would reset it.
+    """
+
+    @property
+    def available(self) -> bool:
+        return True

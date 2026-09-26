@@ -3,7 +3,7 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .entity import HubEntity
+from .entity import SettingEntity
 
 SWITCHES = (
     ("until_unplug", "until_unplug", "Force On Until Unplug", "mdi:power-plug"),
@@ -21,7 +21,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
 
-class Toggle(HubEntity, RestoreEntity, SwitchEntity):
+class Toggle(SettingEntity, RestoreEntity, SwitchEntity):
     def __init__(self, hub, key, field, name, icon, serial):
         super().__init__(hub, "switch", key, name, serial, field)
         self._attr_icon = icon

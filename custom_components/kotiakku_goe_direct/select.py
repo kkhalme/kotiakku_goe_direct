@@ -4,7 +4,7 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .core.model import PHASE_OPTIONS, POLICIES
-from .entity import HubEntity
+from .entity import SettingEntity
 
 HUB_CHOICES = (
     ("after_charge_complete_keep_phase", "After charge complete keep phase", PHASE_OPTIONS, "mdi:numeric-3-circle-outline"),
@@ -21,7 +21,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(entities)
 
 
-class Choice(HubEntity, RestoreEntity, SelectEntity):
+class Choice(SettingEntity, RestoreEntity, SelectEntity):
     def __init__(self, hub, key, name, options, icon, serial=None):
         super().__init__(hub, "select", key, name, serial)
         self._attr_options = list(options)

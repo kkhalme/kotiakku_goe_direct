@@ -12,7 +12,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .entity import HubEntity
+from .entity import SettingEntity
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(entities)
 
 
-class KnobNumber(HubEntity, RestoreEntity, NumberEntity):
+class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
 
     def __init__(self, hub, knob: Knob, serial: str | None = None):
