@@ -265,6 +265,11 @@ def test_new_epoch_keeps_only_the_window_already_running():
     assert planner.carry_windows([], [running], None) == []
 
 
+def test_non_list_price_attributes_are_ignored():
+    assert planner.price_slots({"today": 12.5, "raw_tomorrow": "n/a"}, NOW) == []
+    assert run_plan({"today": 12.5}).reason == "no_slots"
+
+
 def test_min_hours_clamped_and_swapped():
     result = run_plan(attrs_for(BASE, [0.04] * 32), window_min_h=5, window_max_h=2)
     assert round((result.windows[0].end - result.windows[0].start).total_seconds() / 3600, 2) == 2

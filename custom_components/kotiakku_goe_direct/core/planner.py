@@ -63,7 +63,7 @@ def _first(item: Mapping, keys):
 
 
 def _series(raw, day_start: datetime, tz: tzinfo) -> list[Slot]:
-    if not raw:
+    if not raw or not isinstance(raw, (list, tuple)):
         return []
     if isinstance(raw[0], Mapping):
         out = []
