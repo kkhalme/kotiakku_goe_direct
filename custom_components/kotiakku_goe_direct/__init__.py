@@ -1,102 +1,75 @@
 from __future__ import annotations
 
-import voluptuous as vol
-
-from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 
-from .config import persistable, BOOL_KEYS, INT_KEYS, STRING_KEYS
+from . import binary_sensor, number, select, sensor, switch
 from .const import (
-    CONF_CHARGERS,
-    CONF_ECO_LOT,
-    CONF_PHASE3_MIN_W,
-    CONF_PREFERRED_START_PHASE,
-    CONF_PRICE_ENTITY,
-    CONF_PRIORITY,
-    DOMAIN,
-    PRIORITY_MAX,
-    PRIORITY_MIN,
+    CONF_CHARGER_SERIALS,
+    LEGACY_STORE_KEY,
+    OPTIONAL_ENTITIES,
+    REQUIRED_ENTITIES,
+    STORE_KEY,
 )
-from .controller import KotiakkuGoeDirectController
-from .serial import SERIAL_RE
+from .core import planner
+from .entity import unique_id
+from .hub import Hub
 
-PLATFORMS = [
-    Platform.SENSOR,
-    Platform.BINARY_SENSOR,
-    Platform.NUMBER,
-    Platform.SELECT,
-    Platform.TEXT,
-    Platform.SWITCH,
-]
-
-_CHARGER_SCHEMA = vol.Schema(
-    {
-        vol.Required("entity"): cv.entity_id,
-        vol.Required("serial"): vol.All(cv.string, vol.Match(SERIAL_RE)),
-        vol.Optional(CONF_PRIORITY): vol.All(
-            vol.Coerce(int), vol.Range(min=PRIORITY_MIN, max=PRIORITY_MAX)
-        ),
-    }
-)
-
-CONFIG_SCHEMA = vol.Schema(
-    {
-        DOMAIN: vol.Schema(
-            {
-                **{
-                    vol.Optional(key): (
-                        cv.string if key == CONF_PRICE_ENTITY else cv.entity_id
-                    )
-                    for key in STRING_KEYS
-                },
-                vol.Optional(CONF_CHARGERS): [_CHARGER_SCHEMA],
-                **{
-                    vol.Optional(key, default=default): vol.Coerce(int)
-                    for key, default in INT_KEYS.items()
-                },
-                vol.Optional(CONF_ECO_LOT): vol.Coerce(int),
-                vol.Optional(CONF_PHASE3_MIN_W): vol.Coerce(int),
-                vol.Optional(CONF_PREFERRED_START_PHASE): cv.string,
-                **{
-                    vol.Optional(key, default=default): cv.boolean
-                    for key, default in BOOL_KEYS.items()
-                },
-            }
-        )
-    },
-    extra=vol.ALLOW_EXTRA,
-)
-
-
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    if DOMAIN not in config:
-        return True
-    conf = persistable(config.get(DOMAIN) or {})
-    hass.async_create_task(
-        hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": SOURCE_IMPORT}, data=conf
-        )
-    )
-    return True
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.NUMBER, Platform.SELECT, Platform.SWITCH]
+PLATFORM_MODULES = (sensor, binary_sensor, number, select, switch)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    controller = KotiakkuGoeDirectController(hass, entry)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = controller
+    hub = Hub(hass, entry)
+    entry.runtime_data = hub
+    _remove_orphaned_entities(hass, entry, hub.serials)
+    await hub.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await controller.async_setup()
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    hub.ready = True
+    await hub.async_refresh()
+    entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
 
 
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    controller = hass.data[DOMAIN].pop(entry.entry_id, None)
-    if controller is not None:
-        await controller.async_unload()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    await entry.runtime_data.async_stop()
+    return unloaded
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    if entry.version == 1:
+        old = {**entry.data, **entry.options}
+        data = {key: old[key] for key in REQUIRED_ENTITIES + OPTIONAL_ENTITIES if old.get(key)}
+        rows = [row for row in old.get("chargers") or () if isinstance(row, dict)]
+        serials = [str(row.get("serial") or "").strip() for row in rows]
+        data.update(zip(CONF_CHARGER_SERIALS, [s for s in serials if s]))
+        hass.config_entries.async_update_entry(entry, data=data, options={}, version=2)
+        legacy = Store(hass, 1, LEGACY_STORE_KEY)
+        days, seen = planner.imported_price_cache(await legacy.async_load())
+        if days or seen:
+            store = Store(hass, 1, STORE_KEY)
+            current = await store.async_load() or {}
+            if days and not current.get("days"):
+                current["days"] = days
+            if seen and not current.get("seen"):
+                current["seen"] = seen
+            await store.async_save(current)
+        await legacy.async_remove()
+    return True
+
+
+def _remove_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry, serials: list[str]) -> None:
+    expected = {unique_id(key) for module in PLATFORM_MODULES for key in module.HUB_KEYS}
+    expected |= {unique_id(key, s) for module in PLATFORM_MODULES for key in module.CHARGER_KEYS for s in serials}
+    registry = er.async_get(hass)
+    for item in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if item.unique_id not in expected:
+            registry.async_remove(item.entity_id)

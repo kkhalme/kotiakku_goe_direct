@@ -1,266 +1,147 @@
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.const import UnitOfEnergy, UnitOfPower
-from homeassistant.helpers import entity_registry as er
-from homeassistant.util import dt as dt_util
-
-from .const import (
-    AVAILABLE_SURPLUS_UNIQUE_ID,
-    DOMAIN,
-    EID_AVAILABLE_SURPLUS,
-    EID_SOLAR_GATING_DAY,
-    EID_SOLAR_GATING_KWH,
-    EID_SOLAR_KWH,
-    EID_SOLAR_TODAY_KWH,
-    EID_SOLAR_TOMORROW_KWH,
-    EID_SPOT_PRICE_HISTORY,
-    EID_WINDOW,
-    SOLAR_GATING_DAY_UNIQUE_ID,
-    SOLAR_GATING_KWH_UNIQUE_ID,
-    SOLAR_KWH_UNIQUE_ID,
-    SOLAR_TODAY_UNIQUE_ID,
-    SOLAR_TOMORROW_UNIQUE_ID,
-    SPOT_PRICE_HISTORY_UNIQUE_ID,
-    WINDOW_SENSOR_UNIQUE_ID,
-    migrate_group_lot_entities,
-    migrate_max_1phase_amp_entities,
-    migrate_window_entities,
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
 )
-from .device import HubEntity
+from homeassistant.const import UnitOfPower
+
+from .const import CONF_PRICE_ENTITY
+from .entity import HubEntity
+
+HUB_KEYS = ("window", "available_surplus", "spot_price_history")
+CHARGER_KEYS = ("role",)
 
 
-def _migrate_window_entities(hass):
-    registry = er.async_get(hass)
-    migrate_window_entities(registry)
-    migrate_group_lot_entities(registry)
-    migrate_max_1phase_amp_entities(registry)
-
-
-def _kwh(value):
-    if value is None:
-        return None
-    return round(float(value), 3)
+def _iso(value):
+    return None if value is None else value.isoformat()
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    _migrate_window_entities(hass)
-    controller = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            WindowSensor(controller),
-            AvailableSurplusSensor(controller),
-            ForecastSolarSensor(controller),
-            SolarTodaySensor(controller),
-            SolarTomorrowSensor(controller),
-            SolarGatingKwhSensor(controller),
-            SolarGatingDaySensor(controller),
-            SpotPriceHistorySensor(controller),
-        ]
-    )
+    hub = entry.runtime_data
+    entities = [WindowSensor(hub), AvailableSurplusSensor(hub), SpotPriceHistorySensor(hub)]
+    entities += [RoleSensor(hub, serial) for serial in hub.serials]
+    async_add_entities(entities)
 
 
 class WindowSensor(HubEntity, SensorEntity):
-    """Planned window (past is fine). State is the start; end and the plan are attributes."""
+    """First planned window start (a finished window stays the plan)."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:ev-station"
 
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_WINDOW
-        self._attr_unique_id = WINDOW_SENSOR_UNIQUE_ID
-        self._attr_name = "Window"
+    def __init__(self, hub):
+        super().__init__(hub, "sensor", "window", "Window")
 
     @property
     def native_value(self):
-        start = (self._controller.window_result or {}).get("start")
-        if not start:
-            return None
-        return dt_util.parse_datetime(str(start))
+        plan = self.snapshot and self.snapshot.plan
+        return plan.windows[0].start if plan and plan.windows else None
 
     @property
     def extra_state_attributes(self):
-        result = dict(self._controller.window_result or {})
-        result.pop("raw_windows", None)
-        result.pop("horizon_ts", None)
-        result.pop("blocked_ts", None)
-        return result
-
-
-class _ForecastKwhSensor(HubEntity, SensorEntity):
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_icon = "mdi:solar-power"
-    _attr_suggested_display_precision = 1
-
-
-class ForecastSolarSensor(_ForecastKwhSensor):
-    """Headline forecast: max of today's full-day kWh and tomorrow."""
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SOLAR_KWH
-        self._attr_unique_id = SOLAR_KWH_UNIQUE_ID
-        self._attr_name = "Forecast solar"
-
-    @property
-    def native_value(self):
-        return _kwh(self._controller.upcoming_solar_kwh)
-
-    @property
-    def extra_state_attributes(self):
+        plan = self.snapshot and self.snapshot.plan
+        if not plan:
+            return {"source_entity": self.coordinator.entity(CONF_PRICE_ENTITY)}
+        first = plan.windows[0] if plan.windows else None
         return {
-            "source_today": self._controller.solar_today_entity or None,
-            "source_tomorrow": self._controller.solar_tomorrow_entity or None,
-            "enough_kwh": self._controller.solar_enough_kwh,
-            "enough_solar": self._controller.enough_solar,
-            "offsun_hour_kwh": self._controller.offsun_hour_kwh,
-            "surplus_hours": self._controller.surplus_hours,
+            "end": _iso(first and first.end),
+            "avg": first and first.avg,
+            "windows": [{"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg} for w in plan.windows],
+            "blocked": [{"start": _iso(s), "end": _iso(e)} for s, e in plan.blocked],
+            "reason": plan.reason,
+            "tomorrow_ok": plan.tomorrow_ok,
+            "epoch_start": _iso(plan.epoch_start),
+            "epoch_seen": _iso(plan.epoch_seen),
+            "carried": plan.carried,
+            "source_entity": self.coordinator.entity(CONF_PRICE_ENTITY),
         }
-
-
-class SolarTodaySensor(_ForecastKwhSensor):
-    """Today's full-day production estimate from Configure → Solar today."""
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SOLAR_TODAY_KWH
-        self._attr_unique_id = SOLAR_TODAY_UNIQUE_ID
-        self._attr_name = "Solar today"
-
-    @property
-    def native_value(self):
-        return _kwh(self._controller.today_kwh)
-
-    @property
-    def extra_state_attributes(self):
-        return {"source": self._controller.solar_today_entity or None}
-
-
-class SolarTomorrowSensor(_ForecastKwhSensor):
-    """Tomorrow's production estimate from Configure → Solar tomorrow."""
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SOLAR_TOMORROW_KWH
-        self._attr_unique_id = SOLAR_TOMORROW_UNIQUE_ID
-        self._attr_name = "Solar tomorrow"
-
-    @property
-    def native_value(self):
-        return _kwh(self._controller.tomorrow_kwh)
-
-    @property
-    def extra_state_attributes(self):
-        return {"source": self._controller.solar_tomorrow_entity or None}
-
-
-class SolarGatingKwhSensor(_ForecastKwhSensor):
-    """kWh that gates the 22 kW skip (today until prices-in and usable solar ends)."""
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SOLAR_GATING_KWH
-        self._attr_unique_id = SOLAR_GATING_KWH_UNIQUE_ID
-        self._attr_name = "Solar gating"
-
-    @property
-    def native_value(self):
-        return _kwh(self._controller.gating_solar_kwh)
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            "gating_day": self._controller.gating_solar_day,
-            "sunset": self._controller.sunset_iso,
-            "usable_end": self._controller.usable_solar_end_iso,
-            "tomorrow_ok": self._controller.tomorrow_prices_ok,
-        }
-
-
-class SolarGatingDaySensor(HubEntity, SensorEntity):
-    """``today`` until tomorrow's prices are in and usable solar today is gone."""
-
-    _attr_icon = "mdi:weather-sunset-down"
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SOLAR_GATING_DAY
-        self._attr_unique_id = SOLAR_GATING_DAY_UNIQUE_ID
-        self._attr_name = "Solar gating day"
-
-    @property
-    def native_value(self):
-        return self._controller.gating_solar_day
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            "sunset": self._controller.sunset_iso,
-            "usable_end": self._controller.usable_solar_end_iso,
-            "tomorrow_ok": self._controller.tomorrow_prices_ok,
-        }
-
-
-class SpotPriceHistorySensor(HubEntity, SensorEntity):
-    """Stored spot-price days the planner searches after midnight.
-
-    State is yesterday's average cached price. Slot lists stay out of the
-    recorder: three days of quarter-hours exceed its 16 KB attribute limit.
-    """
-
-    _attr_icon = "mdi:database-clock"
-    _attr_suggested_display_precision = 4
-    _unrecorded_attributes = frozenset(
-        {"raw_day_before_yesterday", "raw_yesterday", "raw_today"}
-    )
-
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_SPOT_PRICE_HISTORY
-        self._attr_unique_id = SPOT_PRICE_HISTORY_UNIQUE_ID
-        self._attr_name = "Spot price history"
-
-    @property
-    def native_value(self):
-        avg = self._controller.price_cache()["yesterday_avg"]
-        if avg is None:
-            return None
-        return round(float(avg), 6)
-
-    @property
-    def native_unit_of_measurement(self):
-        return self._controller.price_unit
-
-    @property
-    def extra_state_attributes(self):
-        view = self._controller.price_cache()
-        view.pop("yesterday_avg", None)
-        view["source_entity"] = self._controller.price_entity_id() or None
-        return view
 
 
 class AvailableSurplusSensor(HubEntity, SensorEntity):
     """Held Kotiakku leftover still free for surplus chargers (after keep take)."""
 
-    _listen_surplus_only = True
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_icon = "mdi:lightning-bolt-outline"
-    _attr_suggested_display_precision = 0
 
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_AVAILABLE_SURPLUS
-        self._attr_unique_id = AVAILABLE_SURPLUS_UNIQUE_ID
-        self._attr_name = "Available surplus"
+    def __init__(self, hub):
+        super().__init__(hub, "sensor", "available_surplus", "Available surplus")
 
     @property
     def native_value(self):
-        return self._controller.available_surplus_w
+        return self.snapshot and self.snapshot.available_w
 
     @property
     def extra_state_attributes(self):
-        return self._controller.available_surplus_attrs()
+        sample = self.snapshot and self.snapshot.sample
+        if not sample:
+            return {"usable": False}
+        return {
+            "solar_w": sample.solar_w,
+            "house_w": sample.house_w,
+            "ev_w": sample.ev_w,
+            "leftover_w": sample.leftover_w,
+            "keep_take_w": sample.keep_take_w,
+            "sampled_at": _iso(sample.at),
+            "usable": self.snapshot.usable,
+        }
+
+
+class SpotPriceHistorySensor(HubEntity, SensorEntity):
+    """Cached spot days the planner searches after midnight. State is yesterday's average."""
+
+    _attr_icon = "mdi:database-clock"
+    _attr_suggested_display_precision = 4
+    _unrecorded_attributes = frozenset({"raw_day_before_yesterday", "raw_yesterday", "raw_today"})
+
+    def __init__(self, hub):
+        super().__init__(hub, "sensor", "spot_price_history", "Spot price history")
+
+    @property
+    def native_value(self):
+        return self.coordinator.price_history().get("yesterday_avg")
+
+    @property
+    def extra_state_attributes(self):
+        view = self.coordinator.price_history()
+        view.pop("yesterday_avg", None)
+        view["source_entity"] = self.coordinator.entity(CONF_PRICE_ENTITY) or None
+        return view
+
+
+class RoleSensor(HubEntity, SensorEntity):
+    """What this charger is doing: full, keep, surplus or off."""
+
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, hub, serial):
+        super().__init__(hub, "sensor", "role", "role", serial)
+
+    def _decision(self):
+        decision = self.snapshot and self.snapshot.decision
+        return decision.chargers.get(self.serial) if decision else None
+
+    @property
+    def native_value(self):
+        d = self._decision()
+        return d.role if d else None
+
+    @property
+    def extra_state_attributes(self):
+        d = self._decision()
+        live = self.coordinator.goe.live.get(self.serial, {})
+        command = None
+        if d:
+            command = {"frc": 2, "psm": d.command.psm, "amp": d.command.amp, "lot": d.command.lot} if d.command.on else {"frc": 1}
+        return {
+            "command": command,
+            "car": live.get("car"),
+            "nrg_w": live.get("nrg"),
+            "share_w": d and d.share_w,
+            "low_hold_until": _iso(d and d.low_hold_until),
+            "phase_hold_until": _iso(d and d.phase_hold_until),
+            "keep_cut": self.coordinator.memory.of(self.serial).cut,
+        }

@@ -4,83 +4,55 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
-from .const import (
-    DOMAIN,
-    EID_WINDOW_ACTIVE,
-    WINDOW_ACTIVE_UNIQUE_ID,
-    migrate_group_lot_entities,
-    migrate_max_1phase_amp_entities,
-    migrate_window_entities,
-)
-from .device import HubEntity
+from .entity import HubEntity
+
+HUB_KEYS = ("window_active", "solar_enough")
+CHARGER_KEYS = ()
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    registry = er.async_get(hass)
-    migrate_window_entities(registry)
-    migrate_group_lot_entities(registry)
-    migrate_max_1phase_amp_entities(registry)
-    controller = hass.data[DOMAIN][entry.entry_id]
-    entities = [WindowActiveBinary(controller), EnoughSolarBinary(controller)]
-    entities.extend(ChargerBinary(controller, serial) for serial in controller.chargers)
-    entities.append(AnyChargerBinary(controller))
-    async_add_entities(entities)
+    hub = entry.runtime_data
+    async_add_entities([WindowActive(hub), SolarEnough(hub)])
 
 
-class _Base(HubEntity, BinarySensorEntity):
+class WindowActive(HubEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_icon = "mdi:ev-station"
 
-
-class WindowActiveBinary(_Base):
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = EID_WINDOW_ACTIVE
-        self._attr_unique_id = WINDOW_ACTIVE_UNIQUE_ID
-        self._attr_name = "Window active"
+    def __init__(self, hub):
+        super().__init__(hub, "binary_sensor", "window_active", "Window active")
 
     @property
     def is_on(self):
-        return self._controller.window_active()
+        plan = self.snapshot and self.snapshot.plan
+        return plan.in_window(dt_util.now()) if plan else None
 
 
-class EnoughSolarBinary(_Base):
-    _attr_device_class = None
+class SolarEnough(HubEntity, BinarySensorEntity):
+    """SolarPriority skips 22 kW while the gating day's forecast reaches Enough solar."""
+
     _attr_icon = "mdi:solar-power"
 
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = "binary_sensor.kotiakku_goe_direct_solar_enough"
-        self._attr_unique_id = "kotiakku_goe_direct_solar_enough"
-        self._attr_name = "Enough solar"
+    def __init__(self, hub):
+        super().__init__(hub, "binary_sensor", "solar_enough", "Enough solar")
 
     @property
     def is_on(self):
-        return self._controller.enough_solar
-
-
-class ChargerBinary(_Base):
-    def __init__(self, controller, serial):
-        super().__init__(controller)
-        self._serial = serial
-        self.entity_id = f"binary_sensor.kotiakku_goe_direct_{serial}_full_power"
-        self._attr_unique_id = f"kotiakku_goe_direct_{serial}_full_power"
-        self._attr_name = f"{serial} full power"
+        plan = self.snapshot and self.snapshot.plan
+        return plan.enough if plan else None
 
     @property
-    def is_on(self):
-        return self._controller.charger_full_power(self._serial)
-
-
-class AnyChargerBinary(_Base):
-    def __init__(self, controller):
-        super().__init__(controller)
-        self.entity_id = "binary_sensor.kotiakku_goe_direct_any_full_power"
-        self._attr_unique_id = "kotiakku_goe_direct_any_full_power"
-        self._attr_name = "Any full power"
-
-    @property
-    def is_on(self):
-        return self._controller.any_charger_full_power()
+    def extra_state_attributes(self):
+        plan = self.snapshot and self.snapshot.plan
+        if not plan:
+            return {}
+        return {
+            "gating_day": plan.gating_day,
+            "gating_kwh": plan.gating_kwh,
+            "today_kwh": plan.today_kwh,
+            "tomorrow_kwh": plan.tomorrow_kwh,
+            "usable_end": None if plan.usable_end is None else plan.usable_end.isoformat(),
+            "tomorrow_ok": plan.tomorrow_ok,
+        }
