@@ -75,7 +75,8 @@ Each charger has one role, first match wins:
 - Leftover is `|solar| − |house| + |EV|`, where EV is the Controller mean (charger `nrg` if the Controller is unknown). EV is added back only when house is at least `EV − max(1000, EV/5)`, so a house CT that misses the charger does not invent surplus. Keep chargers' `nrg` is then subtracted.
 - The leftover is sampled only when the Kotiakku SoC, solar or house value changes. Controller and `nrg` ticks do not move `amp`: following them made Tesla bounce between pilots. Kotiakku data older than 20 minutes (`last_reported`) or unusable counts as unusable.
 - A charger starts when data is usable, its share is at least the start leftover (2000 W), and SoC is at least 92 % (or another charger is already on surplus). It keeps running at 1380 W (6 A) or more.
-- Chargers are served in priority order. Each gets everything still unallocated; a charger that is actually taking (`nrg` ≥ 100 W) then consumes its `nrg` from the pool. A higher-priority car that is not taking stays armed, so it can start; a lower car already taking keeps its share until the higher car starts. Idle Complete (car Complete, `nrg` < 400 W) is skipped unless keep was cut.
+- Chargers are served in priority order. Each gets everything still unallocated, then reserves what it was just offered, so the next charger only gets what the higher one cannot use. During a 1-to-3 phase hold it reserves what it will take after the switch. A charger that stays clearly below an offer that has been unchanged for 90 s is car-limited and reserves only its `nrg`. A charger that was turned on but is not taking (`nrg` < 100 W) reserves its offer for 120 s, then yields. Idle Complete (car Complete, `nrg` < 400 W) is skipped unless keep was cut.
+- While a higher-priority charger is on, a lower one that is not already taking starts only when two Kotiakku reports in a row leave it at least the start leftover. One report where the lagging house value misses a fresh EV ramp cannot start it.
 - **Low hold**: a running charger whose share drops below 1380 W, SoC below 90 %, or unusable data keeps 6 A on its current phase for the hold minutes and then stops. Only a share at the start leftover cancels the hold.
 - **Phase**: 3-phase stays while the share holds 6 A on three phases; 1-phase stays until 3-phase would deliver more watts (1-phase amp capped at max 1-phase amp). A first start uses the preferred start phase when both fit. Any phase change waits the hold minutes in both directions (CCS cannot switch phases in-session), while `amp` keeps tracking the share. A charger coming from 22 kW or keep is not a first start.
 - `lot` is always the group fuse cap; surplus energy is each charger's `amp`. A leftover-sized `lot` lets go-e load balancing clip the car.
@@ -101,7 +102,8 @@ Each charger has one role, first match wins:
 | Running 1-phase, leftover rises to 8 kW | `psm=1`, `amp=32` for 15 min, then `psm=2`, `amp=11` |
 | Running 3-phase, leftover drops to 3 kW | `psm=2`, `amp=6` for 15 min, then `psm=1`, `amp=13` |
 | Leftover collapses below 1380 W | 6 A for 15 min, then `frc=1` |
-| High priority taking 10 kW of 12 kW | Second charger gets 2 kW (`psm=1`, `amp=8`) |
+| High priority car-limited at 10 kW of 12 kW (offered 17 A 3-phase) | Second charger gets 2 kW (`psm=1`, `amp=8`) on the second report |
+| High priority taking its whole offer, leftover rises 2.5 kW | High's `amp` rises; second stays off |
 | Cheap window ends at 3-phase, leftover 6 kW | Surplus continues on 3-phase (`amp=8`), no phase switch |
 | SolarPriority window, enough solar | No 22 kW; surplus may run |
 | Car Complete, `nrg` 0 | Not offered leftover; keep after 60 s |

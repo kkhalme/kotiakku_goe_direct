@@ -11,6 +11,8 @@ MIN_W = MIN_AMP * VOLTS
 TAKE_MIN_W = 100
 IDLE_COMPLETE_W = 400
 KEEP_PROBE_S = 60
+SETTLE_S = 90
+START_GRACE_S = 120
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_SOLAR_AND_GRID = "SolarAndGrid"
@@ -165,6 +167,10 @@ class ChargerMemory:
     cut: bool = False
     last_plugged: bool | None = None
     keep_was_on: bool = False
+    offer_w: int | None = None
+    offer_since: datetime | None = None
+    on_since: datetime | None = None
+    start_armed_at: datetime | None = None
 
 
 @dataclass
@@ -183,6 +189,9 @@ class ChargerDecision:
     share_w: int | None = None
     low_hold_until: datetime | None = None
     phase_hold_until: datetime | None = None
+    reserve_w: int | None = None
+    limited: bool = False
+    start_pending: bool = False
 
 
 @dataclass

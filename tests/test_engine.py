@@ -183,20 +183,65 @@ def test_held_sample_does_not_follow_nrg():
     assert sim.cmd() == (1, 21)
 
 
-def test_second_car_gets_true_remainder():
+def test_rising_leftover_goes_to_the_higher_car_first():
+    sim = Sim("A", "B").car("A", CAR_CHARGING, 0).step(3000)
+    assert sim.cmd("A") == (1, 13) and sim.cmd("B") == "off"
+    sim.car("A", nrg=13 * 230).step(3000, dt=300)
+    sim.step(5500, dt=300)
+    assert sim.cmd("A") == (1, 23) and sim.cmd("B") == "off"
+
+
+def test_fresh_start_reserves_the_offer_during_grace():
+    sim = Sim("A", "B").step(6000)
+    assert sim.cmd("A") == (1, 26) and sim.cmd("B") == "off"
+    assert sim.decision.chargers["A"].reserve_w == 26 * 230
+    assert sim.decision.next_wakeup == T0 + timedelta(seconds=120)
+    sim.step(dt=120)
+    assert sim.cmd("B") == "off" and sim.decision.chargers["B"].start_pending
+    assert sim.step(6000, dt=300).cmd("B") == (1, 26)
+
+
+def test_car_limited_higher_car_releases_the_rest_after_two_reports():
+    sim = Sim("A", "B").car("A", CAR_CHARGING, 0).step(12000)
+    assert sim.cmd("A") == (2, 17) and sim.cmd("B") == "off"
+    sim.car("A", nrg=3680).step(12000, dt=300)
+    assert sim.decision.chargers["A"].limited and sim.decision.chargers["A"].reserve_w == 3680
+    assert sim.cmd("B") == "off" and sim.decision.chargers["B"].start_pending
+    assert sim.step(dt=5).cmd("B") == "off"
+    sim.step(5000, dt=300)
+    assert sim.cmd("B") == "off" and not sim.decision.chargers["B"].start_pending
+    sim.step(12000, dt=300)
+    assert sim.cmd("B") == "off"
+    assert sim.step(12000, dt=300).cmd("B") == (2, 12)
+
+
+def test_phase_hold_reserves_the_wanted_phase():
+    sim = Sim("A", "B").car("A", CAR_CHARGING, 0).step(7400)
+    assert sim.cmd("A") == (1, 32)
+    sim.car("A", nrg=7360).step(10000, dt=300)
+    assert sim.cmd("A") == (1, 32) and sim.cmd("B") == "off"
+    assert sim.decision.chargers["A"].phase_hold_until is not None
+    assert sim.decision.chargers["A"].reserve_w == 14 * 690
+
+
+def test_second_car_gets_the_car_limited_remainder():
     sim = Sim("A", "B").car("A", CAR_CHARGING, 10000)
     sim.settings.policy["B"] = POLICY_FORCE_OFF
     sim.step(12000)
     assert sim.cmd("A") == (2, 17)
     sim.settings.policy["B"] = POLICY_SOLAR_PRIORITY
-    sim.step(dt=1)
-    assert sim.cmd("A") == (2, 17) and sim.cmd("B") == (1, 8)
+    assert sim.step(dt=1).cmd("B") == "off"
+    sim.step(12000, dt=300)
+    assert sim.cmd("B") == "off"
+    assert sim.step(12000, dt=300).cmd("B") == (1, 8)
 
 
-def test_idle_higher_priority_stays_armed_until_it_takes():
+def test_idle_higher_priority_holds_its_offer_for_the_grace_then_yields():
     sim = Sim("A", "B").car("B", CAR_CHARGING, 7000).step(8000)
+    assert sim.cmd("A") == (2, 11) and sim.cmd("B") == "off"
+    sim.step(dt=120)
     assert sim.cmd("A") == (2, 11) and sim.cmd("B") == (2, 11)
-    sim.car("A", CAR_CHARGING, 8000).step(dt=5)
+    sim.car("A", CAR_CHARGING, 7590).step(dt=5)
     assert sim.cmd("A") == (2, 11) and sim.cmd("B") == (2, 6)
     assert sim.step(dt=HOLD).cmd("B") == "off"
 
@@ -211,12 +256,13 @@ def test_high_taking_everything_does_not_start_second():
 
 def test_expired_low_hold_needs_start_leftover_to_restart():
     sim = Sim("A", "B").car("A", CAR_CHARGING, 6000).car("B", CAR_CHARGING, 1500).step(8000)
-    sim.step(6500, dt=1)
-    assert sim.cmd("B") == (1, 6)
-    sim.step(dt=HOLD)
     assert sim.cmd("B") == "off"
+    assert sim.step(8000, dt=300).cmd("B") == (1, 8)
+    assert sim.step(6500, dt=1).cmd("B") == (1, 6)
+    assert sim.step(dt=HOLD).cmd("B") == "off"
     assert sim.step(7500, dt=60).cmd("B") == "off"
-    assert sim.step(8000, dt=60).cmd("B") == (1, 8)
+    assert sim.step(8000, dt=60).cmd("B") == "off"
+    assert sim.step(8000, dt=300).cmd("B") == (1, 8)
 
 
 def test_window_end_keeps_three_phase_for_surplus():
