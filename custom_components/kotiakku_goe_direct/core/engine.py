@@ -21,6 +21,8 @@ from .model import (
     ROLE_KEEP,
     ROLE_OFF,
     ROLE_SURPLUS,
+    SETTLE_S,
+    START_GRACE_S,
     SURPLUS_POLICIES,
     VOLTS,
     Charger,
@@ -112,6 +114,17 @@ def _elapsed(since: datetime | None, now: datetime) -> float:
     return 0.0 if since is None else (now - since).total_seconds()
 
 
+def _command_w(command: Command) -> int:
+    return int(command.amp) * VOLTS * (3 if command.psm == 2 else 1) if command.on else 0
+
+
+def _car_limited(c: Charger, m: ChargerMemory, now: datetime) -> bool:
+    """The car stayed clearly below an offer that has been unchanged for SETTLE_S."""
+    if not c.taking or m.offer_w is None or _elapsed(m.offer_since, now) < SETTLE_S:
+        return False
+    return c.nrg_w + max(500, m.offer_w // 10) < m.offer_w
+
+
 def _unplugged(serial: str, m: ChargerMemory, until: dict, keep: dict, switches: dict) -> None:
     for name, values in (("until_unplug", until), ("keep", keep)):
         if values[serial]:
@@ -146,7 +159,7 @@ def _probe_keep(settings, c: Charger, m: ChargerMemory, now, keep: dict, switche
         _LOGGER.info("%s after-charge-complete keep on", c.serial)
 
 
-def _phase(settings: Settings, m: ChargerMemory, share: int, now: datetime, one_cap: int) -> int:
+def _phase(settings: Settings, m: ChargerMemory, share: int, now: datetime, one_cap: int) -> tuple[int, int]:
     """Wanted psm, held for hold_minutes on a 1↔3 change.
 
     CCS cannot switch phases in-session: go-e pauses charging and Tesla raises
@@ -156,15 +169,15 @@ def _phase(settings: Settings, m: ChargerMemory, share: int, now: datetime, one_
     want = wanted_psm(share, m.psm, preferred, int(settings.max_a), one_cap)
     if m.psm not in (1, 2) or want == m.psm:
         m.phase_since = None
-        return want
+        return want, want
     if m.phase_since is None:
         m.phase_since = now
         _LOGGER.info("holding psm %s (wants %s) for %s min", m.psm, want, settings.hold_minutes)
     if _elapsed(m.phase_since, now) >= settings.hold_s:
         m.phase_since = None
         _LOGGER.info("psm hold expired, switching to psm %s", want)
-        return want
-    return m.psm
+        return want, want
+    return m.psm, want
 
 
 def _take_sample(house: HouseReading, chargers, roles, now) -> Sample:
@@ -215,14 +228,15 @@ def decide(
     one_cap = int(min(max(MIN_AMP, min(32, settings.max_1phase_amp)), settings.max_a))
     start_w, hold_s = settings.surplus_start_w, settings.hold_s
     decisions: dict[str, ChargerDecision] = {}
-    remaining = budget
+    remaining, higher_on = budget, False
     for c in order:
         m, r = memory.of(c.serial), roles[c.serial]
         if r != ROLE_SURPLUS or (c.idle_complete and not m.cut):
             m.low_since = m.phase_since = None
+            m.on_since = m.offer_w = m.offer_since = m.start_armed_at = None
             decisions[c.serial] = ChargerDecision(r, _fixed_command(settings, r))
             continue
-        running, share, hold = m.surplus_on, None, False
+        running, share, hold, pending, target_w = m.surplus_on, None, False, False, 0
         if running and m.low_since is not None:
             if remaining >= start_w:
                 m.low_since = None
@@ -236,26 +250,57 @@ def decide(
         elif running and remaining < MIN_W:
             m.low_since, hold = now, True
             _LOGGER.info("%s low hold: 6 A for %s min (share %s W)", c.serial, settings.hold_minutes, remaining)
-        elif running or (can_open and remaining >= start_w):
+        elif running:
             share = remaining
+        elif can_open and remaining >= start_w:
+            if not higher_on or c.taking or (m.start_armed_at is not None and sample.at > m.start_armed_at):
+                share = remaining
+            else:
+                m.start_armed_at = m.start_armed_at or sample.at
+                pending = True
+        if not pending:
+            m.start_armed_at = None
+        caps = (int(settings.max_a), one_cap, int(settings.group_lot_a))
         if hold:
             m.phase_since = None
             command = _on(settings, m.psm or 1, MIN_AMP)
+            target_w = _command_w(command)
         elif share is not None:
-            psm = _phase(settings, m, int(share), now, one_cap)
-            command = _on(settings, psm, amp_for(int(share), psm, int(settings.max_a), one_cap, int(settings.group_lot_a)))
+            psm, want = _phase(settings, m, int(share), now, one_cap)
+            command = _on(settings, psm, amp_for(int(share), psm, *caps))
+            target_w = max(_command_w(command), _command_w(_on(settings, want, amp_for(int(share), want, *caps))))
         else:
             m.phase_since = None
             command = OFF
+        if command.on and not running:
+            m.on_since = now
+        elif not command.on:
+            m.on_since = None
+        limited = _car_limited(c, m, now)
+        if not command.on:
+            reserve = c.nrg_w if c.taking else 0
+        elif c.taking:
+            reserve = min(target_w, c.nrg_w) if limited else target_w
+        else:
+            reserve = target_w if _elapsed(m.on_since, now) < START_GRACE_S else 0
+        offered = _command_w(command)
+        if not command.on:
+            m.offer_w = m.offer_since = None
+        elif offered != m.offer_w:
+            m.offer_w, m.offer_since = offered, now
         decisions[c.serial] = ChargerDecision(
             r,
             command,
             share_w=None if share is None else int(share),
             low_hold_until=None if m.low_since is None else m.low_since + timedelta(seconds=hold_s),
             phase_hold_until=None if m.phase_since is None else m.phase_since + timedelta(seconds=hold_s),
+            reserve_w=int(reserve),
+            limited=limited,
+            start_pending=pending,
         )
-        if c.taking and remaining > 0:
-            remaining -= min(c.nrg_w, remaining)
+        if remaining > 0:
+            remaining -= min(reserve, remaining)
+        higher_on = higher_on or command.on
 
     for c in chargers:
         m, d = memory.of(c.serial), decisions[c.serial]
@@ -282,5 +327,7 @@ def _next_wakeup(memory: Memory, chargers, plan: Plan, now: datetime, hold_s: fl
         times += [t + hold for t in (m.low_since, m.phase_since) if t is not None]
         if m.idle_since is not None:
             times.append(m.idle_since + timedelta(seconds=KEEP_PROBE_S))
+        if m.on_since is not None:
+            times.append(m.on_since + timedelta(seconds=START_GRACE_S))
     times += [t for t in (plan.next_boundary(now), plan.usable_end) if t is not None]
     return min(t for t in times if t > now)

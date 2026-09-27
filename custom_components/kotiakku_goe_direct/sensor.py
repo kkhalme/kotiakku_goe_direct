@@ -143,5 +143,8 @@ class RoleSensor(HubEntity, SensorEntity):
             "share_w": d and d.share_w,
             "low_hold_until": _iso(d and d.low_hold_until),
             "phase_hold_until": _iso(d and d.phase_hold_until),
+            "reserve_w": d and d.reserve_w,
+            "car_limited": d and d.limited,
+            "start_pending": d and d.start_pending,
             "keep_cut": self.coordinator.memory.of(self.serial).cut,
         }
