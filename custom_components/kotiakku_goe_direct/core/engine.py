@@ -227,6 +227,7 @@ def decide(
 
     one_cap = int(min(max(MIN_AMP, min(32, settings.max_1phase_amp)), settings.max_a))
     start_w, hold_s = settings.surplus_start_w, settings.hold_s
+    priced_out = plan.priced_out_at(now) is not None
     decisions: dict[str, ChargerDecision] = {}
     remaining, higher_on = budget, False
     for c in order:
@@ -237,7 +238,11 @@ def decide(
             decisions[c.serial] = ChargerDecision(r, _fixed_command(settings, r))
             continue
         running, share, hold, pending, target_w = m.surplus_on, None, False, False, 0
-        if running and m.low_since is not None:
+        if priced_out:
+            if running:
+                _LOGGER.info("%s surplus off: spot above surplus charging price ceiling", c.serial)
+            m.low_since = None
+        elif running and m.low_since is not None:
             if remaining >= start_w:
                 m.low_since = None
                 share = remaining
@@ -297,6 +302,7 @@ def decide(
             reserve_w=int(reserve),
             limited=limited,
             start_pending=pending,
+            priced_out=priced_out,
         )
         if remaining > 0:
             remaining -= min(reserve, remaining)

@@ -40,14 +40,15 @@ Per charger (`<serial>`):
 - `number.kotiakku_goe_direct_priority_<serial>`: leftover order, 1 is highest; ties go to the earlier charger slot.
 - `switch.kotiakku_goe_direct_until_unplug_<serial>`: Force On Until Unplug, 22 kW until that car unplugs.
 - `switch.kotiakku_goe_direct_after_charge_complete_keep_enable_<serial>` (default on) and `switch.kotiakku_goe_direct_after_charge_complete_keep_<serial>`: see *Keep* below.
-- `sensor.kotiakku_goe_direct_role_<serial>`: `full`, `keep`, `surplus` or `off`, with the command, car, nrg, share and hold deadlines as attributes.
+- `sensor.kotiakku_goe_direct_role_<serial>`: `full`, `keep`, `surplus` or `off`, with the command, car, nrg, share, hold deadlines and `priced_out` as attributes.
 
 Shared:
 
 - `sensor.kotiakku_goe_direct_window`: first planned window start; `windows`, `blocked`, `reason`, `tomorrow_ok`, `source_entity` attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on inside a window.
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
 - `sensor.kotiakku_goe_direct_available_surplus`: held leftover still free for surplus chargers (W).
-- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
+- `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
+- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
 
 ## Behaviour
@@ -79,6 +80,7 @@ Each charger has one role, first match wins:
 - While a higher-priority charger is on, a lower one that is not already taking starts only when two Kotiakku reports in a row leave it at least the start leftover. One report where the lagging house value misses a fresh EV ramp cannot start it.
 - **Low hold**: a running charger whose share drops below 1380 W, SoC below 90 %, or unusable data keeps 6 A on its current phase for the hold minutes and then stops. Only a share at the start leftover cancels the hold.
 - **Phase**: 3-phase stays while the share holds 6 A on three phases; 1-phase stays until 3-phase would deliver more watts (1-phase amp capped at max 1-phase amp). A first start uses the preferred start phase when both fit. Any phase change waits the hold minutes in both directions (CCS cannot switch phases in-session), while `amp` keeps tracking the share. A charger coming from 22 kW or keep is not a first start.
+- **Surplus charging price ceiling**: while the spot slot (15 min, native cadence, no averaging) is above the ceiling, surplus chargers are off (`frc=1`) so the house exports the leftover. They stop at the slot edge without the low hold and start again at the first slot at or under the ceiling under the normal start rules. A slot without a price never stops surplus. Full and keep are unaffected. The stop cuts keep like any HA stop, so a go-e Complete after it does not auto-arm keep. Set the ceiling to 5 to disable.
 - `lot` is always the group fuse cap; surplus energy is each charger's `amp`. A leftover-sized `lot` lets go-e load balancing clip the car.
 
 ### Keep (after charge complete)
@@ -107,6 +109,7 @@ Each charger has one role, first match wins:
 | Cheap window ends at 3-phase, leftover 6 kW | Surplus continues on 3-phase (`amp=8`), no phase switch |
 | SolarPriority window, enough solar | No 22 kW; surplus may run |
 | Car Complete, `nrg` 0 | Not offered leftover; keep after 60 s |
+| Surplus running, next slot's spot 0.30 (ceiling 0.25) | `frc=1` at the slot edge, no 6 A hold; back on at the first slot at or under 0.25 |
 
 ## Tests
 

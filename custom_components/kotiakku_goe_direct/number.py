@@ -35,6 +35,7 @@ KNOBS = (
     Knob("soc_on_pct", "Surplus SoC on", 0, 100, 1, PERCENTAGE, "mdi:battery-charging-80"),
     Knob("soc_hyst_pct", "Surplus SoC hysteresis", 0, 20, 1, PERCENTAGE, "mdi:battery-minus"),
     Knob("surplus_start_w", "Surplus start leftover", 0, 50000, 50, UnitOfPower.WATT, "mdi:lightning-bolt"),
+    Knob("surplus_charging_price_ceiling", "Surplus charging price ceiling", -1, 5, 0.001, None, "mdi:currency-eur"),
     Knob("hold_minutes", "Hold", 1, 120, 1, UnitOfTime.MINUTES, "mdi:timer-outline"),
     Knob("max_a", "Per-charger amp cap", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
     Knob("max_1phase_amp", "Surplus max 1-phase amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),

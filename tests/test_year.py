@@ -51,6 +51,10 @@ def summer_price(t, day):
     return -0.01 - 0.015 * (day % 3) if 10 <= h < 16 else 0.13 if 17 <= h < 21 else 0.11
 
 
+def summer_spike_price(t, day):
+    return 0.31 if 18 <= t.hour < 19 else summer_price(t, day)
+
+
 def shoulder_price(t, day):
     h = t.hour + t.minute / 60
     if 1 <= h < 5:
@@ -68,6 +72,7 @@ SPECS = {
     "february": (datetime(2026, 2, 10, tzinfo=HEL), -8, 0.45, winter_price),
     "april-mixed": (datetime(2026, 4, 15, tzinfo=HEL), 5, april_clouds, shoulder_price),
     "midsummer-clear": (datetime(2026, 6, 21, tzinfo=HEL), 17, 1.0, summer_price),
+    "midsummer-spike": (datetime(2026, 6, 21, tzinfo=HEL), 17, 1.0, summer_spike_price),
     "midsummer-overcast": (datetime(2026, 6, 21, tzinfo=HEL), 14, 0.18, summer_price),
     "october": (datetime(2026, 10, 10, tzinfo=HEL), 6, 0.35, shoulder_price),
     "dst-spring": (datetime(2026, 3, 28, tzinfo=HEL), 1, 0.5, shoulder_price),
@@ -214,6 +219,15 @@ def test_midsummer_clear():
     assert any(t["cmd"]["A"].amp >= 30 for t in on)
     assert hours(ticks, full) == 0
     assert all(t["plan"].enough for t in ticks)
+
+
+def test_midsummer_evening_spike_pauses_surplus_for_exactly_that_hour():
+    ticks, _ = simulate("midsummer-spike")
+    spike = [t for t in ticks if t["now"].hour == 18]
+    assert len(spike) == 8 and not any(t["surplus_on"] for t in spike)
+    assert all(t["leftover"] > 2000 for t in spike)
+    around = [t for t in ticks if (t["now"].hour, t["now"].minute) in ((17, 45), (19, 0))]
+    assert len(around) == 4 and all(t["surplus_on"] for t in around)
 
 
 def test_midsummer_overcast_never_charges_full_in_a_sunny_hour():

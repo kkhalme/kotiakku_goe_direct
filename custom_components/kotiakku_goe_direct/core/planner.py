@@ -378,6 +378,22 @@ def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eu
     return windows, "planned"
 
 
+def priced_out_spans(slots: list[Slot], ceiling: float) -> list[Slot]:
+    """(start, end, avg) runs of touching slots priced above ``ceiling``.
+
+    A missing slot splits a run, so an unknown price never stops surplus.
+    """
+    runs: list[list[Slot]] = []
+    for slot in sorted(slots):
+        if slot[2] <= ceiling + PRICE_EPS:
+            continue
+        if runs and slot[0] - runs[-1][-1][1] <= GAP_S:
+            runs[-1].append(slot)
+        else:
+            runs.append([slot])
+    return [(run[0][0], run[-1][1], _avg(run, 0, len(run) - 1)) for run in runs]
+
+
 def plan(
     attrs: Mapping | None,
     now: datetime,
@@ -414,6 +430,7 @@ def plan(
             if carried and not windows:
                 reason = "planned"
             windows = list(windows) + carried
+    priced_out = priced_out_spans(slots, float(settings.surplus_charging_price_ceiling))
     live = price_slots(attrs, now)
     tomorrow_ok = tomorrow_prices_ok(attrs, live, now)
     epoch_ts = None if attrs is None else epoch_day(slots, now, offset)
@@ -440,4 +457,5 @@ def plan(
         epoch_start=None if epoch_ts is None else dt(epoch_ts),
         epoch_seen=None if epoch_seen is None else dt(epoch_seen),
         carried=len(carried),
+        surplus_priced_out=[Window(dt(s), dt(e), avg) for s, e, avg in priced_out],
     )

@@ -8,13 +8,17 @@ from homeassistant.util import dt as dt_util
 
 from .entity import HubEntity
 
-HUB_KEYS = ("window_active", "solar_enough")
+HUB_KEYS = ("window_active", "solar_enough", "surplus_priced_out")
 CHARGER_KEYS = ()
+
+
+def _iso(value):
+    return None if value is None else value.isoformat()
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     hub = entry.runtime_data
-    async_add_entities([WindowActive(hub), SolarEnough(hub)])
+    async_add_entities([WindowActive(hub), SolarEnough(hub), SurplusPricedOut(hub)])
 
 
 class WindowActive(HubEntity, BinarySensorEntity):
@@ -53,6 +57,39 @@ class SolarEnough(HubEntity, BinarySensorEntity):
             "gating_kwh": plan.gating_kwh,
             "today_kwh": plan.today_kwh,
             "tomorrow_kwh": plan.tomorrow_kwh,
-            "usable_end": None if plan.usable_end is None else plan.usable_end.isoformat(),
+            "usable_end": _iso(plan.usable_end),
             "tomorrow_ok": plan.tomorrow_ok,
+        }
+
+
+class SurplusPricedOut(HubEntity, BinarySensorEntity):
+    """On while the spot slot is above the surplus charging price ceiling: surplus stays off."""
+
+    _attr_icon = "mdi:cash-lock"
+
+    def __init__(self, hub):
+        super().__init__(hub, "binary_sensor", "surplus_priced_out", "Surplus priced out")
+
+    @property
+    def is_on(self):
+        plan = self.snapshot and self.snapshot.plan
+        return plan.priced_out_at(dt_util.now()) is not None if plan else None
+
+    @property
+    def extra_state_attributes(self):
+        plan = self.snapshot and self.snapshot.plan
+        attrs = {"ceiling": self.coordinator.settings.surplus_charging_price_ceiling}
+        if not plan:
+            return attrs
+        now = dt_util.now()
+        current = plan.priced_out_at(now)
+        return {
+            **attrs,
+            "until": _iso(current and current.end),
+            "avg": current and current.avg,
+            "spans": [
+                {"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg}
+                for w in plan.surplus_priced_out
+                if w.end > now
+            ],
         }

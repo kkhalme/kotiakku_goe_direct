@@ -146,5 +146,6 @@ class RoleSensor(HubEntity, SensorEntity):
             "reserve_w": d and d.reserve_w,
             "car_limited": d and d.limited,
             "start_pending": d and d.start_pending,
+            "priced_out": d and d.priced_out,
             "keep_cut": self.coordinator.memory.of(self.serial).cut,
         }
