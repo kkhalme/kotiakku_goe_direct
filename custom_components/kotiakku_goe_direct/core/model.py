@@ -50,6 +50,7 @@ class Settings:
     soc_on_pct: float = 92
     soc_hyst_pct: float = 2
     surplus_start_w: float = 2000
+    surplus_charging_price_ceiling: float = 0.25
     hold_minutes: float = 15
     max_a: float = 32
     max_1phase_amp: float = 32
@@ -136,12 +137,17 @@ class Plan:
     epoch_start: datetime | None = None
     epoch_seen: datetime | None = None
     carried: int = 0
+    surplus_priced_out: list[Window] = field(default_factory=list)
 
     def in_window(self, now: datetime) -> bool:
         return any(w.start <= now < w.end for w in self.windows)
 
+    def priced_out_at(self, now: datetime) -> Window | None:
+        return next((w for w in self.surplus_priced_out if w.start <= now < w.end), None)
+
     def next_boundary(self, now: datetime) -> datetime | None:
-        edges = [t for w in self.windows for t in (w.start, w.end) if t > now]
+        spans = self.windows + self.surplus_priced_out
+        edges = [t for w in spans for t in (w.start, w.end) if t > now]
         return min(edges, default=None)
 
 
@@ -192,6 +198,7 @@ class ChargerDecision:
     reserve_w: int | None = None
     limited: bool = False
     start_pending: bool = False
+    priced_out: bool = False
 
 
 @dataclass

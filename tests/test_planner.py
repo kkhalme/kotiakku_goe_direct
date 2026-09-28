@@ -270,6 +270,38 @@ def test_non_list_price_attributes_are_ignored():
     assert run_plan({"today": 12.5}).reason == "no_slots"
 
 
+def test_priced_out_spans_merge_touching_slots_above_the_ceiling():
+    spans = planner.priced_out_spans(slots([0.2, 0.3, 0.4, 0.25, 0.3]), 0.25)
+    assert [(s, e) for s, e, _avg in spans] == [(BASE + SLOT, BASE + 3 * SLOT), (BASE + 4 * SLOT, BASE + 5 * SLOT)]
+    assert spans[0][2] == pytest.approx(0.35)
+    gapped = slots([0.3]) + slots([0.3], base=BASE + 2 * SLOT)
+    assert len(planner.priced_out_spans(gapped, 0.25)) == 2
+    assert planner.priced_out_spans(slots([0.3] * 4), 5) == []
+
+
+def test_plan_prices_out_surplus_per_slot():
+    prices = [0.1] * 48 + [0.3, 0.26, 0.25, 0.3] + [0.1] * 44
+    result = run_plan(attrs_for(BASE, prices))
+    at = lambda k: datetime.fromtimestamp(BASE + k * SLOT, UTC)
+    assert [(w.start, w.end) for w in result.surplus_priced_out] == [(at(48), at(50)), (at(51), at(52))]
+    assert result.priced_out_at(NOW).end == at(50)
+    assert result.priced_out_at(at(50)) is None
+    assert result.next_boundary(NOW) == at(50)
+    assert run_plan(attrs_for(BASE, prices), surplus_charging_price_ceiling=0.3).surplus_priced_out == []
+    assert run_plan(None).surplus_priced_out == []
+
+
+def test_priced_out_span_crosses_midnight_from_cached_yesterday():
+    _start, today = _day_attrs(date(2026, 3, 15), [0.1] * 95 + [0.4])
+    _next, tomorrow = _day_attrs(date(2026, 3, 16), [0.4] + [0.1] * 95)
+    evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
+    days = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), None)
+    after = run_plan({"raw_today": tomorrow}, now=datetime(2026, 3, 16, 0, 5, tzinfo=UTC), history=days)
+    span = after.priced_out_at(datetime(2026, 3, 16, 0, 5, tzinfo=UTC))
+    assert span.start == datetime(2026, 3, 15, 23, 45, tzinfo=UTC)
+    assert span.end == datetime(2026, 3, 16, 0, 15, tzinfo=UTC)
+
+
 def test_min_hours_clamped_and_swapped():
     result = run_plan(attrs_for(BASE, [0.04] * 32), window_min_h=5, window_max_h=2)
     assert round((result.windows[0].end - result.windows[0].start).total_seconds() / 3600, 2) == 2

@@ -9,6 +9,7 @@ from core.model import (
     CAR_WAITCAR,
     PHASE_3,
     POLICY_FORCE_OFF,
+    POLICY_FORCE_ON,
     POLICY_SOLAR_AND_GRID,
     POLICY_SOLAR_PRIORITY,
     ROLE_FULL,
@@ -289,6 +290,39 @@ def test_enough_solar_skips_solarpriority_window_only():
     sim.plan = make_plan(window, enough=True)
     sim.step(0)
     assert sim.role("A") == ROLE_SURPLUS and sim.role("B") == ROLE_FULL
+
+
+def priced_out(start_min, end_min, avg=0.3):
+    return Window(T0 + timedelta(minutes=start_min), T0 + timedelta(minutes=end_min), avg)
+
+
+def test_price_above_surplus_ceiling_stops_at_once_and_restarts_at_the_slot_edge():
+    sim = Sim().car("A", CAR_CHARGING, 5000)
+    sim.plan.surplus_priced_out = [priced_out(15, 30)]
+    assert sim.step(5000).cmd() == (1, 21)
+    sim.step(dt=300)
+    assert sim.decision.next_wakeup == T0 + timedelta(minutes=15)
+    sim.step(dt=600)
+    d = sim.decision.chargers["A"]
+    assert sim.role() == ROLE_SURPLUS and sim.cmd() == "off"
+    assert d.priced_out and d.low_hold_until is None and sim.memory.of("A").cut
+    assert sim.decision.next_wakeup == T0 + timedelta(minutes=30)
+    sim.car("A", CAR_COMPLETE, 0).step(8000, dt=60).step(dt=120)
+    assert sim.cmd() == "off" and not sim.settings.keep.get("A")
+    sim.step(dt=12 * 60)
+    assert sim.cmd() == (2, 11) and not sim.decision.chargers["A"].priced_out
+
+
+def test_priced_out_blocks_surplus_start_but_not_full_or_keep():
+    sim = Sim("A", "B", "C").car("C", CAR_COMPLETE, 0)
+    sim.settings.policy["B"] = POLICY_FORCE_ON
+    sim.settings.keep["C"] = True
+    sim.plan.surplus_priced_out = [priced_out(-15, 15)]
+    sim.step(8000)
+    assert sim.cmd("A") == "off" and sim.decision.chargers["A"].priced_out
+    assert sim.cmd("B") == (2, 32)
+    assert sim.role("C") == ROLE_KEEP and sim.cmd("C") == (2, 6)
+    assert sim.step(dt=15 * 60).cmd("A") == (2, 11)
 
 
 def test_keep_take_uses_the_leftover_pool():
