@@ -111,10 +111,19 @@ def test_grow_sides_and_caps():
 
 
 def test_hourly_and_half_hour_native_steps():
-    hourly = pick([0.1] * 3 + [0.02] * 2 + [0.05] * 3, step=3600)[0]
-    assert hourly[0] == BASE + 3 * 3600 and hours(hourly) == 5
+    walled = pick([0.1] * 3 + [0.02] * 2 + [0.05] * 3, step=3600)[0]
+    assert walled[0] == BASE + 3 * 3600 and hours(walled) == 2
+    hourly = pick([0.1] * 2 + [0.03] + [0.02] * 2 + [0.03] * 2, step=3600)[0]
+    assert hourly[0] == BASE + 2 * 3600 and hours(hourly) == 5 and (hourly[1] - hourly[0]) % 3600 == 0
     half = pick([0.04] * 4 + [0.05] * 6, max_h=4, pct=50, eur=1, step=1800)[0]
     assert hours(half) == 4 and (half[1] - half[0]) % 1800 == 0
+
+
+def test_flex_ceiling_stops_the_direction():
+    prices = [0.10] * 4 + [0.03] * 4 + [0.02] * 8 + [0.05] + [0.01]
+    window = pick(prices)[0]
+    assert window[0] == BASE + 4 * SLOT
+    assert window[1] == BASE + 16 * SLOT
 
 
 def test_blocked_hours_split_islands():

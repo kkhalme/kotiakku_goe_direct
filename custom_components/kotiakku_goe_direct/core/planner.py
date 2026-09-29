@@ -320,25 +320,24 @@ def find_seed(slots: list[Slot], min_s: float) -> tuple[float, int, int] | None:
 
 
 def grow(slots, i, j, seed_avg, max_s, ceiling, flex_pct, flex_eur) -> tuple[int, int]:
-    """Add one native slot at a time on the cheaper side while under flex headroom."""
+    """Add one native slot at a time on the cheaper side until a price wall."""
     extras = [abs(seed_avg) * flex_pct / 100.0] if flex_pct > 0 else []
     extras += [flex_eur] if flex_eur > 0 else []
     if not extras:
         return i, j
     allowed = seed_avg + max(extras)
+    closed: set[int] = set()
     while slots[j][1] - slots[i][0] < max_s - EPS_S:
         options = []
         for side, k in ((-1, i - 1), (1, j + 1)):
-            if not 0 <= k < len(slots):
+            if side in closed or not 0 <= k < len(slots):
+                continue
+            joined = slots[i][0] - slots[k][1] if side < 0 else slots[k][0] - slots[j][1]
+            if joined > GAP_S or slots[k][2] > min(ceiling, allowed) + PRICE_EPS:
+                closed.add(side)
                 continue
             left, right = (k, j) if side < 0 else (i, k)
-            joined = slots[i][0] - slots[k][1] if side < 0 else slots[k][0] - slots[j][1]
-            if (
-                joined <= GAP_S
-                and slots[k][2] <= ceiling + PRICE_EPS
-                and slots[right][1] - slots[left][0] <= max_s + EPS_S
-                and _avg(slots, left, right) <= allowed + PRICE_EPS
-            ):
+            if slots[right][1] - slots[left][0] <= max_s + EPS_S:
                 options.append((slots[k][2], side, k))
         if not options:
             break
