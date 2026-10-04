@@ -48,7 +48,7 @@ Shared:
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
 - `sensor.kotiakku_goe_direct_available_surplus`: held leftover still free for surplus chargers (W).
 - `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
-- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
+- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, daily trip 7 h / 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
 
 ## Behaviour
@@ -66,6 +66,7 @@ Each charger has one role, first match wins:
 
 - Price slots are today's and (after ~14:00) tomorrow's curve. Hours whose expected solar (the day's forecast kWh spread by sun elevation) is at least the off-sun hour threshold are removed from the search. A day without a forecast is not blocked.
 - The window is the cheapest contiguous run of at least *window min* hours. If its average is above the ceiling there is no window. It then grows one slot at a time toward the cheaper neighbour, within *window max*. The flex ceiling is fixed from that seed: its average plus the looser of flex % and flex €. A slot above the flex ceiling or the electricity price ceiling stops that direction, and slots beyond the wall are not entered.
+- Daily trip, when tomorrow's prices are in: the cheapest minimum window that ends by the local deadline (default 07:00 on the second day) is used when its average is within the looser of the daily-trip % and €/kWh (defaults 5 % and 0.03 €) of the cheapest window. Both at 0 keeps the cheapest window. The chosen window still grows as above.
 - If tomorrow's prices are in and that window does not overlap local today 22:00 through the end of tomorrow, a second window is seeded inside tomorrow.
 - The plan depends on prices, forecasts and knobs, not on the clock: a window that has ended stays the plan until the inputs change.
 - The search is a two-day price epoch: today + tomorrow once tomorrow's prices are in, otherwise yesterday + today from the stored cache. Midnight therefore does not drop a window that crosses midnight. When a new epoch arrives, a window that was already running is kept until it ends; one that had not started is dropped. `sensor.kotiakku_goe_direct_spot_price_history` exposes that cache (yesterday's average as the state).

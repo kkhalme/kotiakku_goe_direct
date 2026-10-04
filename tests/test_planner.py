@@ -16,9 +16,32 @@ def slots(prices, base=BASE, step=SLOT):
     return [(base + i * step, base + (i + 1) * step, p) for i, p in enumerate(prices)]
 
 
-def pick(prices, min_h=2, max_h=5, ceiling=0.2, pct=20, eur=0.02, blocked=(), step=SLOT, now=NOW):
+def pick(
+    prices,
+    min_h=2,
+    max_h=5,
+    ceiling=0.2,
+    pct=20,
+    eur=0.02,
+    blocked=(),
+    step=SLOT,
+    now=NOW,
+    daily_h=7,
+    daily_pct=5,
+    daily_eur=0.03,
+):
     windows, _reason = planner.choose_windows(
-        slots(prices, step=step), list(blocked), now, min_h, max_h, ceiling, pct, eur
+        slots(prices, step=step),
+        list(blocked),
+        now,
+        min_h,
+        max_h,
+        ceiling,
+        pct,
+        eur,
+        daily_h,
+        daily_pct,
+        daily_eur,
     )
     return windows
 
@@ -309,6 +332,54 @@ def test_priced_out_span_crosses_midnight_from_cached_yesterday():
     span = after.priced_out_at(datetime(2026, 3, 16, 0, 5, tzinfo=UTC))
     assert span.start == datetime(2026, 3, 15, 23, 45, tzinfo=UTC)
     assert span.end == datetime(2026, 3, 16, 0, 15, tzinfo=UTC)
+
+
+def _two_nights(early, late):
+    prices = [0.25] * 192
+    prices[8:16] = [early] * 8
+    prices[184:192] = [late] * 8
+    return prices
+
+
+def test_daily_trip_keeps_a_close_earlier_night():
+    windows = pick(_two_nights(0.05, 0.04), pct=0, eur=0)
+    assert [(w[0], w[1]) for w in windows] == [
+        (BASE + 8 * SLOT, BASE + 16 * SLOT),
+        (BASE + 184 * SLOT, BASE + 192 * SLOT),
+    ]
+    result = run_plan(attrs_for(BASE, _two_nights(0.05, 0.04)[:96], (BASE + 86400, _two_nights(0.05, 0.04)[96:])))
+    assert result.windows[0].start.timestamp() == BASE + 8 * SLOT
+    assert result.windows[1].start.timestamp() == BASE + 184 * SLOT
+
+
+def test_daily_trip_drops_a_night_beyond_the_allowance():
+    windows = pick(_two_nights(0.10, 0.04), pct=0, eur=0)
+    assert len(windows) == 1 and windows[0][0] == BASE + 184 * SLOT
+
+
+def test_daily_trip_overnight_replaces_the_later_night():
+    prices = [0.25] * 192
+    prices[92:100] = [0.05] * 8
+    prices[184:192] = [0.04] * 8
+    windows = pick(prices, pct=0, eur=0)
+    assert len(windows) == 1
+    assert (windows[0][0], windows[0][1]) == (BASE + 92 * SLOT, BASE + 100 * SLOT)
+
+
+def test_daily_trip_off_keeps_the_cheapest_night():
+    windows = pick(_two_nights(0.05, 0.04), pct=0, eur=0, daily_pct=0, daily_eur=0)
+    assert len(windows) == 1 and windows[0][0] == BASE + 184 * SLOT
+
+
+def test_daily_trip_deadline_is_local_wall_clock():
+    now = datetime(2026, 3, 15, 12, tzinfo=HEL)
+    start = datetime(2026, 3, 15, tzinfo=HEL).timestamp()
+    today = [0.25] * 96
+    today[8:16] = [0.05] * 8
+    tomorrow = [0.25] * 96
+    tomorrow[28:36] = [0.04] * 8
+    result = run_plan(attrs_for(start, today, (start + 86400, tomorrow)), now=now)
+    assert result.windows[0].start == datetime(2026, 3, 15, 2, tzinfo=HEL)
 
 
 def test_min_hours_clamped_and_swapped():

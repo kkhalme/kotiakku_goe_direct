@@ -353,7 +353,31 @@ def _window(slots, seed, max_s, ceiling, flex_pct, flex_eur):
     return (slots[i][0], slots[j][1], _avg(slots, i, j))
 
 
-def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur):
+def _daily_deadline(now: datetime, hours: float) -> float:
+    """Local wall-clock ``hours`` on the day after ``now``. 24 is the midnight after that."""
+    minutes = int(round(min(24.0, max(0.0, hours)) * 60))
+    day = local_midnight(now.date() + timedelta(days=1), now.tzinfo)
+    if minutes >= 24 * 60:
+        return local_midnight(day.date() + timedelta(days=1), now.tzinfo).timestamp()
+    return day.replace(hour=minutes // 60, minute=minutes % 60).timestamp()
+
+
+def _prefer_daily_trip(search, seed, min_s, ceiling, tomorrow, deadline, pct, eur):
+    """Cheapest min window ending by ``deadline``, when it is within the looser price allowance."""
+    if (pct <= 0 and eur <= 0) or not any(s[0] >= tomorrow - 1 for s in search):
+        return seed
+    head = [s for s in search if s[1] <= deadline + EPS_S]
+    early = find_seed(head, min_s)
+    if early is None or early[0] > ceiling + PRICE_EPS:
+        return seed
+    extras = [abs(seed[0]) * pct / 100.0] if pct > 0 else []
+    extras += [eur] if eur > 0 else []
+    if early[0] <= seed[0] + max(extras) + PRICE_EPS:
+        return early
+    return seed
+
+
+def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur):
     """Up to two (start_ts, end_ts, avg) windows and a reason code."""
     if not slots:
         return [], "no_slots"
@@ -362,11 +386,12 @@ def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eu
     seed = find_seed(search, min_s)
     if seed is None or seed[0] > ceiling + PRICE_EPS:
         return [], "no_window"
-    windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     tz = now.tzinfo
     today_22 = local_midnight(now.date(), tz).replace(hour=22).timestamp()
     tomorrow = local_midnight(now.date() + timedelta(days=1), tz).timestamp()
     day_after = local_midnight(now.date() + timedelta(days=2), tz).timestamp()
+    seed = _prefer_daily_trip(search, seed, min_s, ceiling, tomorrow, _daily_deadline(now, daily_h), daily_pct, daily_eur)
+    windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     first = windows[0]
     if any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
         offset = next(k for k, s in enumerate(search) if s[0] >= tomorrow - 1)
@@ -417,7 +442,16 @@ def plan(
         if kwh is not None and abs(start - day_start(now, k).timestamp()) <= 1
     ]
     blocked = blocked_hours(now, today_kwh, tomorrow_kwh, threshold, lat, lon, extra)
-    knobs = (min_h, max_h, float(settings.electricity_price_ceiling), max(float(settings.window_flex_pct), 0.0), max(float(settings.window_flex_eur), 0.0))
+    knobs = (
+        min_h,
+        max_h,
+        float(settings.electricity_price_ceiling),
+        max(float(settings.window_flex_pct), 0.0),
+        max(float(settings.window_flex_eur), 0.0),
+        min(24.0, max(0.0, float(settings.daily_trip_deadline_h))),
+        max(float(settings.daily_trip_price_flex_pct), 0.0),
+        max(float(settings.daily_trip_price_flex_eur), 0.0),
+    )
     carried = []
     if attrs is None:
         windows, reason = [], "no_source"
