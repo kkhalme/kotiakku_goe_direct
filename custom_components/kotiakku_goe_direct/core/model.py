@@ -47,6 +47,9 @@ class Settings:
     electricity_price_ceiling: float = 0.2
     window_flex_pct: float = 20.0
     window_flex_eur: float = 0.02
+    daily_trip_deadline_h: float = 7.0
+    daily_trip_price_flex_pct: float = 5.0
+    daily_trip_price_flex_eur: float = 0.03
     soc_on_pct: float = 92
     soc_hyst_pct: float = 2
     surplus_start_w: float = 2000
