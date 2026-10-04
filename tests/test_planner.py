@@ -414,6 +414,44 @@ def test_daily_trip_keeps_a_running_window_across_midnight():
     assert after.in_window(after_midnight)
 
 
+def test_cet_hour_after_midnight_does_not_drop_the_morning_window():
+    """Today's CET auction ends at 01:00 local. That hour must not become the next day."""
+    knobs = {"window_min_h": 3, "window_max_h": 3, "window_flex_pct": 0, "window_flex_eur": 0}
+    day = datetime(2026, 10, 5, tzinfo=HEL)
+    now = day.replace(minute=34)
+
+    def quarters(start, prices):
+        return [
+            {
+                "start": start + timedelta(minutes=15 * i),
+                "end": start + timedelta(minutes=15 * (i + 1)),
+                "value": price,
+            }
+            for i, price in enumerate(prices)
+        ]
+
+    today = [0.02] * 96
+    today[10:22] = [0.003] * 12
+    today[88:96] = [0.0004] * 8
+    yesterday = quarters(day - timedelta(days=1), [0.05] * 96)
+    evening = (day - timedelta(days=1)).replace(hour=18)
+    days = planner.remember_day({}, evening, planner.price_slots({"raw_today": yesterday}, evening), None)
+    attrs = {
+        "raw_today": quarters(day, today),
+        "raw_tomorrow": quarters(day + timedelta(days=1), [0.0] * 4),
+        "tomorrow_valid": False,
+    }
+    morning = day.replace(hour=2, minute=30)
+    expected = [(morning, morning.replace(hour=5, minute=30))]
+    kept = run_plan(attrs, now=now, history=days, **knobs)
+    assert [(window.start, window.end) for window in kept.windows] == expected
+    assert kept.epoch_start == day
+    assert not kept.tomorrow_ok
+    alone = run_plan(attrs, now=now, **knobs)
+    assert [(window.start, window.end) for window in alone.windows] == expected
+    assert alone.epoch_start == day
+
+
 def test_daily_trip_deadline_is_local_wall_clock():
     now = datetime(2026, 3, 15, 12, tzinfo=HEL)
     start = datetime(2026, 3, 15, tzinfo=HEL).timestamp()

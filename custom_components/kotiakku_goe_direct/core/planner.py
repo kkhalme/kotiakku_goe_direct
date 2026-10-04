@@ -18,6 +18,9 @@ EPS_S = 30
 PRICE_EPS = 1e-7
 SAMPLE_S = 900
 PAST_DAYS = 2
+# Finland is one hour ahead of the CET delivery day, so today's auction already
+# contains 00:00–01:00 tomorrow. That tail is not a published day.
+PUBLISHED_DAY_S = 3600.0 + GAP_S
 
 Slot = tuple[float, float, float]
 
@@ -166,6 +169,19 @@ def _cached_days(days: dict | None) -> list[tuple[float, list[Slot], float | Non
     return out
 
 
+def day_has_prices(slots: list[Slot], start: float, end: float) -> bool:
+    """True when slots cover a published day, not the one-hour CET tail."""
+    covered = 0.0
+    for slot_start, slot_end, _price in slots:
+        lo, hi = max(slot_start, start), min(slot_end, end)
+        if hi <= lo:
+            continue
+        covered += hi - lo
+        if covered + EPS_S >= PUBLISHED_DAY_S:
+            return True
+    return False
+
+
 def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot], int]:
     """Live prices plus cached earlier days. Offset 0 is today+tomorrow; -1 is yesterday+today."""
     live = price_slots(attrs, now)
@@ -181,7 +197,7 @@ def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot]
                 ):
                     merged.append(slot)
     merged.sort()
-    if any(slot[0] >= starts[1] - 1 for slot in merged):
+    if day_has_prices(merged, starts[1], starts[2]):
         offset = 0
     elif any(starts[-1] - 1 <= slot[0] < starts[0] - 1 for slot in merged):
         offset = -1
@@ -193,7 +209,7 @@ def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot]
 def epoch_day(slots: list[Slot], now: datetime, offset: int) -> float:
     """Local midnight of the epoch's newest searchable day. It moves when prices arrive, not at midnight."""
     newest, following = day_start(now, offset + 1).timestamp(), day_start(now, offset + 2).timestamp()
-    if any(newest - 1 <= slot[0] < following - 1 for slot in slots):
+    if day_has_prices(slots, newest, following):
         return newest
     return day_start(now, offset).timestamp()
 
@@ -238,7 +254,8 @@ def tomorrow_prices_ok(attrs: Mapping | None, slots: list[Slot], now: datetime) 
     if flag is True or str(flag).lower() in ("on", "true"):
         return True
     tomorrow = local_midnight(now.date() + timedelta(days=1), now.tzinfo).timestamp()
-    return any(slot[0] >= tomorrow - 1 for slot in slots)
+    day_after = local_midnight(now.date() + timedelta(days=2), now.tzinfo).timestamp()
+    return day_has_prices(slots, tomorrow, day_after)
 
 
 def solar_elevation_deg(ts: float, lat: float, lon: float) -> float:
@@ -391,11 +408,12 @@ def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eu
     tomorrow_dt = local_midnight(now.date() + timedelta(days=1), tz)
     tomorrow = tomorrow_dt.timestamp()
     day_after = local_midnight(now.date() + timedelta(days=2), tz).timestamp()
-    deadline_day = tomorrow_dt if any(s[0] >= tomorrow - 1 for s in search) else today
+    has_next = day_has_prices(slots, tomorrow, day_after)
+    deadline_day = tomorrow_dt if has_next else today
     seed = _prefer_daily_trip(search, seed, min_s, ceiling, _daily_deadline(deadline_day, daily_h), daily_pct, daily_eur)
     windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     first = windows[0]
-    if any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
+    if has_next and any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
         offset = next(k for k, s in enumerate(search) if s[0] >= tomorrow - 1)
         tom = [s for s in search[offset:] if s[0] < day_after]
         follow = find_seed(tom, min_s)
