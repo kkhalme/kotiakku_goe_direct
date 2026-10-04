@@ -48,7 +48,7 @@ Shared:
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
 - `sensor.kotiakku_goe_direct_available_surplus`: held leftover still free for surplus chargers (W).
 - `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
-- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, daily trip 7 h / 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
+- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, flex 20 % / 0.02 €, daily trip deadline 7 h, daily trip price flex 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
 
 ## Behaviour
