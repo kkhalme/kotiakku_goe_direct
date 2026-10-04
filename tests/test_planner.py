@@ -105,7 +105,7 @@ def test_deep_valley_stays_short():
 
 
 def test_one_window_even_with_two_nights():
-    windows = pick([0.04] * 12 + [0.25] * 48 + [0.01] * 12)
+    windows = pick([0.04] * 12 + [0.25] * 48 + [0.01] * 12, daily_pct=0, daily_eur=0)
     assert len(windows) == 1 and windows[0][0] == BASE + 60 * SLOT
 
 
@@ -369,6 +369,49 @@ def test_daily_trip_overnight_replaces_the_later_night():
 def test_daily_trip_off_keeps_the_cheapest_night():
     windows = pick(_two_nights(0.05, 0.04), pct=0, eur=0, daily_pct=0, daily_eur=0)
     assert len(windows) == 1 and windows[0][0] == BASE + 184 * SLOT
+
+
+def test_daily_trip_keeps_the_morning_when_tomorrow_prices_are_gone():
+    knobs = {"window_flex_pct": 0, "window_flex_eur": 0}
+    today = [0.25] * 96
+    tomorrow = [0.25] * 96
+    tomorrow[8:16] = [0.05] * 8
+    tomorrow[88:96] = [0.04] * 8
+    _start, today_items = _day_attrs(date(2026, 3, 15), today)
+    morning = datetime(2026, 3, 16, 2, tzinfo=UTC)
+    _next, tomorrow_items = _day_attrs(date(2026, 3, 16), tomorrow)
+    evening = datetime(2026, 3, 15, 18, tzinfo=UTC)
+    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items}, now=evening, **knobs)
+    assert (before.windows[0].start, before.windows[0].end) == (morning, morning.replace(hour=4))
+    after = run_plan({"raw_today": tomorrow_items}, now=datetime(2026, 3, 16, 0, 30, tzinfo=UTC), **knobs)
+    assert [(w.start, w.end) for w in after.windows] == [(morning, morning.replace(hour=4))]
+
+    dear = [0.25] * 96
+    dear[8:16] = [0.10] * 8
+    dear[88:96] = [0.04] * 8
+    _next, dear_items = _day_attrs(date(2026, 3, 16), dear)
+    dropped = run_plan({"raw_today": dear_items}, now=datetime(2026, 3, 16, 0, 30, tzinfo=UTC), **knobs)
+    assert len(dropped.windows) == 1 and dropped.windows[0].start == datetime(2026, 3, 16, 22, tzinfo=UTC)
+
+
+def test_daily_trip_keeps_a_running_window_across_midnight():
+    knobs = {"window_min_h": 3, "window_max_h": 3, "window_flex_pct": 0, "window_flex_eur": 0}
+    today = [0.25] * 96
+    today[88:96] = [0.05] * 8
+    tomorrow = [0.25] * 96
+    tomorrow[0:4] = [0.05] * 4
+    tomorrow[84:96] = [0.04] * 12
+    _start, today_items = _day_attrs(date(2026, 3, 15), today)
+    _next, tomorrow_items = _day_attrs(date(2026, 3, 16), tomorrow)
+    evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
+    span = (datetime(2026, 3, 15, 22, tzinfo=UTC), datetime(2026, 3, 16, 1, tzinfo=UTC))
+    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items}, now=evening, **knobs)
+    assert (before.windows[0].start, before.windows[0].end) == span
+    days = planner.remember_day({}, evening, planner.price_slots({"raw_today": today_items}, evening), None)
+    after_midnight = datetime(2026, 3, 16, 0, 30, tzinfo=UTC)
+    after = run_plan({"raw_today": tomorrow_items}, now=after_midnight, history=days, **knobs)
+    assert (after.windows[0].start, after.windows[0].end) == span
+    assert after.in_window(after_midnight)
 
 
 def test_daily_trip_deadline_is_local_wall_clock():
