@@ -377,7 +377,7 @@ def _prefer_daily_trip(search, seed, min_s, ceiling, tomorrow, deadline, pct, eu
     return seed
 
 
-def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h=7, daily_pct=5, daily_eur=0.03):
+def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur):
     """Up to two (start_ts, end_ts, avg) windows and a reason code."""
     if not slots:
         return [], "no_slots"
