@@ -353,18 +353,17 @@ def _window(slots, seed, max_s, ceiling, flex_pct, flex_eur):
     return (slots[i][0], slots[j][1], _avg(slots, i, j))
 
 
-def _daily_deadline(now: datetime, hours: float) -> float:
-    """Local wall-clock ``hours`` on the day after ``now``. 24 is the midnight after that."""
+def _daily_deadline(day: datetime, hours: float) -> float:
+    """Local wall-clock ``hours`` on ``day``. 24 is the following midnight."""
     minutes = int(round(min(24.0, max(0.0, hours)) * 60))
-    day = local_midnight(now.date() + timedelta(days=1), now.tzinfo)
     if minutes >= 24 * 60:
-        return local_midnight(day.date() + timedelta(days=1), now.tzinfo).timestamp()
-    return day.replace(hour=minutes // 60, minute=minutes % 60).timestamp()
+        return local_midnight(day.date() + timedelta(days=1), day.tzinfo).timestamp()
+    return local_midnight(day.date(), day.tzinfo).replace(hour=minutes // 60, minute=minutes % 60).timestamp()
 
 
-def _prefer_daily_trip(search, seed, min_s, ceiling, tomorrow, deadline, pct, eur):
+def _prefer_daily_trip(search, seed, min_s, ceiling, deadline, pct, eur):
     """Cheapest min window ending by ``deadline``, when it is within the looser price allowance."""
-    if (pct <= 0 and eur <= 0) or not any(s[0] >= tomorrow - 1 for s in search):
+    if pct <= 0 and eur <= 0:
         return seed
     head = [s for s in search if s[1] <= deadline + EPS_S]
     early = find_seed(head, min_s)
@@ -387,10 +386,13 @@ def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eu
     if seed is None or seed[0] > ceiling + PRICE_EPS:
         return [], "no_window"
     tz = now.tzinfo
-    today_22 = local_midnight(now.date(), tz).replace(hour=22).timestamp()
-    tomorrow = local_midnight(now.date() + timedelta(days=1), tz).timestamp()
+    today = local_midnight(now.date(), tz)
+    today_22 = today.replace(hour=22).timestamp()
+    tomorrow_dt = local_midnight(now.date() + timedelta(days=1), tz)
+    tomorrow = tomorrow_dt.timestamp()
     day_after = local_midnight(now.date() + timedelta(days=2), tz).timestamp()
-    seed = _prefer_daily_trip(search, seed, min_s, ceiling, tomorrow, _daily_deadline(now, daily_h), daily_pct, daily_eur)
+    deadline_day = tomorrow_dt if any(s[0] >= tomorrow - 1 for s in search) else today
+    seed = _prefer_daily_trip(search, seed, min_s, ceiling, _daily_deadline(deadline_day, daily_h), daily_pct, daily_eur)
     windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     first = windows[0]
     if any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
