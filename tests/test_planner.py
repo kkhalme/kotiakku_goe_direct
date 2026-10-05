@@ -29,6 +29,7 @@ def pick(
     daily_h=7,
     daily_pct=5,
     daily_eur=0.03,
+    tomorrow_valid=True,
 ):
     windows, _reason = planner.choose_windows(
         slots(prices, step=step),
@@ -42,6 +43,7 @@ def pick(
         daily_h,
         daily_pct,
         daily_eur,
+        tomorrow_valid,
     )
     return windows
 
@@ -64,6 +66,7 @@ def attrs_for(base, today, tomorrow=None):
     out = {"raw_today": items(base, today)}
     if tomorrow:
         out["raw_tomorrow"] = items(tomorrow[0], tomorrow[1])
+        out["tomorrow_valid"] = True
     return out
 
 
@@ -260,7 +263,7 @@ def test_midnight_keeps_the_window_from_cached_yesterday():
     start, today = _day_attrs(evening_day, [0.2] * 88 + cheap)
     _tomorrow_start, tomorrow = _day_attrs(date(2026, 3, 16), cheap + [0.2] * 88)
     evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
-    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow}, now=evening, window_min_h=4, window_max_h=4, window_flex_pct=0, window_flex_eur=0)
+    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow, "tomorrow_valid": True}, now=evening, window_min_h=4, window_max_h=4, window_flex_pct=0, window_flex_eur=0)
     assert before.windows[0].start == start.replace(hour=22)
     assert before.windows[0].end == datetime(2026, 3, 16, 2, tzinfo=UTC)
     days = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), None)
@@ -276,7 +279,7 @@ def test_imported_v1_cache_keeps_the_active_overnight_window():
     _tomorrow_start, tomorrow = _day_attrs(date(2026, 3, 16), cheap + [0.2] * 88)
     evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
     knobs = {"window_min_h": 4, "window_max_h": 4, "window_flex_pct": 0, "window_flex_eur": 0}
-    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow}, now=evening, **knobs)
+    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow, "tomorrow_valid": True}, now=evening, **knobs)
     cached = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), 12.0)
     days, seen = planner.imported_price_cache(
         {"price_days": cached, "epoch_seen": {"1": evening.timestamp()}, "seen": {"surplus": True}}
@@ -381,7 +384,7 @@ def test_daily_trip_keeps_the_morning_when_tomorrow_prices_are_gone():
     morning = datetime(2026, 3, 16, 2, tzinfo=UTC)
     _next, tomorrow_items = _day_attrs(date(2026, 3, 16), tomorrow)
     evening = datetime(2026, 3, 15, 18, tzinfo=UTC)
-    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items}, now=evening, **knobs)
+    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items, "tomorrow_valid": True}, now=evening, **knobs)
     assert (before.windows[0].start, before.windows[0].end) == (morning, morning.replace(hour=4))
     after = run_plan({"raw_today": tomorrow_items}, now=datetime(2026, 3, 16, 0, 30, tzinfo=UTC), **knobs)
     assert [(w.start, w.end) for w in after.windows] == [(morning, morning.replace(hour=4))]
@@ -405,7 +408,7 @@ def test_daily_trip_keeps_a_running_window_across_midnight():
     _next, tomorrow_items = _day_attrs(date(2026, 3, 16), tomorrow)
     evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
     span = (datetime(2026, 3, 15, 22, tzinfo=UTC), datetime(2026, 3, 16, 1, tzinfo=UTC))
-    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items}, now=evening, **knobs)
+    before = run_plan({"raw_today": today_items, "raw_tomorrow": tomorrow_items, "tomorrow_valid": True}, now=evening, **knobs)
     assert (before.windows[0].start, before.windows[0].end) == span
     days = planner.remember_day({}, evening, planner.price_slots({"raw_today": today_items}, evening), None)
     after_midnight = datetime(2026, 3, 16, 0, 30, tzinfo=UTC)
@@ -415,7 +418,7 @@ def test_daily_trip_keeps_a_running_window_across_midnight():
 
 
 def test_cet_hour_after_midnight_does_not_drop_the_morning_window():
-    """Today's CET auction ends at 01:00 local. That hour must not become the next day."""
+    """A price tail after midnight is not the next day unless tomorrow_valid is set."""
     knobs = {"window_min_h": 3, "window_max_h": 3, "window_flex_pct": 0, "window_flex_eur": 0}
     day = datetime(2026, 10, 5, tzinfo=HEL)
     now = day.replace(minute=34)
