@@ -166,6 +166,12 @@ def _cached_days(days: dict | None) -> list[tuple[float, list[Slot], float | Non
     return out
 
 
+def tomorrow_prices_ok(attrs: Mapping | None) -> bool:
+    """Nordpool ``tomorrow_valid``. A price tail after midnight is not a published day."""
+    flag = (attrs or {}).get("tomorrow_valid")
+    return flag is True or str(flag).lower() in ("on", "true")
+
+
 def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot], int]:
     """Live prices plus cached earlier days. Offset 0 is today+tomorrow; -1 is yesterday+today."""
     live = price_slots(attrs, now)
@@ -181,7 +187,7 @@ def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot]
                 ):
                     merged.append(slot)
     merged.sort()
-    if any(slot[0] >= starts[1] - 1 for slot in merged):
+    if tomorrow_prices_ok(attrs):
         offset = 0
     elif any(starts[-1] - 1 <= slot[0] < starts[0] - 1 for slot in merged):
         offset = -1
@@ -190,10 +196,11 @@ def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot]
     return merged, offset
 
 
-def epoch_day(slots: list[Slot], now: datetime, offset: int) -> float:
+def epoch_day(slots: list[Slot], now: datetime, offset: int, tomorrow_valid: bool) -> float:
     """Local midnight of the epoch's newest searchable day. It moves when prices arrive, not at midnight."""
     newest, following = day_start(now, offset + 1).timestamp(), day_start(now, offset + 2).timestamp()
-    if any(newest - 1 <= slot[0] < following - 1 for slot in slots):
+    published = tomorrow_valid if offset == 0 else any(newest - 1 <= slot[0] < following - 1 for slot in slots)
+    if published:
         return newest
     return day_start(now, offset).timestamp()
 
@@ -231,14 +238,6 @@ def carry_windows(windows, previous, seen_ts: float | None):
             continue
         out.append(window)
     return out
-
-
-def tomorrow_prices_ok(attrs: Mapping | None, slots: list[Slot], now: datetime) -> bool:
-    flag = (attrs or {}).get("tomorrow_valid")
-    if flag is True or str(flag).lower() in ("on", "true"):
-        return True
-    tomorrow = local_midnight(now.date() + timedelta(days=1), now.tzinfo).timestamp()
-    return any(slot[0] >= tomorrow - 1 for slot in slots)
 
 
 def solar_elevation_deg(ts: float, lat: float, lon: float) -> float:
@@ -376,7 +375,7 @@ def _prefer_daily_trip(search, seed, min_s, ceiling, deadline, pct, eur):
     return seed
 
 
-def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur):
+def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur, tomorrow_valid):
     """Up to two (start_ts, end_ts, avg) windows and a reason code."""
     if not slots:
         return [], "no_slots"
@@ -391,11 +390,11 @@ def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eu
     tomorrow_dt = local_midnight(now.date() + timedelta(days=1), tz)
     tomorrow = tomorrow_dt.timestamp()
     day_after = local_midnight(now.date() + timedelta(days=2), tz).timestamp()
-    deadline_day = tomorrow_dt if any(s[0] >= tomorrow - 1 for s in search) else today
+    deadline_day = tomorrow_dt if tomorrow_valid else today
     seed = _prefer_daily_trip(search, seed, min_s, ceiling, _daily_deadline(deadline_day, daily_h), daily_pct, daily_eur)
     windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     first = windows[0]
-    if any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
+    if tomorrow_valid and any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
         offset = next(k for k, s in enumerate(search) if s[0] >= tomorrow - 1)
         tom = [s for s in search[offset:] if s[0] < day_after]
         follow = find_seed(tom, min_s)
@@ -436,7 +435,16 @@ def plan(
     max_h = min(24.0, max(0.25, float(settings.window_max_h)))
     min_h, max_h = min(min_h, max_h), max(min_h, max_h)
     threshold = float(settings.offsun_hour_kwh)
+    published = tomorrow_prices_ok(attrs)
     slots, offset = ([], 0) if attrs is None else epoch_curve(attrs, now, history, today_kwh, tomorrow_kwh)
+
+    def next_published(anchor_offset: int) -> bool:
+        """Wall-clock tomorrow follows ``tomorrow_valid``. An earlier day follows its slots."""
+        if anchor_offset == 0:
+            return published
+        start = day_start(now, anchor_offset + 1).timestamp()
+        end = day_start(now, anchor_offset + 2).timestamp()
+        return any(start - 1 <= slot[0] < end - 1 for slot in slots)
     extra = [
         (day_start(now, k).date(), kwh)
         for start, _cached, kwh in _cached_days(history)
@@ -459,17 +467,22 @@ def plan(
         windows, reason = [], "no_source"
     else:
         anchor = day_start(now, offset).replace(hour=12)
-        windows, reason = choose_windows(_span(slots, now, offset), blocked, anchor, *knobs)
+        windows, reason = choose_windows(_span(slots, now, offset), blocked, anchor, *knobs, next_published(offset))
         if epoch_seen is not None:
-            previous, _reason = choose_windows(_span(slots, now, offset - 1), blocked, day_start(now, offset - 1).replace(hour=12), *knobs)
+            previous, _reason = choose_windows(
+                _span(slots, now, offset - 1),
+                blocked,
+                day_start(now, offset - 1).replace(hour=12),
+                *knobs,
+                next_published(offset - 1),
+            )
             carried = carry_windows(windows, previous, epoch_seen)
             if carried and not windows:
                 reason = "planned"
             windows = list(windows) + carried
     priced_out = priced_out_spans(slots, float(settings.surplus_charging_price_ceiling))
-    live = price_slots(attrs, now)
-    tomorrow_ok = tomorrow_prices_ok(attrs, live, now)
-    epoch_ts = None if attrs is None else epoch_day(slots, now, offset)
+    tomorrow_ok = published
+    epoch_ts = None if attrs is None else epoch_day(slots, now, offset, published)
     usable_end = usable_solar_end(now, today_kwh, threshold, lat, lon)
     use_tomorrow = tomorrow_ok and (usable_end is None or now.timestamp() >= usable_end)
     gating_kwh = tomorrow_kwh if use_tomorrow else today_kwh

@@ -57,7 +57,7 @@ def test_missing_tomorrow_forecast_still_plans_after_midnight():
     now = datetime(2026, 4, 10, 15, tzinfo=HEL)
     today = [0.12] * 96
     tomorrow = [0.02 if i < 16 else 0.12 for i in range(96)]
-    attrs = {"raw_today": day_items(now, today), "raw_tomorrow": day_items(now + timedelta(days=1), tomorrow)}
+    attrs = {"raw_today": day_items(now, today), "raw_tomorrow": day_items(now + timedelta(days=1), tomorrow), "tomorrow_valid": True}
     result = run(now, 20.0, None, attrs)
     midnight = datetime(2026, 4, 11, tzinfo=HEL)
     assert result.windows[0].start <= midnight < result.windows[0].end

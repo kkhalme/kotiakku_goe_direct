@@ -187,7 +187,8 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             live = planner.price_slots(attrs, now)
             self.price_days = planner.remember_day(self.price_days, now, live, today_kwh)
             slots, offset = planner.epoch_curve(attrs, now, self.price_days, today_kwh, tomorrow_kwh)
-            self.epoch_seen, seen_ts = planner.note_epoch(self.epoch_seen, planner.epoch_day(slots, now, offset), now)
+            valid = planner.tomorrow_prices_ok(attrs)
+            self.epoch_seen, seen_ts = planner.note_epoch(self.epoch_seen, planner.epoch_day(slots, now, offset, valid), now)
         else:
             seen_ts = None
         plan = planner.plan(
