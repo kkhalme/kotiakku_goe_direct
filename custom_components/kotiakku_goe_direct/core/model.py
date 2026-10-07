@@ -59,7 +59,7 @@ class Settings:
     max_1phase_amp: float = 32
     group_lot_a: float = 50
     solar_enough_kwh: float = 40
-    offsun_hour_kwh: float = 1
+    offsun_kw: float = 1
     after_charge_complete_keep_a: float = 6
     after_charge_complete_keep_phase: str = PHASE_3
     surplus_preferred_start_phase: str = PHASE_1

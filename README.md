@@ -23,7 +23,7 @@ One form (also under **Configure**):
 - **Spot-price sensor** with `raw_today` / `raw_tomorrow` (HACS Nordpool).
 - **Kotiakku SoC, solar power, house power** (house includes the EV).
 - **go-e Controller Car-power mean**, used to add EV watts back into leftover. Never written to.
-- **Solar forecast today / tomorrow** (optional, full-day kWh such as Forecast.Solar `energy_production_today`).
+- **Solar forecast today / tomorrow** (optional). The daily state is kWh for Enough solar. Solcast `detailedForecast` supplies half-hour power in kW for the off-sun mask. Without that series, the day's kWh is spread by sun elevation.
 - **Charger serials 1–4**: the MQTT path `go-eCharger/<serial>`, not an entity id. Charger 1 is required.
 
 Power units come from each sensor's `unit_of_measurement` (W or kW). A sensor without a unit is read as W and logged once.
@@ -48,7 +48,7 @@ Shared:
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
 - `sensor.kotiakku_goe_direct_available_surplus`: held leftover still free for surplus chargers (W).
 - `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
-- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, window price flex percentage 20 % / 0.02 €, daily trip deadline 7 h, daily trip price flex percentage 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, off-sun hour 1 kWh, keep amp 6 A.
+- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, window price flex percentage 20 % / 0.02 €, daily trip deadline 7 h, daily trip price flex percentage 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, Off-Sun PV Power Below 1 kW, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
 
 ## Behaviour
@@ -64,13 +64,13 @@ Each charger has one role, first match wins:
 
 ### Charge windows
 
-- Price slots are today's and (after ~14:00) tomorrow's curve. Hours whose expected solar (the day's forecast kWh spread by sun elevation) is at least the off-sun hour threshold are removed from the search. A day without a forecast is not blocked.
+- Price slots are today's and (after ~14:00) tomorrow's curve. A slot is removed when the forecast power overlapping it, in kW, is at or above *Off-Sun PV Power Below*. Solcast `detailedForecast` (`pv_estimate`) is that power for each half hour. A missing series spreads the day's kWh by sun elevation and uses the same comparison. A day without a forecast is not blocked. `blocked` is those ranges for the chart.
 - The window is the cheapest contiguous run of at least *window min* hours. If its average is above the ceiling there is no window. It then grows one slot at a time toward the cheaper neighbour, within *window max*. The flex ceiling is fixed from that seed: its average plus the looser of flex % and flex €. A slot above the flex ceiling or the electricity price ceiling stops that direction, and slots beyond the wall are not entered.
 - Daily trip: the cheapest minimum window that ends by the local deadline is used when its average is within the looser of the daily-trip % and €/kWh (defaults 5 % and 0.03 €) of the cheapest window. The deadline is 07:00 on the second day when Nordpool `tomorrow_valid` is set, and 07:00 this morning when it is not, so a window kept for this morning stays after midnight. Prices that spill past midnight do not publish the next day. Both at 0 keeps the cheapest window. The chosen window still grows as above.
 - If tomorrow's prices are in and that window does not overlap local today 22:00 through the end of tomorrow, a second window is seeded inside tomorrow.
 - The plan depends on prices, forecasts and knobs, not on the clock: a window that has ended stays the plan until the inputs change.
 - The search is a two-day price epoch: today + tomorrow once `tomorrow_valid` is set, otherwise yesterday + today from the stored cache. Midnight therefore does not drop a window that crosses midnight. When a new epoch arrives, a window that was already running is kept until it ends; one that had not started is dropped. `sensor.kotiakku_goe_direct_spot_price_history` exposes that cache (yesterday's average as the state).
-- **Enough solar**: the gating day is today until tomorrow's prices are in and today's last hour with at least the off-sun threshold has ended; then tomorrow. Enough means that day's forecast is at least *enough solar*.
+- **Enough solar**: the gating day is today until tomorrow's prices are in and today's last period at or above *Off-Sun PV Power Below* has ended (any production when the limit is 0); then tomorrow. Enough means that day's forecast kWh is at least *enough solar*.
 
 ### Leftover surplus
 
