@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from core.engine import decide, leftover_w
+from core.engine import decide, ev_for_window, leftover_w, reconciled_reading, window_mean, window_span
 from core.model import (
     CAR_CHARGING,
     CAR_COMPLETE,
@@ -19,6 +19,7 @@ from core.model import (
     HouseReading,
     Memory,
     Plan,
+    Sample,
     Settings,
     Window,
 )
@@ -78,6 +79,51 @@ def test_leftover_formula():
     assert leftover_w(5000, 800, 3000) == 4200
     assert leftover_w(0, 2000, 0) == -2000
     assert leftover_w(-5000, -1000, 0) == 4000
+
+
+def _sample(solar, house, ev, leftover):
+    return Sample(T0, solar, house, ev, leftover, 0)
+
+
+def test_window_mean_matches_the_house_average_not_the_ending_draw():
+    start, half, end = T0, T0 + timedelta(seconds=150), T0 + timedelta(seconds=300)
+    ramp = [(start, 2000), (half, 7000)]
+    assert window_mean(ramp, start, end) == 4500
+    assert window_span(ramp, start, end) == 5000
+    assert window_mean(ramp + [(end, 0)], start, end) == 4500
+    assert ev_for_window(ramp, start, end, 999) == (4500, False)
+    assert window_mean([(start + timedelta(seconds=1), 4500)], start, end) is None
+    assert ev_for_window([(start + timedelta(seconds=1), 4500)], start, end, 999) == (None, False)
+    assert ev_for_window([], start, end, 999) == (999, False)
+    steady = [(start - timedelta(seconds=30), 7000)]
+    assert window_mean(steady, start, end) == 7000
+    assert ev_for_window(steady, start, end, None) == (7000, True)
+
+
+def test_unclosed_pair_keeps_the_previous_base_and_solar_still_moves_surplus():
+    # base 1000: house 4000 already contains ev 3000, solar 8000, surplus 7000
+    previous = _sample(8000, 4000, 3000, 7000)
+    held = reconciled_reading(previous, 8000, 5500, 7000, steady=False)
+    assert held == (8000, 4000, 3000)
+    assert leftover_w(*held) == 7000
+    gap = reconciled_reading(previous, 8000, 2500, 3000, steady=True)
+    assert gap == (8000, 4000, 3000)
+    assert leftover_w(*gap) == 7000
+    solar = reconciled_reading(previous, 9000, None, None, steady=False)
+    assert solar == (9000, 4000, 3000)
+    assert leftover_w(*solar) == 8000
+    late = reconciled_reading(previous, 9000, 5500, None, steady=False)
+    assert leftover_w(*late) == 8000
+
+
+def test_closed_window_and_steady_meter_miss():
+    closed = reconciled_reading(None, 8000, 5500, 4500, steady=False)
+    assert closed == (8000, 5500, 4500)
+    assert leftover_w(*closed) == 7000
+    missing = reconciled_reading(None, 8000, 1000, 7000, steady=True)
+    assert missing == (8000, 1000, 7000)
+    assert leftover_w(*missing) == 7000
+    assert reconciled_reading(None, 8000, 5500, 7000, steady=False) is None
 
 
 def test_controller_unknown_falls_back_to_charger_nrg():

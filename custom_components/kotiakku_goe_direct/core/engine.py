@@ -1,4 +1,4 @@
-"""Charging decisions. Pure; no Home Assistant. ``decide`` is the only place behaviour lives."""
+"""Charging decisions. Pure; no Home Assistant. ``decide`` chooses commands; surplus watts are paired here first."""
 
 from __future__ import annotations
 
@@ -42,17 +42,108 @@ from .planner import local_midnight
 _LOGGER = logging.getLogger(__name__)
 
 
-def leftover_w(solar_w: int, house_w: int, ev_w: int) -> int:
-    """Solar minus house, plus EV only when house already contains the car.
+def meter_gap(ev: int) -> int:
+    """How far below the draw a house average must sit before the meter omits the car."""
+    return max(1000, abs(int(ev)) // 5)
 
-    If house is clearly below the EV take (the house CT misses the charger, or
-    the Controller mean still includes a car that unplugged), adding EV back
-    would invent surplus and keep charging from the grid.
+
+def leftover_w(solar_w: int, house_w: int, ev_w: int) -> int:
+    """Surplus for a pair already accepted: solar minus the non-EV base.
+
+    A closed pair (house >= ev) has base = house - ev. When house is far below
+    the draw, the meter does not contain the car and base is the house reading.
     """
     solar, house, ev = abs(int(solar_w)), abs(int(house_w)), abs(int(ev_w))
-    if ev > 0 and house < ev - max(1000, ev // 5):
+    if ev > 0 and house < ev - meter_gap(ev):
         return solar - house
     return solar - house + ev
+
+
+def _window_steps(trace: list[tuple[datetime, int]], start: datetime, end: datetime):
+    """Held value at ``start`` and later steps inside ``[start, end)``.
+
+    ``None`` when no point is at or before ``start``: the unknown prefix is not invented.
+    """
+    if end <= start:
+        return None
+    held = None
+    inside: list[tuple[datetime, int]] = []
+    for moment, value in sorted(trace, key=lambda point: point[0]):
+        if moment <= start:
+            held = int(value)
+        elif moment < end:
+            inside.append((moment, int(value)))
+    if held is None:
+        return None
+    return held, inside
+
+
+def window_mean(trace: list[tuple[datetime, int]], start: datetime, end: datetime) -> int | None:
+    """Stepwise-constant mean of ``trace`` over ``[start, end)``."""
+    steps = _window_steps(trace, start, end)
+    if steps is None:
+        return None
+    held, inside = steps
+    total = 0.0
+    cursor, value = start, held
+    for moment, nxt in inside:
+        total += value * (moment - cursor).total_seconds()
+        cursor, value = moment, nxt
+    seconds = (end - start).total_seconds()
+    total += value * (end - cursor).total_seconds()
+    return int(round(total / seconds))
+
+
+def window_span(trace: list[tuple[datetime, int]], start: datetime, end: datetime) -> int | None:
+    """Max minus min of the draw in effect over ``[start, end)``."""
+    steps = _window_steps(trace, start, end)
+    if steps is None:
+        return None
+    held, inside = steps
+    values = [held, *(value for _, value in inside)]
+    return max(values) - min(values)
+
+
+def ev_for_window(
+    trace: list[tuple[datetime, int]], start: datetime, end: datetime, controller: int | None
+) -> tuple[int | None, bool]:
+    """Window mean and whether the draw was steady. A partial trace does not fall back to the Controller."""
+    mean = window_mean(trace, start, end)
+    if mean is None:
+        if trace or controller is None:
+            return None, False
+        return abs(int(controller)), False
+    span = window_span(trace, start, end)
+    return mean, span is not None and span <= meter_gap(mean)
+
+
+def pair_base(house_w: int, ev_w: int, steady: bool) -> int | None:
+    """Base from one house/draw pair. ``None`` when the pair does not close and is not a steady meter-miss."""
+    house, ev = abs(int(house_w)), abs(int(ev_w))
+    if house >= ev:
+        return house - ev
+    if steady and ev > 0 and house < ev - meter_gap(ev):
+        return house
+    return None
+
+
+def reconciled_reading(
+    previous: Sample | None,
+    solar_w: int,
+    house_w: int | None,
+    ev_avg: int | None,
+    steady: bool,
+) -> tuple[int, int, int] | None:
+    """``(solar, house, ev)`` for ``leftover_w``, or ``None`` when no base exists yet.
+
+    A house update that does not close keeps the previous house and ev, and the new solar still applies.
+    """
+    solar = int(solar_w)
+    if house_w is not None and ev_avg is not None and pair_base(house_w, ev_avg, steady) is not None:
+        return solar, int(house_w), int(ev_avg)
+    if previous is None:
+        return None
+    return solar, previous.house_w, previous.ev_w
 
 
 def role(settings: Settings, serial: str, plan: Plan, now: datetime, until: bool, keep: bool) -> str:
