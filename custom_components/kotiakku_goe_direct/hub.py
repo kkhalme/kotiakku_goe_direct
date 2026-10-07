@@ -183,9 +183,10 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         attrs = None if price is None else price.attributes
         today_kwh = self._kwh(self.entity(CONF_SOLAR_TODAY_ENTITY))
         tomorrow_kwh = self._kwh(self.entity(CONF_SOLAR_TOMORROW_ENTITY))
+        periods = self._forecast_periods(now)
         if attrs is not None:
             live = planner.price_slots(attrs, now)
-            self.price_days = planner.remember_day(self.price_days, now, live, today_kwh)
+            self.price_days = planner.remember_day(self.price_days, now, live, today_kwh, periods)
             slots, offset = planner.epoch_curve(attrs, now, self.price_days, today_kwh, tomorrow_kwh)
             valid = planner.tomorrow_prices_ok(attrs)
             self.epoch_seen, seen_ts = planner.note_epoch(self.epoch_seen, planner.epoch_day(slots, now, offset, valid), now)
@@ -201,6 +202,7 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             self.hass.config.longitude,
             self.price_days,
             seen_ts,
+            periods,
         )
         self._log_plan(plan)
         usable = self._usable(now)
@@ -297,6 +299,16 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             self._warned_units.add(entity_id)
             _LOGGER.warning("%s has no power unit (%s); assuming W", entity_id, unit)
         return int(value)
+
+    def _forecast_periods(self, now: datetime) -> list:
+        tz = now.tzinfo
+        periods = []
+        for key in (CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY):
+            entity_id = self.entity(key)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            raw = None if state is None else state.attributes.get("detailedForecast")
+            periods += planner.forecast_periods(raw, tz)
+        return periods
 
     def _kwh(self, entity_id: str) -> float | None:
         state = self.hass.states.get(entity_id) if entity_id else None

@@ -530,7 +530,7 @@ views:
               - entity: number.kotiakku_goe_direct_surplus_charging_price_ceiling
               - entity: binary_sensor.kotiakku_goe_direct_surplus_priced_out
               - entity: number.kotiakku_goe_direct_solar_enough_kwh
-              - entity: number.kotiakku_goe_direct_offsun_hour_kwh
+              - entity: number.kotiakku_goe_direct_offsun_kw
               - entity: select.kotiakku_goe_direct_after_charge_complete_keep_phase
               - entity: number.kotiakku_goe_direct_after_charge_complete_keep_a
               - entity: select.kotiakku_goe_direct_surplus_preferred_start_phase

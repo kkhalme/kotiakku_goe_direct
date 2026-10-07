@@ -31,9 +31,11 @@ def pick(
     daily_eur=0.03,
     tomorrow_valid=True,
 ):
+    series = slots(prices, step=step)
+    if blocked:
+        series = [s for s in series if not any(s[0] < e and s[1] > b for b, e in blocked)]
     windows, _reason = planner.choose_windows(
-        slots(prices, step=step),
-        list(blocked),
+        series,
         now,
         min_h,
         max_h,

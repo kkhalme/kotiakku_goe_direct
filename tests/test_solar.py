@@ -37,19 +37,18 @@ def test_hour_weights_sum_and_night_is_zero():
 
 def test_blocked_hours_threshold():
     now = datetime(2026, 6, 21, 8, tzinfo=HEL)
-    blocked = planner.blocked_hours(now, 60.0, None, 1.0, LAT, LON)
+    blocked = run(now, 60.0, None, {}).blocked
     assert len(blocked) == 1
-    start, end = (datetime.fromtimestamp(t, HEL) for t in blocked[0])
-    assert start.hour < 12 < end.hour
-    assert planner.blocked_hours(now, 60.0, 60.0, 0, LAT, LON) == []
-    assert planner.blocked_hours(now, 8.0, 6.0, 1.0, LAT, LON) == []
+    assert blocked[0][0].hour < 12 < blocked[0][1].hour
+    assert run(now, 60.0, 60.0, {}, offsun_kw=0).blocked == []
+    assert run(now, 8.0, 6.0, {}).blocked == []
 
 
 def test_offsun_drops_noon_from_search():
     now = datetime(2026, 6, 21, 8, tzinfo=HEL)
     result = run(now, 60.0, None, {"raw_today": day_items(now, solar_curve())})
     assert result.windows and result.windows[0].start.hour < 10
-    unblocked = run(now, 60.0, None, {"raw_today": day_items(now, solar_curve())}, offsun_hour_kwh=0)
+    unblocked = run(now, 60.0, None, {"raw_today": day_items(now, solar_curve())}, offsun_kw=0)
     assert 10 <= unblocked.windows[0].start.hour <= 16
 
 
@@ -89,3 +88,104 @@ def test_winter_night_under_threshold_stays_searchable():
     now = datetime(2026, 1, 15, 15, tzinfo=HEL)
     result = run(now, 8.0, 6.0, {"raw_today": day_items(now, [0.02 if i < 20 else 0.12 for i in range(96)])})
     assert result.windows[0].start.hour == 0 and not result.enough
+
+
+def _forecast(day, kw_at):
+    start = datetime(day.year, day.month, day.day, tzinfo=HEL)
+    return [
+        {
+            "period_start": (start + timedelta(minutes=30 * i)).isoformat(),
+            "pv_estimate": kw_at(start + timedelta(minutes=30 * i)),
+            "pv_estimate10": 99,
+            "pv_estimate90": 99,
+        }
+        for i in range(48)
+    ]
+
+
+def test_forecast_period_is_not_stretched_across_a_gap():
+    raw = [
+        {"period_start": "2026-10-07T18:00:00+03:00", "pv_estimate": 2.0, "pv_estimate10": 9},
+        {"period_start": "2026-10-08T08:00:00+03:00", "pv_estimate": 2.0},
+    ]
+    periods = planner.forecast_periods(raw, HEL)
+    assert [end - start for start, end, _kw in periods] == [1800, 1800]
+    assert periods[0][2] == 2.0
+
+
+def test_cloudy_noon_stays_searchable():
+    day = date(2026, 6, 21)
+    now = datetime(2026, 6, 21, 8, tzinfo=HEL)
+
+    def kw(start):
+        return 0.2 if start.hour == 12 and start.minute == 0 else 3.0 if 9 <= start.hour < 16 else 0.0
+
+    prices = [0.2] * 96
+    prices[48] = prices[49] = 0.01
+    periods = planner.forecast_periods(_forecast(day, kw), HEL)
+    result = planner.plan(
+        {"raw_today": day_items(now, prices)},
+        now,
+        Settings(window_min_h=0.25, window_max_h=0.5, window_flex_pct=0, window_flex_eur=0),
+        40.0,
+        None,
+        LAT,
+        LON,
+        periods=periods,
+    )
+    noon = datetime(2026, 6, 21, 12, tzinfo=HEL)
+    assert result.windows[0].start == noon
+    assert len(result.blocked) == 2
+    assert all(start < end and not (start <= noon < end) for start, end in result.blocked)
+
+
+def test_cached_yesterday_does_not_invert_blocked():
+    now = datetime(2026, 10, 7, 14, tzinfo=HEL)
+
+    def rows(day):
+        t = datetime(day.year, day.month, day.day, 10, tzinfo=HEL)
+        out = []
+        while t.hour < 17:
+            out.append((t.timestamp(), (t + timedelta(minutes=30)).timestamp(), 2.0))
+            t += timedelta(minutes=30)
+        return out
+
+    y0 = planner.day_start(now, -1).timestamp()
+    history = {
+        "2026-10-06": {
+            "start": y0,
+            "slots": [[y0, y0 + 900, 0.1]],
+            "kwh": 12.0,
+            "periods": [list(p) for p in rows(date(2026, 10, 6))],
+        }
+    }
+    result = planner.plan(
+        {"raw_today": day_items(now, [0.1] * 96)},
+        now,
+        Settings(),
+        15.0,
+        None,
+        LAT,
+        LON,
+        history,
+        periods=rows(date(2026, 10, 7)),
+    )
+    assert len(result.blocked) == 2
+    assert [(start.date(), end.date()) for start, end in result.blocked] == [
+        (date(2026, 10, 6), date(2026, 10, 6)),
+        (date(2026, 10, 7), date(2026, 10, 7)),
+    ]
+    assert all(start < end for start, end in result.blocked)
+
+
+def test_remember_day_keeps_periods_when_rewritten():
+    now = datetime(2026, 10, 7, 12, tzinfo=HEL)
+    period = (now.timestamp(), now.timestamp() + 1800, 1.5)
+    live = planner.price_slots({"raw_today": day_items(now, [0.1] * 4)}, now)
+    days = planner.remember_day({}, now, live, 10.0, [period])
+    again = planner.remember_day(days, now, live, None)
+    entry = again[now.date().isoformat()]
+    assert entry["kwh"] == 10.0 and entry["periods"][0][2] == 1.5
+    tomorrow = (period[0] + 86400, period[1] + 86400, 4.0)
+    kept = planner.remember_day(again, now, live, None, [tomorrow])
+    assert kept[now.date().isoformat()]["periods"][0][2] == 1.5

@@ -17,6 +17,7 @@ GAP_S = 60
 EPS_S = 30
 PRICE_EPS = 1e-7
 SAMPLE_S = 900
+HALF_HOUR_S = 1800
 PAST_DAYS = 2
 
 Slot = tuple[float, float, float]
@@ -127,8 +128,20 @@ def imported_price_cache(stored: dict | None) -> tuple[dict, dict]:
     return days, seen
 
 
-def remember_day(days: dict | None, now: datetime, live: list[Slot], today_kwh: float | None) -> dict:
-    """Cache today's spot slots and last known solar kWh. Empty curves do not erase a day."""
+def _period_rows(periods) -> list[list[float]]:
+    rows = []
+    for raw in periods or []:
+        try:
+            start, end, kw = float(raw[0]), float(raw[1]), float(raw[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end > start:
+            rows.append([start, end, kw])
+    return rows
+
+
+def remember_day(days: dict | None, now: datetime, live: list[Slot], today_kwh: float | None, periods=None) -> dict:
+    """Cache today's spot slots, solar kWh and forecast periods. Empty curves do not erase a day."""
     start, end = day_start(now, 0).timestamp(), day_start(now, 1).timestamp()
     oldest = day_start(now, -PAST_DAYS).timestamp()
     out = {
@@ -140,15 +153,21 @@ def remember_day(days: dict | None, now: datetime, live: list[Slot], today_kwh: 
     if today:
         key = now.date().isoformat()
         previous = out.get(key) or {}
-        out[key] = {
+        kept = _period_rows(p for p in periods if start - 1 <= p[0] < end - 1) if periods else []
+        if not kept:
+            kept = previous.get("periods") or []
+        entry = {
             "start": start,
             "slots": today,
             "kwh": today_kwh if today_kwh is not None else previous.get("kwh"),
         }
+        if kept:
+            entry["periods"] = kept
+        out[key] = entry
     return out
 
 
-def _cached_days(days: dict | None) -> list[tuple[float, list[Slot], float | None]]:
+def _cached_days(days: dict | None) -> list[tuple[float, list[Slot], float | None, list]]:
     out = []
     for entry in (days or {}).values():
         if not isinstance(entry, dict) or entry.get("start") is None:
@@ -162,7 +181,7 @@ def _cached_days(days: dict | None) -> list[tuple[float, list[Slot], float | Non
             if slot[1] > slot[0]:
                 slots.append(slot)
         kwh = entry.get("kwh")
-        out.append((float(entry["start"]), slots, None if kwh is None else float(kwh)))
+        out.append((float(entry["start"]), slots, None if kwh is None else float(kwh), _period_rows(entry.get("periods"))))
     return out
 
 
@@ -177,7 +196,7 @@ def epoch_curve(attrs, now, days, _today_kwh, _tomorrow_kwh) -> tuple[list[Slot]
     live = price_slots(attrs, now)
     starts = {k: day_start(now, k).timestamp() for k in range(-PAST_DAYS, 3)}
     merged = list(live)
-    for start, slots, _kwh in _cached_days(days):
+    for start, slots, _kwh, _periods in _cached_days(days):
         for k in range(-PAST_DAYS, 0):
             if abs(start - starts[k]) > 1:
                 continue
@@ -274,25 +293,98 @@ def hour_kwh(day: date, tz: tzinfo, kwh: float | None, lat: float, lon: float) -
     ]
 
 
-def blocked_hours(now, today_kwh, tomorrow_kwh, threshold, lat, lon, extra=()) -> list[tuple[float, float]]:
-    if threshold <= 0:
+def forecast_periods(raw, tz: tzinfo) -> list[Slot]:
+    """Solcast ``detailedForecast`` rows as (start, end, kW). A row lasts 30 minutes and is not stretched."""
+    if not isinstance(raw, (list, tuple)):
         return []
-    days = ((now.date(), today_kwh), (now.date() + timedelta(days=1), tomorrow_kwh), *extra)
+    out = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        start = _ts(item.get("period_start"), tz)
+        kw = _price(item.get("pv_estimate"))
+        if start is None or kw is None:
+            continue
+        out.append((start, start + HALF_HOUR_S, kw))
+    out.sort()
+    return out
+
+
+def _on_day(periods, start: float, end: float) -> list[Slot]:
+    return [p for p in periods if start - 1 <= p[0] < end - 1]
+
+
+def _elevation_kw(day: date, tz: tzinfo, kwh: float | None, lat: float, lon: float) -> list[Slot]:
+    """Daily kWh spread by sun elevation, as average kW over each hour."""
+    return [
+        (start, end, energy / ((end - start) / 3600.0) if end > start else 0.0)
+        for start, end, energy in hour_kwh(day, tz, kwh, lat, lon)
+    ]
+
+
+def solar_periods(now, today_kwh, tomorrow_kwh, lat, lon, history, live) -> list[Slot]:
+    """Live today and tomorrow periods, else cached periods, else the elevation spread."""
+    tz = now.tzinfo
+    live = list(live or [])
+    cached = list(_cached_days(history))
+    out = []
+    for offset, kwh in ((0, today_kwh), (1, tomorrow_kwh)):
+        start, end = day_start(now, offset).timestamp(), day_start(now, offset + 1).timestamp()
+        own = _on_day(live, start, end)
+        out.extend(own or _elevation_kw(day_start(now, offset).date(), tz, kwh, lat, lon))
+    for offset in range(-PAST_DAYS, 0):
+        day = day_start(now, offset)
+        start = day.timestamp()
+        entry = next(((kwh, periods) for began, _slots, kwh, periods in cached if abs(began - start) <= 1), None)
+        if entry is None:
+            continue
+        kwh, periods = entry
+        own = _on_day(periods, start, day_start(now, offset + 1).timestamp())
+        out.extend(own or _elevation_kw(day.date(), tz, kwh, lat, lon))
+    return out
+
+
+def _slot_kw(slot: Slot, periods: list[Slot]) -> float:
+    """Overlap-weighted kW. Minutes with no period count as 0."""
+    start, end = slot[0], slot[1]
+    dur = end - start
+    if dur <= 0:
+        return 0.0
+    power = 0.0
+    for ps, pe, kw in periods:
+        overlap = min(end, pe) - max(start, ps)
+        if overlap > 0:
+            power += kw * overlap
+    return power / dur
+
+
+def mask_slots(slots: list[Slot], periods: list[Slot], limit: float) -> list[Slot]:
+    """Drop slots whose forecast kW is at or above ``limit``. Zero removes nothing."""
+    if limit <= 0:
+        return list(slots)
+    return [slot for slot in slots if _slot_kw(slot, periods) < limit]
+
+
+def blocked_ranges(periods: list[Slot], limit: float) -> list[tuple[float, float]]:
+    """Touching over-limit periods, in time order, for the chart."""
+    if limit <= 0:
+        return []
     ranges = []
-    for day, kwh in days:
-        for start, end, value in hour_kwh(day, now.tzinfo, kwh, lat, lon):
-            if value >= threshold:
-                if ranges and start <= ranges[-1][1] + 1:
-                    ranges[-1] = (ranges[-1][0], end)
-                else:
-                    ranges.append((start, end))
+    for start, end, kw in sorted(periods, key=lambda period: period[0]):
+        if kw < limit or end <= start:
+            continue
+        if ranges and start <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
     return ranges
 
 
-def usable_solar_end(now, today_kwh, threshold, lat, lon) -> float | None:
-    """End of today's last hour whose expected kWh reaches the off-sun threshold."""
-    limit = threshold if threshold > 0 else 1e-12
-    ends = [end for _s, end, kwh in hour_kwh(now.date(), now.tzinfo, today_kwh, lat, lon) if kwh >= limit]
+def usable_solar_end(periods: list[Slot], now: datetime, limit: float) -> float | None:
+    """End of today's last period at or above the limit, or above 0 kW when the limit is 0."""
+    start, end = day_start(now, 0).timestamp(), day_start(now, 1).timestamp()
+    floor = limit if limit > 0 else 1e-12
+    ends = [pe for ps, pe, kw in periods if start - 1 <= ps < end - 1 and kw >= floor]
     return max(ends, default=None)
 
 
@@ -375,11 +467,11 @@ def _prefer_daily_trip(search, seed, min_s, ceiling, deadline, pct, eur):
     return seed
 
 
-def choose_windows(slots, blocked, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur, tomorrow_valid):
+def choose_windows(slots, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_h, daily_pct, daily_eur, tomorrow_valid):
     """Up to two (start_ts, end_ts, avg) windows and a reason code."""
     if not slots:
         return [], "no_slots"
-    search = [s for s in slots if not any(s[0] < e and s[1] > b for b, e in blocked)]
+    search = slots
     min_s, max_s = min_h * 3600.0, max_h * 3600.0
     seed = find_seed(search, min_s)
     if seed is None or seed[0] > ceiling + PRICE_EPS:
@@ -430,13 +522,16 @@ def plan(
     lon: float,
     history: dict | None = None,
     epoch_seen: float | None = None,
+    periods=None,
 ) -> Plan:
     min_h = min(24.0, max(0.25, float(settings.window_min_h)))
     max_h = min(24.0, max(0.25, float(settings.window_max_h)))
     min_h, max_h = min(min_h, max_h), max(min_h, max_h)
-    threshold = float(settings.offsun_hour_kwh)
+    limit = float(settings.offsun_kw)
     published = tomorrow_prices_ok(attrs)
     slots, offset = ([], 0) if attrs is None else epoch_curve(attrs, now, history, today_kwh, tomorrow_kwh)
+    forecast = solar_periods(now, today_kwh, tomorrow_kwh, lat, lon, history, periods)
+    blocked = blocked_ranges(forecast, limit)
 
     def next_published(anchor_offset: int) -> bool:
         """Wall-clock tomorrow follows ``tomorrow_valid``. An earlier day follows its slots."""
@@ -445,13 +540,6 @@ def plan(
         start = day_start(now, anchor_offset + 1).timestamp()
         end = day_start(now, anchor_offset + 2).timestamp()
         return any(start - 1 <= slot[0] < end - 1 for slot in slots)
-    extra = [
-        (day_start(now, k).date(), kwh)
-        for start, _cached, kwh in _cached_days(history)
-        for k in range(-PAST_DAYS, 0)
-        if kwh is not None and abs(start - day_start(now, k).timestamp()) <= 1
-    ]
-    blocked = blocked_hours(now, today_kwh, tomorrow_kwh, threshold, lat, lon, extra)
     knobs = (
         min_h,
         max_h,
@@ -467,11 +555,12 @@ def plan(
         windows, reason = [], "no_source"
     else:
         anchor = day_start(now, offset).replace(hour=12)
-        windows, reason = choose_windows(_span(slots, now, offset), blocked, anchor, *knobs, next_published(offset))
+        windows, reason = choose_windows(
+            mask_slots(_span(slots, now, offset), forecast, limit), anchor, *knobs, next_published(offset)
+        )
         if epoch_seen is not None:
             previous, _reason = choose_windows(
-                _span(slots, now, offset - 1),
-                blocked,
+                mask_slots(_span(slots, now, offset - 1), forecast, limit),
                 day_start(now, offset - 1).replace(hour=12),
                 *knobs,
                 next_published(offset - 1),
@@ -483,7 +572,7 @@ def plan(
     priced_out = priced_out_spans(slots, float(settings.surplus_charging_price_ceiling))
     tomorrow_ok = published
     epoch_ts = None if attrs is None else epoch_day(slots, now, offset, published)
-    usable_end = usable_solar_end(now, today_kwh, threshold, lat, lon)
+    usable_end = usable_solar_end(forecast, now, limit)
     use_tomorrow = tomorrow_ok and (usable_end is None or now.timestamp() >= usable_end)
     gating_kwh = tomorrow_kwh if use_tomorrow else today_kwh
     enough_kwh = float(settings.solar_enough_kwh)

@@ -12,6 +12,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.restore_state import RestoreEntity
 
+from .const import DOMAIN
 from .entity import SettingEntity
 
 
@@ -24,6 +25,7 @@ class Knob:
     step: float
     unit: str | None
     icon: str
+    replaces: str | None = None
 
 
 KNOBS = (
@@ -44,7 +46,7 @@ KNOBS = (
     Knob("max_1phase_amp", "Surplus max 1-phase amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
     Knob("group_lot_a", "Group lot (fuse cap)", 6, 64, 1, UnitOfElectricCurrent.AMPERE, "mdi:tune"),
     Knob("solar_enough_kwh", "Enough solar", 0, 500, 1, UnitOfEnergy.KILO_WATT_HOUR, "mdi:solar-power"),
-    Knob("offsun_hour_kwh", "Off-sun hour", 0, 20, 0.1, UnitOfEnergy.KILO_WATT_HOUR, "mdi:weather-sunny-off"),
+    Knob("offsun_kw", "Off-Sun PV Power Below", 0, 20, 0.1, UnitOfPower.KILO_WATT, "mdi:weather-sunny-off", "offsun_hour_kwh"),
     Knob("after_charge_complete_keep_a", "After charge complete keep amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
 )
 PRIORITY = Knob("priority", "priority", 1, 99, 1, None, "mdi:order-numeric-ascending")
@@ -64,6 +66,7 @@ class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
 
     def __init__(self, hub, knob: Knob, serial: str | None = None):
         super().__init__(hub, "number", knob.key, knob.name, serial)
+        self._knob = knob
         self._attr_native_min_value = knob.low
         self._attr_native_max_value = knob.high
         self._attr_native_step = knob.step
@@ -73,6 +76,12 @@ class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
+        if last is None and self._knob.replaces:
+            from homeassistant.helpers.restore_state import RestoreStateData
+
+            data = await RestoreStateData.async_get_instance(self.hass)
+            stored = data.last_states.get(f"number.{DOMAIN}_{self._knob.replaces}")
+            last = stored.state if stored is not None else None
         try:
             value = float(last.state) if last is not None else None
         except ValueError:
