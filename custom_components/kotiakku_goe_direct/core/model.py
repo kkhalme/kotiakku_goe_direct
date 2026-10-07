@@ -13,6 +13,7 @@ IDLE_COMPLETE_W = 400
 KEEP_PROBE_S = 60
 SETTLE_S = 90
 START_GRACE_S = 120
+KOTIAKKU_AVG_S = 300
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_SOLAR_AND_GRID = "SolarAndGrid"
@@ -96,8 +97,9 @@ class Charger:
 
 @dataclass
 class HouseReading:
-    """Current Kotiakku state. ``sample`` is (solar_w, house_w, controller_w or None)
-    only when a new held sample should be taken this cycle."""
+    """Current Kotiakku state. ``sample`` is (solar_w, house_w, ev_w or None)
+    only when a publication should replace the held surplus this cycle.
+    ``ev_w`` is the draw averaged over the same window as that house value."""
 
     soc: float | None
     usable: bool

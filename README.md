@@ -22,7 +22,7 @@ One form (also under **Configure**):
 
 - **Spot-price sensor** with `raw_today` / `raw_tomorrow` (HACS Nordpool).
 - **Kotiakku SoC, solar power, house power** (house includes the EV).
-- **go-e Controller Car-power mean**, used to add EV watts back into leftover. Never written to.
+- **go-e Controller Car-power mean**, used as the EV term only when no charger `nrg` trace exists. Never written to.
 - **Solar forecast today / tomorrow** (optional). The daily state is kWh for Enough solar. Solcast `detailedForecast` supplies half-hour power in kW for the off-sun mask. Without that series, the day's kWh is spread by sun elevation.
 - **Charger serials 1–4**: the MQTT path `go-eCharger/<serial>`, not an entity id. Charger 1 is required.
 
@@ -46,7 +46,7 @@ Shared:
 
 - `sensor.kotiakku_goe_direct_window`: first planned window start; `windows`, `blocked`, `reason`, `tomorrow_ok`, `source_entity` attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on inside a window.
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
-- `sensor.kotiakku_goe_direct_available_surplus`: held leftover still free for surplus chargers (W).
+- `sensor.kotiakku_goe_direct_available_surplus`: surplus from the latest Kotiakku average still free for surplus chargers (W).
 - `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
 - Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, window price flex percentage 20 % / 0.02 €, daily trip deadline 7 h, daily trip price flex percentage 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, Off-Sun PV Power Below 1 kW, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
@@ -74,8 +74,9 @@ Each charger has one role, first match wins:
 
 ### Leftover surplus
 
-- Leftover is `|solar| − |house| + |EV|`, where EV is the Controller mean (charger `nrg` if the Controller is unknown). EV is added back only when house is at least `EV − max(1000, EV/5)`, so a house CT that misses the charger does not invent surplus. Keep chargers' `nrg` is then subtracted.
-- The leftover is sampled only when the Kotiakku SoC, solar or house value changes. Controller and `nrg` ticks do not move `amp`: following them made Tesla bounce between pilots. Kotiakku data older than 20 minutes (`last_reported`) or unusable counts as unusable.
+- Kotiakku solar, house, and SoC are 5-minute trailing averages. Surplus is the solar average minus the household base. Base is the house average minus the charger draw averaged over those same 5 minutes; the window ends at the house sensor's `last_reported`. Keep chargers' `nrg` is then subtracted.
+- That draw is the stepwise mean of go-e `nrg`. Each `nrg` update is stored (about 10 minutes, plus the last older point) and does not move `amp`. One charger's update keeps the others' last known watts. The Controller mean is used only when no `nrg` has been seen. A trace that does not reach the start of the window leaves the last base in place.
+- A closed pair (`house >= ev`) sets base to `house − ev`. The meter omits the car only when that draw was steady across the window (max and min within `max(1000, ev/5)`) and house is still below `ev − max(1000, ev/5)`; then base is the house average. Any other gap keeps the last base, and a new solar average still moves surplus by the same amount. SoC does not recompute surplus. Solar and house edges within about 15 s are one publication. Kotiakku data older than 20 minutes (`last_reported`) or unusable counts as unusable.
 - A charger starts when data is usable, its share is at least the start leftover (2000 W), and SoC is at least 92 % (or another charger is already on surplus). It keeps running at 1380 W (6 A) or more.
 - Chargers are served in priority order. Each gets everything still unallocated, then reserves what it was just offered, so the next charger only gets what the higher one cannot use. During a 1-to-3 phase hold it reserves what it will take after the switch. A charger that stays clearly below an offer that has been unchanged for 90 s is car-limited and reserves only its `nrg`. A charger that was turned on but is not taking (`nrg` < 100 W) reserves its offer for 120 s, then yields. Idle Complete (car Complete, `nrg` < 400 W) is skipped unless keep was cut.
 - While a higher-priority charger is on, a lower one that is not already taking starts only when two Kotiakku reports in a row leave it at least the start leftover. One report where the lagging house value misses a fresh EV ramp cannot start it.

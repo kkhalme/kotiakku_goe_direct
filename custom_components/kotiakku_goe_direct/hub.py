@@ -34,9 +34,10 @@ from .const import (
     STORE_KEY,
 )
 from .core import planner
-from .core.engine import decide
+from .core.engine import decide, ev_for_window, pair_base, reconciled_reading
 from .core.model import (
     IDLE_COMPLETE_W,
+    KOTIAKKU_AVG_S,
     POLICY_FORCE_OFF,
     TAKE_MIN_W,
     Charger,
@@ -52,6 +53,8 @@ from .goe import GoeMqtt
 _LOGGER = logging.getLogger(__package__)
 
 STALE = timedelta(minutes=20)
+TRACE_KEEP = timedelta(minutes=10)
+BURST_S = 15
 UNUSABLE = ("", "unknown", "unavailable", "none", "nan")
 
 
@@ -105,7 +108,10 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         self.ready = False
         self._lock = asyncio.Lock()
         self._store: Store = Store(hass, 1, STORE_KEY)
-        self._sample_armed = True
+        self._draw_trace: list[tuple[datetime, int]] = []
+        self._burst_until: datetime | None = None
+        self._burst_house = False
+        self._burst_solar = False
         self._unsubs: list = []
         self._wakeup = None
         self._warned_units: set[str] = set()
@@ -150,9 +156,21 @@ class Hub(DataUpdateCoordinator[Snapshot]):
     @callback
     def _on_kotiakku(self, event: Event) -> None:
         old, new = event.data.get("old_state"), event.data.get("new_state")
-        if _number(new) is not None and (old is None or old.state != new.state):
-            self._sample_armed = True
+        if _number(new) is None or (old is not None and old.state == new.state):
+            return
+        entity = event.data.get("entity_id")
+        if entity == self.entity(CONF_SOC_ENTITY):
             self.request()
+            return
+        if entity == self.entity(CONF_HOUSE_ENTITY):
+            self._burst_house = True
+        elif entity == self.entity(CONF_SOLAR_ENTITY):
+            self._burst_solar = True
+        else:
+            return
+        if self._burst_until is None:
+            self._burst_until = dt_util.now() + timedelta(seconds=BURST_S)
+        self.request()
 
     @callback
     def _on_source(self, _event: Event) -> None:
@@ -160,8 +178,10 @@ class Hub(DataUpdateCoordinator[Snapshot]):
 
     @callback
     def _on_goe_status(self, serial: str, key: str, old: int | None, new: int | None) -> None:
-        if key == "nrg" and not (_crossed(old, new, TAKE_MIN_W) or _crossed(old, new, IDLE_COMPLETE_W)):
-            return
+        if key == "nrg":
+            self._note_draw()
+            if not (_crossed(old, new, TAKE_MIN_W) or _crossed(old, new, IDLE_COMPLETE_W)):
+                return
         if key not in ("car", "nrg", "frc", "lot"):
             return
         if key == "car":
@@ -209,10 +229,12 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         if not self.ready:
             return Snapshot(plan, None, self.memory.sample, usable)
         sample = None
-        if usable and self._sample_armed:
-            self._sample_armed = False
-            controller = self._watts(self.entity(CONF_CONTROLLER_ENTITY))
-            sample = (self._watts(self.entity(CONF_SOLAR_ENTITY)), self._watts(self.entity(CONF_HOUSE_ENTITY)), controller)
+        if self._burst_until is not None and now >= self._burst_until:
+            if usable:
+                sample = self._publication(now)
+            self._burst_until = None
+            self._burst_house = False
+            self._burst_solar = False
         house = HouseReading(_number(self.hass.states.get(self.entity(CONF_SOC_ENTITY))), usable, sample)
         chargers = [
             Charger(serial, slot, car=self.goe.live[serial].get("car"), nrg_w=self.goe.live[serial].get("nrg"))
@@ -226,7 +248,7 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         for serial, charger_decision in decision.chargers.items():
             await self.goe.send(serial, charger_decision.command, now)
         self._store.async_delay_save(self._stored, 5)
-        self._schedule_wakeup(now, decision.next_wakeup, self.goe.next_retry_at())
+        self._schedule_wakeup(now, decision.next_wakeup, self.goe.next_retry_at(), self._burst_until)
         return Snapshot(plan, decision, self.memory.sample, usable)
 
     def price_history(self) -> dict:
@@ -263,6 +285,70 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             "days": self.price_days,
             "seen": self.epoch_seen,
         }
+
+    def _site_draw(self) -> int | None:
+        total, known = 0, False
+        for serial in self.serials:
+            nrg = self.goe.live[serial].get("nrg")
+            if nrg is None:
+                continue
+            known = True
+            total += max(int(nrg), 0)
+        return total if known else None
+
+    def _note_draw(self) -> None:
+        """Append the site draw. One charger's update keeps the others' last known watts."""
+        draw = self._site_draw()
+        if draw is None:
+            return
+        now = dt_util.now()
+        if self._draw_trace and self._draw_trace[-1][1] == draw:
+            return
+        self._draw_trace.append((now, draw))
+        cutoff = now - TRACE_KEEP
+        older = [point for point in self._draw_trace if point[0] < cutoff]
+        recent = [point for point in self._draw_trace if point[0] >= cutoff]
+        if older:
+            recent.insert(0, older[-1])
+        self._draw_trace = recent
+
+    def _report_end(self, key: str, now: datetime) -> datetime:
+        state = self.hass.states.get(self.entity(key))
+        reported = None if state is None else state.last_reported
+        if reported is None:
+            return now
+        return dt_util.as_local(reported)
+
+    def _publication(self, now: datetime) -> tuple[int, int, int] | None:
+        solar = self._watts(self.entity(CONF_SOLAR_ENTITY))
+        if solar is None or not (self._burst_house or self._burst_solar):
+            return None
+        house_w = ev = None
+        steady = False
+        if self._burst_house:
+            house_w = self._watts(self.entity(CONF_HOUSE_ENTITY))
+            if house_w is not None:
+                end = self._report_end(CONF_HOUSE_ENTITY, now)
+                ev, steady = ev_for_window(
+                    self._draw_trace,
+                    end - timedelta(seconds=KOTIAKKU_AVG_S),
+                    end,
+                    self._watts(self.entity(CONF_CONTROLLER_ENTITY)),
+                )
+                self._log_pair(house_w, ev, steady)
+        return reconciled_reading(self.memory.sample, solar, house_w, ev, steady)
+
+    def _log_pair(self, house_w: int, ev: int | None, steady: bool) -> None:
+        previous = self.memory.sample
+        held = None if previous is None else previous.solar_w - previous.leftover_w
+        if ev is None:
+            _LOGGER.info("surplus window is not covered by the nrg trace; base stays %s W", held)
+            return
+        base = pair_base(house_w, ev, steady)
+        if base is None:
+            _LOGGER.info("surplus pair did not close: house %s W, ev avg %s W; base stays %s W", house_w, ev, held)
+        elif base != held:
+            _LOGGER.info("surplus base %s W (house %s W, ev avg %s W)", base, abs(house_w), abs(ev))
 
     def _schedule_wakeup(self, now: datetime, *times: datetime | None) -> None:
         if self._wakeup:

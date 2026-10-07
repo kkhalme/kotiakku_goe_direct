@@ -60,7 +60,7 @@ class WindowSensor(HubEntity, SensorEntity):
 
 
 class AvailableSurplusSensor(HubEntity, SensorEntity):
-    """Held Kotiakku leftover still free for surplus chargers (after keep take)."""
+    """Surplus from the latest Kotiakku average still free for surplus chargers (after keep take)."""
 
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -83,6 +83,7 @@ class AvailableSurplusSensor(HubEntity, SensorEntity):
             "solar_w": sample.solar_w,
             "house_w": sample.house_w,
             "ev_w": sample.ev_w,
+            "base_w": sample.solar_w - sample.leftover_w,
             "leftover_w": sample.leftover_w,
             "keep_take_w": sample.keep_take_w,
             "sampled_at": _iso(sample.at),
