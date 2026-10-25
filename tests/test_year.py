@@ -113,8 +113,10 @@ def simulate(name, policy=POLICY_SOLAR_PRIORITY, b_policy=POLICY_FORCE_OFF, n_ch
     slots = [day_slots(d, price_fn, i) for i, d in enumerate(days)]
     kwh = [day_kwh(d, cloud) for d in days]
     serials = ["A", "B"][:n_chargers]
-    settings = Settings(policy={"A": policy, "B": b_policy}, priority={"A": 1, "B": 2})
+    settings = Settings(policy={"A": policy, "B": b_policy})
     chargers = [Charger(s, i, car=CAR_WAITCAR, nrg_w=0) for i, s in enumerate(serials)]
+    for charger in chargers:
+        settings.add_charger(charger.serial, charger.slot)
     memory, ticks, now = Memory(), [], start
     end = datetime.fromtimestamp(start.timestamp() + 48 * 3600, HEL)
     while now <= end:
@@ -122,7 +124,9 @@ def simulate(name, policy=POLICY_SOLAR_PRIORITY, b_policy=POLICY_FORCE_OFF, n_ch
         attrs = {"raw_today": slots[index]}
         if now.hour >= PUBLISH_H:
             attrs.update(raw_tomorrow=slots[index + 1], tomorrow_valid=True)
-        plan = planner.plan(attrs, now, settings, kwh[index], kwh[index + 1], LAT, LON)
+        plan = planner.plan(
+            attrs, now, settings, lat=LAT, lon=LON, today_kwh=kwh[index], tomorrow_kwh=kwh[index + 1]
+        )
         ev_w = sum(c.nrg_w for c in chargers)
         solar, base = pv_w(now, cloud), house_base_w(now, outdoor_c)
         house = HouseReading(soc, True, (solar, base + ev_w, ev_w))

@@ -34,11 +34,10 @@ from .const import (
     STORE_KEY,
 )
 from .core import planner
-from .core.engine import decide, ev_for_window, pair_base, reconciled_reading
+from .core.engine import decide, ev_for_window, note_draw, pair_base, reconciled_reading
 from .core.model import (
     IDLE_COMPLETE_W,
     KOTIAKKU_AVG_S,
-    POLICY_FORCE_OFF,
     TAKE_MIN_W,
     Charger,
     Decision,
@@ -53,9 +52,11 @@ from .goe import GoeMqtt
 _LOGGER = logging.getLogger(__package__)
 
 STALE = timedelta(minutes=20)
-TRACE_KEEP = timedelta(minutes=10)
 BURST_S = 15
 UNUSABLE = ("", "unknown", "unavailable", "none", "nan")
+KOTIAKKU_ENTITIES = (CONF_SOC_ENTITY, CONF_SOLAR_ENTITY, CONF_HOUSE_ENTITY)
+SOURCE_ENTITIES = (CONF_PRICE_ENTITY, CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY)
+FORECAST_ENTITIES = (CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY)
 
 
 @dataclass
@@ -64,6 +65,7 @@ class Snapshot:
     decision: Decision | None
     sample: Sample | None
     usable: bool
+    history: dict
 
     @property
     def available_w(self) -> int | None:
@@ -98,11 +100,7 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         self.serials = [s for key in CONF_CHARGER_SERIALS if (s := str(self.conf.get(key) or "").strip())]
         self.settings = Settings()
         for slot, serial in enumerate(self.serials):
-            self.settings.policy[serial] = POLICY_FORCE_OFF
-            self.settings.priority[serial] = slot + 1
-            self.settings.until_unplug[serial] = False
-            self.settings.keep[serial] = False
-            self.settings.keep_enable[serial] = True
+            self.settings.add_charger(serial, slot)
         self.memory = Memory()
         self.goe = GoeMqtt.for_hass(hass, self.serials, self._on_goe_status)
         self.ready = False
@@ -124,6 +122,10 @@ class Hub(DataUpdateCoordinator[Snapshot]):
     def entity(self, key: str) -> str:
         return str(self.conf.get(key) or "").strip()
 
+    def _state(self, key: str) -> State | None:
+        entity_id = self.entity(key)
+        return self.hass.states.get(entity_id) if entity_id else None
+
     async def async_start(self) -> None:
         stored = await self._store.async_load() or {}
         for serial, data in (stored.get("chargers") or {}).items():
@@ -133,10 +135,10 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         self.price_days = stored.get("days") or {}
         self.epoch_seen = stored.get("seen") or {}
         self._unsubs += await self.goe.async_subscribe(self.hass)
-        kotiakku = [self.entity(k) for k in (CONF_SOC_ENTITY, CONF_SOLAR_ENTITY, CONF_HOUSE_ENTITY)]
-        sources = [self.entity(k) for k in (CONF_PRICE_ENTITY, CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY)]
-        self._unsubs.append(async_track_state_change_event(self.hass, [e for e in kotiakku if e], self._on_kotiakku))
-        self._unsubs.append(async_track_state_change_event(self.hass, [e for e in sources if e], self._on_source))
+        kotiakku = [e for key in KOTIAKKU_ENTITIES if (e := self.entity(key))]
+        sources = [e for key in SOURCE_ENTITIES if (e := self.entity(key))]
+        self._unsubs.append(async_track_state_change_event(self.hass, kotiakku, self._on_kotiakku))
+        self._unsubs.append(async_track_state_change_event(self.hass, sources, self._on_source))
         if self.hass.state is not CoreState.running:
             self._unsubs.append(self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._on_source))
 
@@ -199,35 +201,31 @@ class Hub(DataUpdateCoordinator[Snapshot]):
 
     async def _cycle(self) -> Snapshot:
         now = dt_util.now()
-        price = self.hass.states.get(self.entity(CONF_PRICE_ENTITY))
+        price = self._state(CONF_PRICE_ENTITY)
         attrs = None if price is None else price.attributes
-        today_kwh = self._kwh(self.entity(CONF_SOLAR_TODAY_ENTITY))
-        tomorrow_kwh = self._kwh(self.entity(CONF_SOLAR_TOMORROW_ENTITY))
+        today_kwh = self._kwh(CONF_SOLAR_TODAY_ENTITY)
+        tomorrow_kwh = self._kwh(CONF_SOLAR_TOMORROW_ENTITY)
         periods = self._forecast_periods(now)
-        if attrs is not None:
-            live = planner.price_slots(attrs, now)
-            self.price_days = planner.remember_day(self.price_days, now, live, today_kwh, periods)
-            slots, offset = planner.epoch_curve(attrs, now, self.price_days, today_kwh, tomorrow_kwh)
-            valid = planner.tomorrow_prices_ok(attrs)
-            self.epoch_seen, seen_ts = planner.note_epoch(self.epoch_seen, planner.epoch_day(slots, now, offset, valid), now)
-        else:
-            seen_ts = None
+        self.price_days, self.epoch_seen, seen_ts = planner.update_history(
+            attrs, now, self.price_days, self.epoch_seen, today_kwh, periods
+        )
         plan = planner.plan(
             attrs,
             now,
             self.settings,
-            today_kwh,
-            tomorrow_kwh,
-            self.hass.config.latitude,
-            self.hass.config.longitude,
-            self.price_days,
-            seen_ts,
-            periods,
+            lat=self.hass.config.latitude,
+            lon=self.hass.config.longitude,
+            today_kwh=today_kwh,
+            tomorrow_kwh=tomorrow_kwh,
+            history=self.price_days,
+            epoch_seen=seen_ts,
+            periods=periods,
         )
         self._log_plan(plan)
         usable = self._usable(now)
+        history = planner.history_view(self.price_days, now)
         if not self.ready:
-            return Snapshot(plan, None, self.memory.sample, usable)
+            return Snapshot(plan, None, self.memory.sample, usable, history)
         sample = None
         if self._burst_until is not None and now >= self._burst_until:
             if usable:
@@ -235,46 +233,19 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             self._burst_until = None
             self._burst_house = False
             self._burst_solar = False
-        house = HouseReading(_number(self.hass.states.get(self.entity(CONF_SOC_ENTITY))), usable, sample)
+        house = HouseReading(_number(self._state(CONF_SOC_ENTITY)), usable, sample)
         chargers = [
             Charger(serial, slot, car=self.goe.live[serial].get("car"), nrg_w=self.goe.live[serial].get("nrg"))
             for slot, serial in enumerate(self.serials)
         ]
         decision = decide(self.settings, chargers, house, plan, now, self.memory)
-        for serial, changes in decision.switches.items():
-            for name, value in changes.items():
-                getattr(self.settings, name)[serial] = value
+        self.settings.apply(decision.switches)
         self._log_roles(decision)
         for serial, charger_decision in decision.chargers.items():
             await self.goe.send(serial, charger_decision.command, now)
         self._store.async_delay_save(self._stored, 5)
         self._schedule_wakeup(now, decision.next_wakeup, self.goe.next_retry_at(), self._burst_until)
-        return Snapshot(plan, decision, self.memory.sample, usable)
-
-    def price_history(self) -> dict:
-        """Sensor view of the cached spot days. Slot lists are unrecorded."""
-        now = dt_util.now()
-        names = {0: "today", -1: "yesterday", -2: "day_before_yesterday"}
-        view = {"yesterday_avg": None, "days": [], "epoch_seen": {}, **{f"raw_{name}": [] for name in names.values()}}
-        starts = {k: planner.day_start(now, k).timestamp() for k in names}
-        for key, entry in sorted((self.price_days or {}).items()):
-            slots = entry.get("slots") or []
-            start = entry.get("start")
-            if start is None or not slots:
-                continue
-            dur = sum(s[1] - s[0] for s in slots)
-            avg = sum(s[2] * (s[1] - s[0]) for s in slots) / dur if dur else None
-            view["days"].append({"date": key, "kwh": entry.get("kwh"), "slot_count": len(slots), "avg": avg})
-            for offset, day_ts in starts.items():
-                if abs(start - day_ts) > 1:
-                    continue
-                view[f"raw_{names[offset]}"] = [
-                    {"start": datetime.fromtimestamp(s, now.tzinfo).isoformat(), "end": datetime.fromtimestamp(e, now.tzinfo).isoformat(), "value": p}
-                    for s, e, p in slots
-                ]
-                if offset == -1:
-                    view["yesterday_avg"] = None if avg is None else round(avg, 6)
-        return view
+        return Snapshot(plan, decision, self.memory.sample, usable, history)
 
     def _stored(self) -> dict:
         return {
@@ -287,53 +258,35 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         }
 
     def _site_draw(self) -> int | None:
-        total, known = 0, False
-        for serial in self.serials:
-            nrg = self.goe.live[serial].get("nrg")
-            if nrg is None:
-                continue
-            known = True
-            total += max(int(nrg), 0)
-        return total if known else None
+        known = [nrg for serial in self.serials if (nrg := self.goe.live[serial].get("nrg")) is not None]
+        return sum(max(nrg, 0) for nrg in known) if known else None
 
     def _note_draw(self) -> None:
         """Append the site draw. One charger's update keeps the others' last known watts."""
         draw = self._site_draw()
-        if draw is None:
-            return
-        now = dt_util.now()
-        if self._draw_trace and self._draw_trace[-1][1] == draw:
-            return
-        self._draw_trace.append((now, draw))
-        cutoff = now - TRACE_KEEP
-        older = [point for point in self._draw_trace if point[0] < cutoff]
-        recent = [point for point in self._draw_trace if point[0] >= cutoff]
-        if older:
-            recent.insert(0, older[-1])
-        self._draw_trace = recent
+        if draw is not None:
+            self._draw_trace = note_draw(self._draw_trace, dt_util.now(), draw)
 
     def _report_end(self, key: str, now: datetime) -> datetime:
-        state = self.hass.states.get(self.entity(key))
+        state = self._state(key)
         reported = None if state is None else state.last_reported
-        if reported is None:
-            return now
-        return dt_util.as_local(reported)
+        return now if reported is None else dt_util.as_local(reported)
 
     def _publication(self, now: datetime) -> tuple[int, int, int] | None:
-        solar = self._watts(self.entity(CONF_SOLAR_ENTITY))
+        solar = self._watts(CONF_SOLAR_ENTITY)
         if solar is None or not (self._burst_house or self._burst_solar):
             return None
         house_w = ev = None
         steady = False
         if self._burst_house:
-            house_w = self._watts(self.entity(CONF_HOUSE_ENTITY))
+            house_w = self._watts(CONF_HOUSE_ENTITY)
             if house_w is not None:
                 end = self._report_end(CONF_HOUSE_ENTITY, now)
                 ev, steady = ev_for_window(
                     self._draw_trace,
                     end - timedelta(seconds=KOTIAKKU_AVG_S),
                     end,
-                    self._watts(self.entity(CONF_CONTROLLER_ENTITY)),
+                    self._watts(CONF_CONTROLLER_ENTITY),
                 )
                 self._log_pair(house_w, ev, steady)
         return reconciled_reading(self.memory.sample, solar, house_w, ev, steady)
@@ -348,7 +301,7 @@ class Hub(DataUpdateCoordinator[Snapshot]):
         if base is None:
             _LOGGER.info("surplus pair did not close: house %s W, ev avg %s W; base stays %s W", house_w, ev, held)
         elif base != held:
-            _LOGGER.info("surplus base %s W (house %s W, ev avg %s W)", base, abs(house_w), abs(ev))
+            _LOGGER.info("surplus base %s W (house %s W, ev avg %s W)", base, house_w, ev)
 
     def _schedule_wakeup(self, now: datetime, *times: datetime | None) -> None:
         if self._wakeup:
@@ -359,8 +312,7 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             self._wakeup = async_track_point_in_utc_time(self.hass, self._on_wakeup, min(future))
 
     def _usable(self, now: datetime) -> bool:
-        ids = [self.entity(k) for k in (CONF_SOC_ENTITY, CONF_SOLAR_ENTITY, CONF_HOUSE_ENTITY)]
-        states = [self.hass.states.get(e) for e in ids]
+        states = [self._state(key) for key in KOTIAKKU_ENTITIES]
         numeric = all(_number(s) is not None for s in states)
         newest = max((s.last_reported for s in states if s is not None), default=None)
         usable = numeric and newest is not None and now - newest <= STALE
@@ -368,36 +320,37 @@ class Hub(DataUpdateCoordinator[Snapshot]):
             if usable:
                 _LOGGER.info("Kotiakku sensors usable")
             else:
-                detail = ", ".join(f"{e}={None if s is None else s.state}" for e, s in zip(ids, states))
+                detail = ", ".join(
+                    f"{self.entity(key)}={None if s is None else s.state}" for key, s in zip(KOTIAKKU_ENTITIES, states)
+                )
                 _LOGGER.warning("Kotiakku sensors unusable or stale (%s): surplus holds 6 A, then stops", detail)
             self._last_usable = usable
         return usable
 
-    def _watts(self, entity_id: str) -> int | None:
-        state = self.hass.states.get(entity_id)
+    def _watts(self, key: str) -> int | None:
+        """Unsigned watts: sensors may report consumption or export as negative."""
+        state = self._state(key)
         value = _number(state)
         if value is None:
             return None
         unit = state.attributes.get("unit_of_measurement")
         if unit in PowerConverter.VALID_UNITS:
-            return int(PowerConverter.convert(value, unit, UnitOfPower.WATT))
-        if entity_id not in self._warned_units:
-            self._warned_units.add(entity_id)
-            _LOGGER.warning("%s has no power unit (%s); assuming W", entity_id, unit)
-        return int(value)
+            value = PowerConverter.convert(value, unit, UnitOfPower.WATT)
+        elif state.entity_id not in self._warned_units:
+            self._warned_units.add(state.entity_id)
+            _LOGGER.warning("%s has no power unit (%s); assuming W", state.entity_id, unit)
+        return abs(int(value))
 
     def _forecast_periods(self, now: datetime) -> list:
-        tz = now.tzinfo
         periods = []
-        for key in (CONF_SOLAR_TODAY_ENTITY, CONF_SOLAR_TOMORROW_ENTITY):
-            entity_id = self.entity(key)
-            state = self.hass.states.get(entity_id) if entity_id else None
+        for key in FORECAST_ENTITIES:
+            state = self._state(key)
             raw = None if state is None else state.attributes.get("detailedForecast")
-            periods += planner.forecast_periods(raw, tz)
+            periods += planner.forecast_periods(raw, now.tzinfo)
         return periods
 
-    def _kwh(self, entity_id: str) -> float | None:
-        state = self.hass.states.get(entity_id) if entity_id else None
+    def _kwh(self, key: str) -> float | None:
+        state = self._state(key)
         value = _number(state)
         if value is None:
             return None

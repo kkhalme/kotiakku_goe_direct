@@ -23,7 +23,7 @@ def solar_curve(prices_night=0.03, prices_day=-0.02):
 
 
 def run(now, today_kwh, tomorrow_kwh, attrs, **knobs):
-    return planner.plan(attrs, now, Settings(**knobs), today_kwh, tomorrow_kwh, LAT, LON)
+    return planner.plan(attrs, now, Settings(**knobs), lat=LAT, lon=LON, today_kwh=today_kwh, tomorrow_kwh=tomorrow_kwh)
 
 
 def test_hour_weights_sum_and_night_is_zero():
@@ -127,10 +127,9 @@ def test_cloudy_noon_stays_searchable():
         {"raw_today": day_items(now, prices)},
         now,
         Settings(window_min_h=0.25, window_max_h=0.5, window_flex_pct=0, window_flex_eur=0),
-        40.0,
-        None,
-        LAT,
-        LON,
+        lat=LAT,
+        lon=LON,
+        today_kwh=40.0,
         periods=periods,
     )
     noon = datetime(2026, 6, 21, 12, tzinfo=HEL)
@@ -163,11 +162,10 @@ def test_cached_yesterday_does_not_invert_blocked():
         {"raw_today": day_items(now, [0.1] * 96)},
         now,
         Settings(),
-        15.0,
-        None,
-        LAT,
-        LON,
-        history,
+        lat=LAT,
+        lon=LON,
+        today_kwh=15.0,
+        history=history,
         periods=rows(date(2026, 10, 7)),
     )
     assert len(result.blocked) == 2

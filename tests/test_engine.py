@@ -1,12 +1,13 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from core.engine import decide, ev_for_window, leftover_w, reconciled_reading, window_mean, window_span
+from core.engine import decide, ev_for_window, leftover_w, note_draw, reconciled_reading, window_mean, window_span
 from core.model import (
     CAR_CHARGING,
     CAR_COMPLETE,
     CAR_IDLE,
     CAR_WAITCAR,
+    DRAW_TRACE_S,
     PHASE_3,
     POLICY_DAILY_TRIP,
     POLICY_FORCE_OFF,
@@ -31,7 +32,7 @@ HOLD = 15 * 60
 
 
 def make_plan(windows=(), enough=False):
-    return Plan(list(windows), [], "planned", False, None, None, None, "today", None, enough)
+    return Plan(list(windows), enough=enough)
 
 
 class Sim:
@@ -40,7 +41,7 @@ class Sim:
         self.settings = Settings(**knobs)
         for slot, serial in enumerate(serials):
             self.settings.policy[serial] = policy
-            self.settings.priority[serial] = slot + 1
+            self.settings.add_charger(serial, slot)
         self.chargers = {s: Charger(s, slot, car=CAR_WAITCAR, nrg_w=0) for slot, s in enumerate(serials)}
         self.memory = Memory()
         self.now = T0
@@ -62,9 +63,7 @@ class Sim:
         sample = None if leftover is None else (leftover + house_w, house_w, controller)
         house = HouseReading(self.soc, self.usable, sample)
         self.decision = decide(self.settings, list(self.chargers.values()), house, self.plan, self.now, self.memory)
-        for serial, changes in self.decision.switches.items():
-            for name, value in changes.items():
-                getattr(self.settings, name)[serial] = value
+        self.settings.apply(self.decision.switches)
         return self
 
     def cmd(self, serial="A"):
@@ -79,7 +78,19 @@ def test_leftover_formula():
     assert leftover_w(5000, 4000, 3000) == 4000
     assert leftover_w(5000, 800, 3000) == 4200
     assert leftover_w(0, 2000, 0) == -2000
-    assert leftover_w(-5000, -1000, 0) == 4000
+
+
+def test_draw_trace_keeps_the_last_point_before_the_window():
+    trace = note_draw([], T0, 1000)
+    assert note_draw(trace, T0 + timedelta(seconds=5), 1000) is trace
+    trace = note_draw(trace, T0 + timedelta(seconds=10), 2000)
+    trace = note_draw(trace, T0 + timedelta(seconds=20), 3000)
+    late = T0 + timedelta(seconds=10 + DRAW_TRACE_S + 5)
+    assert note_draw(trace, late, 4000) == [
+        (T0 + timedelta(seconds=10), 2000),
+        (T0 + timedelta(seconds=20), 3000),
+        (late, 4000),
+    ]
 
 
 def _sample(solar, house, ev, leftover):

@@ -10,10 +10,12 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import RestoreEntity, RestoreStateData
 
 from .const import DOMAIN
 from .entity import SettingEntity
+
+AMPERE = UnitOfElectricCurrent.AMPERE
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,9 @@ class Knob:
     step: float
     unit: str | None
     icon: str
+    integer: bool = False
     replaces: str | None = None
+    """Key of a renamed knob whose restored state seeds this one when it has none of its own."""
 
 
 KNOBS = (
@@ -36,8 +40,14 @@ KNOBS = (
     Knob("window_flex_eur", "Window price flex euro", 0, 1, 0.001, None, "mdi:currency-eur"),
     Knob("daily_trip_charge_after_h", "Daily trip charge after hour", 0, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline"),
     Knob(
-        "daily_trip_charge_before_h", "Daily trip charge before hour", 0, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline",
-        "daily_trip_deadline_h",
+        "daily_trip_charge_before_h",
+        "Daily trip charge before hour",
+        0,
+        24,
+        0.25,
+        UnitOfTime.HOURS,
+        "mdi:timer-outline",
+        replaces="daily_trip_deadline_h",
     ),
     Knob("daily_trip_price_flex_pct", "Daily trip price flex percentage", 0, 100, 1, PERCENTAGE, "mdi:percent-outline"),
     Knob("daily_trip_price_flex_eur", "Daily trip price flex euro", 0, 1, 0.001, None, "mdi:currency-eur"),
@@ -46,12 +56,12 @@ KNOBS = (
     Knob("surplus_start_w", "Surplus start leftover", 0, 50000, 50, UnitOfPower.WATT, "mdi:lightning-bolt"),
     Knob("surplus_charging_price_ceiling", "Surplus charging price ceiling", -1, 5, 0.001, None, "mdi:currency-eur"),
     Knob("hold_minutes", "Hold", 1, 120, 1, UnitOfTime.MINUTES, "mdi:timer-outline"),
-    Knob("max_a", "Per-charger amp cap", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
-    Knob("max_1phase_amp", "Surplus max 1-phase amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
-    Knob("group_lot_a", "Group lot (fuse cap)", 6, 64, 1, UnitOfElectricCurrent.AMPERE, "mdi:tune"),
+    Knob("max_a", "Per-charger amp cap", 6, 32, 1, AMPERE, "mdi:current-ac", integer=True),
+    Knob("max_1phase_amp", "Surplus max 1-phase amp", 6, 32, 1, AMPERE, "mdi:current-ac", integer=True),
+    Knob("group_lot_a", "Group lot (fuse cap)", 6, 64, 1, AMPERE, "mdi:tune", integer=True),
     Knob("solar_enough_kwh", "Enough solar", 0, 500, 1, UnitOfEnergy.KILO_WATT_HOUR, "mdi:solar-power"),
-    Knob("offsun_kw", "Off-Sun PV Power Below", 0, 20, 0.1, UnitOfPower.KILO_WATT, "mdi:weather-sunny-off", "offsun_hour_kwh"),
-    Knob("after_charge_complete_keep_a", "After charge complete keep amp", 6, 32, 1, UnitOfElectricCurrent.AMPERE, "mdi:current-ac"),
+    Knob("offsun_kw", "Off-Sun PV Power Below", 0, 20, 0.1, UnitOfPower.KILO_WATT, "mdi:weather-sunny-off"),
+    Knob("after_charge_complete_keep_a", "After charge complete keep amp", 6, 32, 1, AMPERE, "mdi:current-ac", integer=True),
 )
 PRIORITY = Knob("priority", "priority", 1, 99, 1, None, "mdi:order-numeric-ascending")
 HUB_KEYS = tuple(knob.key for knob in KNOBS)
@@ -81,8 +91,6 @@ class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is None and self._knob.replaces:
-            from homeassistant.helpers.restore_state import RestoreStateData
-
             data = await RestoreStateData.async_get_instance(self.hass)
             stored = data.last_states.get(f"number.{DOMAIN}_{self._knob.replaces}")
             last = stored.state if stored is not None else None
@@ -92,6 +100,9 @@ class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
             value = None
         if value is not None and self.native_min_value <= value <= self.native_max_value:
             self.put(value)
+
+    def put(self, value) -> None:
+        super().put(round(value) if self._knob.integer else value)
 
     @property
     def native_value(self) -> float:

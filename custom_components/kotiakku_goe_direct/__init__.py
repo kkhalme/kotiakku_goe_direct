@@ -4,17 +4,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.storage import Store
 
 from . import binary_sensor, number, select, sensor, switch
-from .const import (
-    CONF_CHARGER_SERIALS,
-    LEGACY_STORE_KEY,
-    OPTIONAL_ENTITIES,
-    REQUIRED_ENTITIES,
-    STORE_KEY,
-)
-from .core import planner
 from .entity import unique_id
 from .hub import Hub
 
@@ -42,28 +33,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await entry.runtime_data.async_stop()
     return unloaded
-
-
-async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    if entry.version == 1:
-        old = {**entry.data, **entry.options}
-        data = {key: old[key] for key in REQUIRED_ENTITIES + OPTIONAL_ENTITIES if old.get(key)}
-        rows = [row for row in old.get("chargers") or () if isinstance(row, dict)]
-        serials = [str(row.get("serial") or "").strip() for row in rows]
-        data.update(zip(CONF_CHARGER_SERIALS, [s for s in serials if s]))
-        hass.config_entries.async_update_entry(entry, data=data, options={}, version=2)
-        legacy = Store(hass, 1, LEGACY_STORE_KEY)
-        days, seen = planner.imported_price_cache(await legacy.async_load())
-        if days or seen:
-            store = Store(hass, 1, STORE_KEY)
-            current = await store.async_load() or {}
-            if days and not current.get("days"):
-                current["days"] = days
-            if seen and not current.get("seen"):
-                current["seen"] = seen
-            await store.async_save(current)
-        await legacy.async_remove()
-    return True
 
 
 def _remove_orphaned_entities(hass: HomeAssistant, entry: ConfigEntry, serials: list[str]) -> None:
