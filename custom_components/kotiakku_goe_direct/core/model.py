@@ -14,6 +14,12 @@ KEEP_PROBE_S = 60
 SETTLE_S = 90
 START_GRACE_S = 120
 KOTIAKKU_AVG_S = 300
+DRAW_TRACE_S = 600
+MIDNIGHT_WAKE_S = 30
+METER_GAP_MIN_W = 1000
+METER_GAP_DIVISOR = 5
+LIMITED_MARGIN_MIN_W = 500
+LIMITED_MARGIN_DIVISOR = 10
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_SOLAR_AND_GRID = "SolarAndGrid"
@@ -58,12 +64,12 @@ class Settings:
     surplus_start_w: float = 2000
     surplus_charging_price_ceiling: float = 0.25
     hold_minutes: float = 15
-    max_a: float = 32
-    max_1phase_amp: float = 32
-    group_lot_a: float = 50
+    max_a: int = 32
+    max_1phase_amp: int = 32
+    group_lot_a: int = 50
     solar_enough_kwh: float = 40
     offsun_kw: float = 1
-    after_charge_complete_keep_a: float = 6
+    after_charge_complete_keep_a: int = 6
     after_charge_complete_keep_phase: str = PHASE_3
     surplus_preferred_start_phase: str = PHASE_1
     policy: dict[str, str] = field(default_factory=dict)
@@ -75,6 +81,24 @@ class Settings:
     @property
     def hold_s(self) -> float:
         return float(self.hold_minutes) * 60
+
+    @property
+    def one_phase_cap_a(self) -> int:
+        return min(self.max_1phase_amp, self.max_a)
+
+    def add_charger(self, serial: str, slot: int) -> None:
+        """Per-charger defaults; values already set are kept."""
+        self.policy.setdefault(serial, POLICY_FORCE_OFF)
+        self.priority.setdefault(serial, slot + 1)
+        self.until_unplug.setdefault(serial, False)
+        self.keep.setdefault(serial, False)
+        self.keep_enable.setdefault(serial, True)
+
+    def apply(self, switches: dict[str, dict[str, bool]]) -> None:
+        """Write switch changes from a ``Decision`` back into the per-charger fields."""
+        for serial, changes in switches.items():
+            for name, value in changes.items():
+                getattr(self, name)[serial] = value
 
 
 @dataclass
@@ -131,16 +155,16 @@ class Window:
 
 @dataclass
 class Plan:
-    windows: list[Window]
-    blocked: list[tuple[datetime, datetime]]
-    reason: str
-    tomorrow_ok: bool
-    today_kwh: float | None
-    tomorrow_kwh: float | None
-    usable_end: datetime | None
-    gating_day: str
-    gating_kwh: float | None
-    enough: bool
+    windows: list[Window] = field(default_factory=list)
+    blocked: list[tuple[datetime, datetime]] = field(default_factory=list)
+    reason: str = "planned"
+    tomorrow_ok: bool = False
+    today_kwh: float | None = None
+    tomorrow_kwh: float | None = None
+    usable_end: datetime | None = None
+    gating_day: str = "today"
+    gating_kwh: float | None = None
+    enough: bool = False
     epoch_start: datetime | None = None
     epoch_seen: datetime | None = None
     carried: int = 0
@@ -165,6 +189,10 @@ class Command:
     psm: int | None = None
     lot: int | None = None
     amp: int | None = None
+
+    @property
+    def watts(self) -> int:
+        return self.amp * VOLTS * (3 if self.psm == 2 else 1) if self.on else 0
 
 
 OFF = Command(False)

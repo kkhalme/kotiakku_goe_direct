@@ -9,7 +9,13 @@ from .model import (
     CAR_CHARGING,
     CAR_ERROR,
     CAR_WAITCAR,
+    DRAW_TRACE_S,
     KEEP_PROBE_S,
+    LIMITED_MARGIN_DIVISOR,
+    LIMITED_MARGIN_MIN_W,
+    METER_GAP_DIVISOR,
+    METER_GAP_MIN_W,
+    MIDNIGHT_WAKE_S,
     MIN_AMP,
     MIN_W,
     OFF,
@@ -39,14 +45,20 @@ from .model import (
     Window,
     psm_of,
 )
-from .planner import local_midnight
+from .planner import day_start
 
 _LOGGER = logging.getLogger(__name__)
+
+Trace = list[tuple[datetime, int]]
 
 
 def meter_gap(ev: int) -> int:
     """How far below the draw a house average must sit before the meter omits the car."""
-    return max(1000, abs(int(ev)) // 5)
+    return max(METER_GAP_MIN_W, ev // METER_GAP_DIVISOR)
+
+
+def _meter_misses_car(house: int, ev: int) -> bool:
+    return ev > 0 and house < ev - meter_gap(ev)
 
 
 def leftover_w(solar_w: int, house_w: int, ev_w: int) -> int:
@@ -55,13 +67,31 @@ def leftover_w(solar_w: int, house_w: int, ev_w: int) -> int:
     A closed pair (house >= ev) has base = house - ev. When house is far below
     the draw, the meter does not contain the car and base is the house reading.
     """
-    solar, house, ev = abs(int(solar_w)), abs(int(house_w)), abs(int(ev_w))
-    if ev > 0 and house < ev - meter_gap(ev):
-        return solar - house
-    return solar - house + ev
+    base = house_w if _meter_misses_car(house_w, ev_w) else house_w - ev_w
+    return solar_w - base
 
 
-def _window_steps(trace: list[tuple[datetime, int]], start: datetime, end: datetime):
+def pair_base(house_w: int, ev_w: int, steady: bool) -> int | None:
+    """Base from one house/draw pair. ``None`` when the pair does not close and is not a steady meter-miss."""
+    if house_w >= ev_w:
+        return house_w - ev_w
+    if steady and _meter_misses_car(house_w, ev_w):
+        return house_w
+    return None
+
+
+def note_draw(trace: Trace, now: datetime, draw: int) -> Trace:
+    """``trace`` with ``draw`` appended, keeping ``DRAW_TRACE_S`` plus the last older point."""
+    if trace and trace[-1][1] == draw:
+        return trace
+    trace = [*trace, (now, draw)]
+    cutoff = now - timedelta(seconds=DRAW_TRACE_S)
+    older = [point for point in trace if point[0] < cutoff]
+    recent = [point for point in trace if point[0] >= cutoff]
+    return older[-1:] + recent
+
+
+def _window_steps(trace: Trace, start: datetime, end: datetime):
     """Held value at ``start`` and later steps inside ``[start, end)``.
 
     ``None`` when no point is at or before ``start``: the unknown prefix is not invented.
@@ -69,18 +99,18 @@ def _window_steps(trace: list[tuple[datetime, int]], start: datetime, end: datet
     if end <= start:
         return None
     held = None
-    inside: list[tuple[datetime, int]] = []
+    inside: Trace = []
     for moment, value in sorted(trace, key=lambda point: point[0]):
         if moment <= start:
-            held = int(value)
+            held = value
         elif moment < end:
-            inside.append((moment, int(value)))
+            inside.append((moment, value))
     if held is None:
         return None
     return held, inside
 
 
-def window_mean(trace: list[tuple[datetime, int]], start: datetime, end: datetime) -> int | None:
+def window_mean(trace: Trace, start: datetime, end: datetime) -> int | None:
     """Stepwise-constant mean of ``trace`` over ``[start, end)``."""
     steps = _window_steps(trace, start, end)
     if steps is None:
@@ -91,12 +121,11 @@ def window_mean(trace: list[tuple[datetime, int]], start: datetime, end: datetim
     for moment, nxt in inside:
         total += value * (moment - cursor).total_seconds()
         cursor, value = moment, nxt
-    seconds = (end - start).total_seconds()
     total += value * (end - cursor).total_seconds()
-    return int(round(total / seconds))
+    return round(total / (end - start).total_seconds())
 
 
-def window_span(trace: list[tuple[datetime, int]], start: datetime, end: datetime) -> int | None:
+def window_span(trace: Trace, start: datetime, end: datetime) -> int | None:
     """Max minus min of the draw in effect over ``[start, end)``."""
     steps = _window_steps(trace, start, end)
     if steps is None:
@@ -106,27 +135,15 @@ def window_span(trace: list[tuple[datetime, int]], start: datetime, end: datetim
     return max(values) - min(values)
 
 
-def ev_for_window(
-    trace: list[tuple[datetime, int]], start: datetime, end: datetime, controller: int | None
-) -> tuple[int | None, bool]:
+def ev_for_window(trace: Trace, start: datetime, end: datetime, controller: int | None) -> tuple[int | None, bool]:
     """Window mean and whether the draw was steady. A partial trace does not fall back to the Controller."""
     mean = window_mean(trace, start, end)
     if mean is None:
         if trace or controller is None:
             return None, False
-        return abs(int(controller)), False
+        return controller, False
     span = window_span(trace, start, end)
     return mean, span is not None and span <= meter_gap(mean)
-
-
-def pair_base(house_w: int, ev_w: int, steady: bool) -> int | None:
-    """Base from one house/draw pair. ``None`` when the pair does not close and is not a steady meter-miss."""
-    house, ev = abs(int(house_w)), abs(int(ev_w))
-    if house >= ev:
-        return house - ev
-    if steady and ev > 0 and house < ev - meter_gap(ev):
-        return house
-    return None
 
 
 def reconciled_reading(
@@ -140,12 +157,11 @@ def reconciled_reading(
 
     A house update that does not close keeps the previous house and ev, and the new solar still applies.
     """
-    solar = int(solar_w)
     if house_w is not None and ev_avg is not None and pair_base(house_w, ev_avg, steady) is not None:
-        return solar, int(house_w), int(ev_avg)
+        return solar_w, house_w, ev_avg
     if previous is None:
         return None
-    return solar, previous.house_w, previous.ev_w
+    return solar_w, previous.house_w, previous.ev_w
 
 
 def charger_windows(settings: Settings, serial: str, plan: Plan, now: datetime) -> list[Window]:
@@ -154,7 +170,7 @@ def charger_windows(settings: Settings, serial: str, plan: Plan, now: datetime) 
     Force On Until Unplug does not change them. Force on is full all the time and
     has none; SolarPriority has none while solar is enough.
     """
-    policy = settings.policy.get(serial, POLICY_FORCE_OFF)
+    policy = settings.policy[serial]
     if policy == POLICY_DAILY_TRIP:
         spans = plan.windows + plan.trip_windows
     elif policy == POLICY_SOLAR_AND_GRID or (policy == POLICY_SOLAR_PRIORITY and not plan.enough):
@@ -165,7 +181,7 @@ def charger_windows(settings: Settings, serial: str, plan: Plan, now: datetime) 
 
 
 def role(settings: Settings, serial: str, plan: Plan, now: datetime, until: bool, keep: bool) -> str:
-    policy = settings.policy.get(serial, POLICY_FORCE_OFF)
+    policy = settings.policy[serial]
     if until or policy == POLICY_FORCE_ON:
         return ROLE_FULL
     if any(w.start <= now < w.end for w in charger_windows(settings, serial, plan, now)):
@@ -179,41 +195,40 @@ def _offer_w(share: int, phases: int, cap: int) -> int:
     return min(cap, max(MIN_AMP, share // (VOLTS * phases))) * VOLTS * phases
 
 
-def wanted_psm(share: int, last_psm: int | None, preferred_psm: int, max_a: int, one_cap: int) -> int:
+def wanted_psm(share: int, last_psm: int | None, settings: Settings) -> int:
     """Keep the running phase while it can still offer leftover.
 
     3-phase stays while the share holds 6 A on three phases. 1-phase stays until
     3-phase would deliver more watts than the capped 1-phase amp.
     """
     three_ok = share >= MIN_W * 3
-    more_on_three = three_ok and _offer_w(share, 3, max_a) > _offer_w(share, 1, one_cap)
+    more_on_three = three_ok and _offer_w(share, 3, settings.max_a) > _offer_w(share, 1, settings.one_phase_cap_a)
     if last_psm == 2:
         return 2 if three_ok else 1
     if last_psm == 1:
         return 2 if more_on_three else 1
     if more_on_three:
         return 2
-    return preferred_psm if three_ok else 1
+    return psm_of(settings.surplus_preferred_start_phase) if three_ok else 1
 
 
-def amp_for(share: int, psm: int, max_a: int, one_cap: int, group_lot: int) -> int:
+def amp_for(share: int, psm: int, settings: Settings) -> int:
     phases = 3 if psm == 2 else 1
-    cap = max_a if psm == 2 else one_cap
-    return int(min(cap, group_lot, max(MIN_AMP, share // (VOLTS * phases))))
+    cap = settings.max_a if psm == 2 else settings.one_phase_cap_a
+    return min(cap, settings.group_lot_a, max(MIN_AMP, share // (VOLTS * phases)))
 
 
-def _on(settings: Settings, psm: int, amp: float) -> Command:
+def _on(settings: Settings, psm: int, amp: int) -> Command:
     # lot stays at the fuse cap: a leftover-sized lot lets go-e load
     # balancing clip the car below its amp and the allowed current bounces.
-    return Command(True, int(psm), int(settings.group_lot_a), int(amp))
+    return Command(True, psm, settings.group_lot_a, amp)
 
 
 def _fixed_command(settings: Settings, role_: str) -> Command:
     if role_ == ROLE_FULL:
         return _on(settings, 2, settings.max_a)
     if role_ == ROLE_KEEP:
-        keep_a = min(32, max(MIN_AMP, settings.after_charge_complete_keep_a))
-        return _on(settings, psm_of(settings.after_charge_complete_keep_phase), keep_a)
+        return _on(settings, psm_of(settings.after_charge_complete_keep_phase), settings.after_charge_complete_keep_a)
     return OFF
 
 
@@ -221,78 +236,252 @@ def _elapsed(since: datetime | None, now: datetime) -> float:
     return 0.0 if since is None else (now - since).total_seconds()
 
 
-def _command_w(command: Command) -> int:
-    return int(command.amp) * VOLTS * (3 if command.psm == 2 else 1) if command.on else 0
-
-
-def _car_limited(c: Charger, m: ChargerMemory, now: datetime) -> bool:
+def _car_limited(charger: Charger, mem: ChargerMemory, now: datetime) -> bool:
     """The car stayed clearly below an offer that has been unchanged for SETTLE_S."""
-    if not c.taking or m.offer_w is None or _elapsed(m.offer_since, now) < SETTLE_S:
+    if not charger.taking or mem.offer_w is None or _elapsed(mem.offer_since, now) < SETTLE_S:
         return False
-    return c.nrg_w + max(500, m.offer_w // 10) < m.offer_w
+    margin = max(LIMITED_MARGIN_MIN_W, mem.offer_w // LIMITED_MARGIN_DIVISOR)
+    return charger.nrg_w + margin < mem.offer_w
 
 
-def _unplugged(serial: str, m: ChargerMemory, until: dict, keep: dict, switches: dict) -> None:
+def _unplugged(serial: str, mem: ChargerMemory, until: dict, keep: dict, switches: dict) -> None:
     for name, values in (("until_unplug", until), ("keep", keep)):
         if values[serial]:
             values[serial] = False
             switches.setdefault(serial, {})[name] = False
             _LOGGER.info("%s %s off (unplugged)", serial, name)
-    m.cut = False
-    m.idle_since = None
+    mem.cut = False
+    mem.idle_since = None
 
 
-def _probe_keep(settings, c: Charger, m: ChargerMemory, now, keep: dict, switches: dict, victim: bool):
+def _track_plugs(chargers: list[Charger], memory: Memory, until: dict, keep: dict, switches: dict) -> None:
+    """Cut keep when it was switched off while plugged, and clear the per-car switches on unplug."""
+    for charger in chargers:
+        mem = memory.of(charger.serial)
+        if mem.keep_was_on and not keep[charger.serial] and charger.plugged and not mem.cut:
+            mem.cut = True
+            _LOGGER.info("%s keep turned off while plugged: keep cut", charger.serial)
+        if charger.plugged is not None:
+            if mem.last_plugged and not charger.plugged:
+                _unplugged(charger.serial, mem, until, keep, switches)
+            mem.last_plugged = charger.plugged
+
+
+def _probe_keep(settings, charger: Charger, mem: ChargerMemory, now, keep: dict, switches: dict, victim: bool):
     """Auto-on keep after 60 s of idle Complete that HA did not cause."""
+    serial = charger.serial
     can_arm = (
-        not keep[c.serial]
-        and c.plugged
-        and settings.keep_enable.get(c.serial, True)
-        and settings.policy.get(c.serial, POLICY_FORCE_OFF) != POLICY_FORCE_OFF
-        and not m.cut
-        and c.idle_complete
+        not keep[serial]
+        and charger.plugged
+        and settings.keep_enable[serial]
+        and settings.policy[serial] != POLICY_FORCE_OFF
+        and not mem.cut
+        and charger.idle_complete
         and not victim
     )
     if not can_arm:
-        m.idle_since = None
+        mem.idle_since = None
         return
-    if m.idle_since is None:
-        m.idle_since = now
-        _LOGGER.info("%s keep probe: idle Complete for %ss arms keep", c.serial, KEEP_PROBE_S)
-    elif _elapsed(m.idle_since, now) >= KEEP_PROBE_S:
-        keep[c.serial] = True
-        switches.setdefault(c.serial, {})["keep"] = True
-        m.idle_since = None
-        _LOGGER.info("%s after-charge-complete keep on", c.serial)
+    if mem.idle_since is None:
+        mem.idle_since = now
+        _LOGGER.info("%s keep probe: idle Complete for %ss arms keep", serial, KEEP_PROBE_S)
+    elif _elapsed(mem.idle_since, now) >= KEEP_PROBE_S:
+        keep[serial] = True
+        switches.setdefault(serial, {})["keep"] = True
+        mem.idle_since = None
+        _LOGGER.info("%s after-charge-complete keep on", serial)
 
 
-def _phase(settings: Settings, m: ChargerMemory, share: int, now: datetime, one_cap: int) -> tuple[int, int]:
+def _phase(settings: Settings, mem: ChargerMemory, share: int, now: datetime) -> tuple[int, int]:
     """Wanted psm, held for hold_minutes on a 1↔3 change.
 
     CCS cannot switch phases in-session: go-e pauses charging and Tesla raises
     a charging-interrupted alert, so a phase change waits in both directions.
     """
-    preferred = psm_of(settings.surplus_preferred_start_phase)
-    want = wanted_psm(share, m.psm, preferred, int(settings.max_a), one_cap)
-    if m.psm not in (1, 2) or want == m.psm:
-        m.phase_since = None
+    want = wanted_psm(share, mem.psm, settings)
+    if mem.psm not in (1, 2) or want == mem.psm:
+        mem.phase_since = None
         return want, want
-    if m.phase_since is None:
-        m.phase_since = now
-        _LOGGER.info("holding psm %s (wants %s) for %s min", m.psm, want, settings.hold_minutes)
-    if _elapsed(m.phase_since, now) >= settings.hold_s:
-        m.phase_since = None
+    if mem.phase_since is None:
+        mem.phase_since = now
+        _LOGGER.info("holding psm %s (wants %s) for %s min", mem.psm, want, settings.hold_minutes)
+    if _elapsed(mem.phase_since, now) >= settings.hold_s:
+        mem.phase_since = None
         _LOGGER.info("psm hold expired, switching to psm %s", want)
         return want, want
-    return m.psm, want
+    return mem.psm, want
 
 
-def _take_sample(house: HouseReading, chargers, roles, now) -> Sample:
+def _take_sample(house: HouseReading, chargers: list[Charger], roles: dict, now: datetime) -> Sample:
     solar, house_w, controller = house.sample
-    nrg = {c.serial: max(c.nrg_w or 0, 0) for c in chargers}
+    nrg = {charger.serial: max(charger.nrg_w or 0, 0) for charger in chargers}
     ev = controller if controller is not None else sum(nrg.values())
     keep_take = sum(w for serial, w in nrg.items() if roles[serial] == ROLE_KEEP)
-    return Sample(now, abs(solar), abs(house_w), abs(ev), leftover_w(solar, house_w, ev), keep_take)
+    return Sample(now, solar, house_w, ev, leftover_w(solar, house_w, ev), keep_take)
+
+
+def _surplus_share(
+    settings: Settings,
+    charger: Charger,
+    mem: ChargerMemory,
+    remaining: int,
+    now: datetime,
+    *,
+    priced_out: bool,
+    can_open: bool,
+    higher_on: bool,
+    sample_at: datetime | None,
+) -> tuple[int | None, bool, bool]:
+    """``(share, low_hold, start_pending)`` for a surplus charger.
+
+    ``share`` is the leftover it may use, or ``None`` when it gets no share this cycle.
+    """
+    running = mem.surplus_on
+    if priced_out:
+        if running:
+            _LOGGER.info("%s surplus off: spot above surplus charging price ceiling", charger.serial)
+        mem.low_since = None
+        return None, False, False
+    if running and mem.low_since is not None:
+        if remaining >= settings.surplus_start_w:
+            mem.low_since = None
+            _LOGGER.info("%s low hold cancelled at %s W", charger.serial, remaining)
+            return remaining, False, False
+        if _elapsed(mem.low_since, now) >= settings.hold_s:
+            mem.low_since = None
+            _LOGGER.info("%s low hold expired: surplus off", charger.serial)
+            return None, False, False
+        return None, True, False
+    if running and remaining < MIN_W:
+        mem.low_since = now
+        _LOGGER.info("%s low hold: 6 A for %s min (share %s W)", charger.serial, settings.hold_minutes, remaining)
+        return None, True, False
+    if running:
+        return remaining, False, False
+    if can_open and remaining >= settings.surplus_start_w:
+        # A lower charger waits for a second Kotiakku report: one lagging house value can miss a fresh EV ramp.
+        if not higher_on or charger.taking or (mem.start_armed_at is not None and sample_at > mem.start_armed_at):
+            return remaining, False, False
+        mem.start_armed_at = mem.start_armed_at or sample_at
+        return None, False, True
+    return None, False, False
+
+
+def _surplus_command(
+    settings: Settings, mem: ChargerMemory, share: int | None, low_hold: bool, now: datetime
+) -> tuple[Command, int]:
+    """Command for a surplus charger and the watts it will take once a phase hold ends."""
+    if low_hold:
+        mem.phase_since = None
+        command = _on(settings, mem.psm or 1, MIN_AMP)
+        return command, command.watts
+    if share is None:
+        mem.phase_since = None
+        return OFF, 0
+    psm, want = _phase(settings, mem, share, now)
+    command = _on(settings, psm, amp_for(share, psm, settings))
+    after_hold = _on(settings, want, amp_for(share, want, settings))
+    return command, max(command.watts, after_hold.watts)
+
+
+def _reserve_w(charger: Charger, mem: ChargerMemory, command: Command, target_w: int, limited: bool, now) -> int:
+    """Watts this charger holds back from lower priorities."""
+    if not command.on:
+        return charger.nrg_w if charger.taking else 0
+    if charger.taking:
+        return min(target_w, charger.nrg_w) if limited else target_w
+    return target_w if _elapsed(mem.on_since, now) < START_GRACE_S else 0
+
+
+def _clear_surplus(mem: ChargerMemory) -> None:
+    mem.low_since = mem.phase_since = None
+    mem.on_since = mem.offer_w = mem.offer_since = mem.start_armed_at = None
+
+
+def _allocate(
+    settings: Settings,
+    order: list[Charger],
+    roles: dict[str, str],
+    planned: dict[str, list[Window]],
+    memory: Memory,
+    now: datetime,
+    budget: int,
+    *,
+    can_open: bool,
+    priced_out: bool,
+) -> dict[str, ChargerDecision]:
+    """Decisions in priority order. Each surplus charger reserves what it was offered from ``budget``."""
+    sample_at = memory.sample.at if memory.sample else None
+    hold = timedelta(seconds=settings.hold_s)
+    decisions: dict[str, ChargerDecision] = {}
+    remaining, higher_on = budget, False
+    for charger in order:
+        mem, role_ = memory.of(charger.serial), roles[charger.serial]
+        if role_ != ROLE_SURPLUS or (charger.idle_complete and not mem.cut):
+            _clear_surplus(mem)
+            decisions[charger.serial] = ChargerDecision(
+                role_, _fixed_command(settings, role_), windows=planned[charger.serial]
+            )
+            continue
+        running = mem.surplus_on
+        share, low_hold, pending = _surplus_share(
+            settings,
+            charger,
+            mem,
+            remaining,
+            now,
+            priced_out=priced_out,
+            can_open=can_open,
+            higher_on=higher_on,
+            sample_at=sample_at,
+        )
+        if not pending:
+            mem.start_armed_at = None
+        command, target_w = _surplus_command(settings, mem, share, low_hold, now)
+        if command.on and not running:
+            mem.on_since = now
+        elif not command.on:
+            mem.on_since = None
+        limited = _car_limited(charger, mem, now)
+        reserve = _reserve_w(charger, mem, command, target_w, limited, now)
+        if not command.on:
+            mem.offer_w = mem.offer_since = None
+        elif command.watts != mem.offer_w:
+            mem.offer_w, mem.offer_since = command.watts, now
+        decisions[charger.serial] = ChargerDecision(
+            role_,
+            command,
+            share_w=share,
+            low_hold_until=None if mem.low_since is None else mem.low_since + hold,
+            phase_hold_until=None if mem.phase_since is None else mem.phase_since + hold,
+            reserve_w=reserve,
+            limited=limited,
+            start_pending=pending,
+            priced_out=priced_out,
+            windows=planned[charger.serial],
+        )
+        if remaining > 0:
+            remaining -= min(reserve, remaining)
+        higher_on = higher_on or command.on
+    return decisions
+
+
+def _remember(chargers: list[Charger], decisions: dict[str, ChargerDecision], memory: Memory, keep: dict) -> None:
+    """Carry this cycle's outcome into memory: keep cut, running state and phase."""
+    for charger in chargers:
+        mem, decision = memory.of(charger.serial), decisions[charger.serial]
+        on = decision.command.on
+        unfinished = charger.car in (CAR_CHARGING, CAR_WAITCAR, CAR_ERROR)
+        if on and unfinished and mem.cut:
+            mem.cut = False
+            _LOGGER.info("%s charging allowed again before Complete: keep cut cleared", charger.serial)
+        elif mem.last_on and not on and unfinished and not mem.cut:
+            mem.cut = True
+            _LOGGER.info("%s stopped while car %s: keep cut", charger.serial, charger.car)
+        mem.last_on = on
+        mem.surplus_on = decision.role == ROLE_SURPLUS and on
+        mem.psm = decision.command.psm if on else None
+        mem.keep_was_on = keep[charger.serial]
 
 
 def decide(
@@ -304,145 +493,53 @@ def decide(
     memory: Memory,
 ) -> Decision:
     switches: dict[str, dict[str, bool]] = {}
-    until = {c.serial: bool(settings.until_unplug.get(c.serial)) for c in chargers}
-    keep = {c.serial: bool(settings.keep.get(c.serial)) for c in chargers}
-    for c in chargers:
-        m = memory.of(c.serial)
-        if m.keep_was_on and not keep[c.serial] and c.plugged and not m.cut:
-            m.cut = True
-            _LOGGER.info("%s keep turned off while plugged: keep cut", c.serial)
-        if c.plugged is not None:
-            if m.last_plugged and not c.plugged:
-                _unplugged(c.serial, m, until, keep, switches)
-            m.last_plugged = c.plugged
+    until = {charger.serial: settings.until_unplug[charger.serial] for charger in chargers}
+    keep = {charger.serial: settings.keep[charger.serial] for charger in chargers}
+    _track_plugs(chargers, memory, until, keep, switches)
 
-    order = sorted(chargers, key=lambda c: (float(settings.priority.get(c.serial, c.slot + 1)), c.slot))
-    session = any(memory.of(c.serial).surplus_on for c in chargers)
-    roles = {c.serial: role(settings, c.serial, plan, now, until[c.serial], keep[c.serial]) for c in chargers}
-    for rank, c in enumerate(order):
-        victim = session and any(o.taking and roles[o.serial] == ROLE_SURPLUS for o in order[:rank])
-        _probe_keep(settings, c, memory.of(c.serial), now, keep, switches, victim)
-    roles = {c.serial: role(settings, c.serial, plan, now, until[c.serial], keep[c.serial]) for c in chargers}
+    def roles() -> dict[str, str]:
+        return {c.serial: role(settings, c.serial, plan, now, until[c.serial], keep[c.serial]) for c in chargers}
+
+    order = sorted(chargers, key=lambda c: (settings.priority[c.serial], c.slot))
+    session = any(memory.of(charger.serial).surplus_on for charger in chargers)
+    before_probe = roles()
+    for rank, charger in enumerate(order):
+        victim = session and any(o.taking and before_probe[o.serial] == ROLE_SURPLUS for o in order[:rank])
+        _probe_keep(settings, charger, memory.of(charger.serial), now, keep, switches, victim)
+    after_probe = roles()
     planned = {c.serial: charger_windows(settings, c.serial, plan, now) for c in chargers}
 
     if house.sample is not None:
-        memory.sample = _take_sample(house, chargers, roles, now)
+        memory.sample = _take_sample(house, chargers, after_probe, now)
     sample, soc = memory.sample, house.soc
     usable = house.usable and sample is not None
     soc_ok = soc is not None and soc >= settings.soc_on_pct - settings.soc_hyst_pct
     budget = sample.budget_w if usable and soc_ok else 0
-    can_open = usable and (session or (soc is not None and soc >= settings.soc_on_pct))
-
-    one_cap = int(min(max(MIN_AMP, min(32, settings.max_1phase_amp)), settings.max_a))
-    start_w, hold_s = settings.surplus_start_w, settings.hold_s
-    priced_out = plan.priced_out_at(now) is not None
-    decisions: dict[str, ChargerDecision] = {}
-    remaining, higher_on = budget, False
-    for c in order:
-        m, r = memory.of(c.serial), roles[c.serial]
-        if r != ROLE_SURPLUS or (c.idle_complete and not m.cut):
-            m.low_since = m.phase_since = None
-            m.on_since = m.offer_w = m.offer_since = m.start_armed_at = None
-            decisions[c.serial] = ChargerDecision(r, _fixed_command(settings, r), windows=planned[c.serial])
-            continue
-        running, share, hold, pending, target_w = m.surplus_on, None, False, False, 0
-        if priced_out:
-            if running:
-                _LOGGER.info("%s surplus off: spot above surplus charging price ceiling", c.serial)
-            m.low_since = None
-        elif running and m.low_since is not None:
-            if remaining >= start_w:
-                m.low_since = None
-                share = remaining
-                _LOGGER.info("%s low hold cancelled at %s W", c.serial, remaining)
-            elif _elapsed(m.low_since, now) >= hold_s:
-                m.low_since = None
-                _LOGGER.info("%s low hold expired: surplus off", c.serial)
-            else:
-                hold = True
-        elif running and remaining < MIN_W:
-            m.low_since, hold = now, True
-            _LOGGER.info("%s low hold: 6 A for %s min (share %s W)", c.serial, settings.hold_minutes, remaining)
-        elif running:
-            share = remaining
-        elif can_open and remaining >= start_w:
-            if not higher_on or c.taking or (m.start_armed_at is not None and sample.at > m.start_armed_at):
-                share = remaining
-            else:
-                m.start_armed_at = m.start_armed_at or sample.at
-                pending = True
-        if not pending:
-            m.start_armed_at = None
-        caps = (int(settings.max_a), one_cap, int(settings.group_lot_a))
-        if hold:
-            m.phase_since = None
-            command = _on(settings, m.psm or 1, MIN_AMP)
-            target_w = _command_w(command)
-        elif share is not None:
-            psm, want = _phase(settings, m, int(share), now, one_cap)
-            command = _on(settings, psm, amp_for(int(share), psm, *caps))
-            target_w = max(_command_w(command), _command_w(_on(settings, want, amp_for(int(share), want, *caps))))
-        else:
-            m.phase_since = None
-            command = OFF
-        if command.on and not running:
-            m.on_since = now
-        elif not command.on:
-            m.on_since = None
-        limited = _car_limited(c, m, now)
-        if not command.on:
-            reserve = c.nrg_w if c.taking else 0
-        elif c.taking:
-            reserve = min(target_w, c.nrg_w) if limited else target_w
-        else:
-            reserve = target_w if _elapsed(m.on_since, now) < START_GRACE_S else 0
-        offered = _command_w(command)
-        if not command.on:
-            m.offer_w = m.offer_since = None
-        elif offered != m.offer_w:
-            m.offer_w, m.offer_since = offered, now
-        decisions[c.serial] = ChargerDecision(
-            r,
-            command,
-            share_w=None if share is None else int(share),
-            low_hold_until=None if m.low_since is None else m.low_since + timedelta(seconds=hold_s),
-            phase_hold_until=None if m.phase_since is None else m.phase_since + timedelta(seconds=hold_s),
-            reserve_w=int(reserve),
-            limited=limited,
-            start_pending=pending,
-            priced_out=priced_out,
-            windows=planned[c.serial],
-        )
-        if remaining > 0:
-            remaining -= min(reserve, remaining)
-        higher_on = higher_on or command.on
-
-    for c in chargers:
-        m, d = memory.of(c.serial), decisions[c.serial]
-        unfinished = c.car in (CAR_CHARGING, CAR_WAITCAR, CAR_ERROR)
-        if d.command.on and unfinished and m.cut:
-            m.cut = False
-            _LOGGER.info("%s charging allowed again before Complete: keep cut cleared", c.serial)
-        elif m.last_on and not d.command.on and unfinished and not m.cut:
-            m.cut = True
-            _LOGGER.info("%s stopped while car %s: keep cut", c.serial, c.car)
-        m.last_on = d.command.on
-        m.surplus_on = d.role == ROLE_SURPLUS and d.command.on
-        m.psm = d.command.psm if d.command.on else None
-        m.keep_was_on = keep[c.serial]
-
-    return Decision(decisions, switches, int(budget), _next_wakeup(memory, chargers, plan, now, hold_s))
+    session_or_soc = session or (soc is not None and soc >= settings.soc_on_pct)
+    decisions = _allocate(
+        settings,
+        order,
+        after_probe,
+        planned,
+        memory,
+        now,
+        budget,
+        can_open=usable and session_or_soc,
+        priced_out=plan.priced_out_at(now) is not None,
+    )
+    _remember(chargers, decisions, memory, keep)
+    return Decision(decisions, switches, budget, _next_wakeup(memory, chargers, plan, now, settings.hold_s))
 
 
-def _next_wakeup(memory: Memory, chargers, plan: Plan, now: datetime, hold_s: float) -> datetime:
+def _next_wakeup(memory: Memory, chargers: list[Charger], plan: Plan, now: datetime, hold_s: float) -> datetime:
     hold = timedelta(seconds=hold_s)
-    times = [local_midnight(now.date() + timedelta(days=1), now.tzinfo) + timedelta(seconds=30)]
-    for c in chargers:
-        m = memory.of(c.serial)
-        times += [t + hold for t in (m.low_since, m.phase_since) if t is not None]
-        if m.idle_since is not None:
-            times.append(m.idle_since + timedelta(seconds=KEEP_PROBE_S))
-        if m.on_since is not None:
-            times.append(m.on_since + timedelta(seconds=START_GRACE_S))
+    times = [day_start(now, 1) + timedelta(seconds=MIDNIGHT_WAKE_S)]
+    for charger in chargers:
+        mem = memory.of(charger.serial)
+        times += [t + hold for t in (mem.low_since, mem.phase_since) if t is not None]
+        if mem.idle_since is not None:
+            times.append(mem.idle_since + timedelta(seconds=KEEP_PROBE_S))
+        if mem.on_since is not None:
+            times.append(mem.on_since + timedelta(seconds=START_GRACE_S))
     times += [t for t in (plan.next_boundary(now), plan.usable_end) if t is not None]
     return min(t for t in times if t > now)

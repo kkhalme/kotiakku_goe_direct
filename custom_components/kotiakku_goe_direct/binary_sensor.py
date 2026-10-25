@@ -6,27 +6,21 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.util import dt as dt_util
 
-from .entity import HubEntity
-
-HUB_KEYS = ("window_active", "solar_enough", "surplus_priced_out")
-CHARGER_KEYS = ()
-
-
-def _iso(value):
-    return None if value is None else value.isoformat()
+from .entity import HubEntity, iso, window_attrs
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     hub = entry.runtime_data
-    async_add_entities([WindowActive(hub), SolarEnough(hub), SurplusPricedOut(hub)])
+    async_add_entities([cls(hub) for cls in HUB_BINARY_SENSORS])
 
 
 class WindowActive(HubEntity, BinarySensorEntity):
+    KEY = "window_active"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_icon = "mdi:ev-station"
 
     def __init__(self, hub):
-        super().__init__(hub, "binary_sensor", "window_active", "Window active")
+        super().__init__(hub, "binary_sensor", self.KEY, "Window active")
 
     @property
     def is_on(self):
@@ -37,10 +31,11 @@ class WindowActive(HubEntity, BinarySensorEntity):
 class SolarEnough(HubEntity, BinarySensorEntity):
     """SolarPriority skips 22 kW while the gating day's forecast reaches Enough solar."""
 
+    KEY = "solar_enough"
     _attr_icon = "mdi:solar-power"
 
     def __init__(self, hub):
-        super().__init__(hub, "binary_sensor", "solar_enough", "Enough solar")
+        super().__init__(hub, "binary_sensor", self.KEY, "Enough solar")
 
     @property
     def is_on(self):
@@ -57,7 +52,7 @@ class SolarEnough(HubEntity, BinarySensorEntity):
             "gating_kwh": plan.gating_kwh,
             "today_kwh": plan.today_kwh,
             "tomorrow_kwh": plan.tomorrow_kwh,
-            "usable_end": _iso(plan.usable_end),
+            "usable_end": iso(plan.usable_end),
             "tomorrow_ok": plan.tomorrow_ok,
         }
 
@@ -65,10 +60,11 @@ class SolarEnough(HubEntity, BinarySensorEntity):
 class SurplusPricedOut(HubEntity, BinarySensorEntity):
     """On while the spot slot is above the surplus charging price ceiling: surplus stays off."""
 
+    KEY = "surplus_priced_out"
     _attr_icon = "mdi:cash-lock"
 
     def __init__(self, hub):
-        super().__init__(hub, "binary_sensor", "surplus_priced_out", "Surplus priced out")
+        super().__init__(hub, "binary_sensor", self.KEY, "Surplus priced out")
 
     @property
     def is_on(self):
@@ -85,11 +81,12 @@ class SurplusPricedOut(HubEntity, BinarySensorEntity):
         current = plan.priced_out_at(now)
         return {
             **attrs,
-            "until": _iso(current and current.end),
+            "until": iso(current and current.end),
             "avg": current and current.avg,
-            "spans": [
-                {"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg}
-                for w in plan.surplus_priced_out
-                if w.end > now
-            ],
+            "spans": [window_attrs(w) for w in plan.surplus_priced_out if w.end > now],
         }
+
+
+HUB_BINARY_SENSORS = (WindowActive, SolarEnough, SurplusPricedOut)
+HUB_KEYS = tuple(cls.KEY for cls in HUB_BINARY_SENSORS)
+CHARGER_KEYS = ()

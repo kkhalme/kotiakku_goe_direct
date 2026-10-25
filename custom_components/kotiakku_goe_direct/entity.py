@@ -1,11 +1,14 @@
-"""Base entity: one hub device, explicit ids, values read from and written to ``hub.settings``."""
+"""Base entities: one hub device, explicit ids; knobs read from and write to ``hub.settings``."""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, NAME
+from .core.model import Window
 from .hub import Hub, Snapshot
 
 
@@ -13,13 +16,20 @@ def unique_id(key: str, serial: str | None = None) -> str:
     return f"{DOMAIN}_{key}_{serial}" if serial else f"{DOMAIN}_{key}"
 
 
+def iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def window_attrs(window: Window) -> dict:
+    return {"start": iso(window.start), "end": iso(window.end), "avg": window.avg}
+
+
 class HubEntity(CoordinatorEntity[Hub]):
     _attr_has_entity_name = True
 
-    def __init__(self, hub: Hub, platform: str, key: str, name: str, serial: str | None = None, field: str | None = None):
+    def __init__(self, hub: Hub, platform: str, key: str, name: str, serial: str | None = None):
         super().__init__(hub)
         self.serial = serial
-        self.field = field or key
         self._attr_unique_id = unique_id(key, serial)
         self.entity_id = f"{platform}.{self._attr_unique_id}"
         self._attr_name = f"{serial} {name}" if serial else name
@@ -30,6 +40,22 @@ class HubEntity(CoordinatorEntity[Hub]):
     @property
     def snapshot(self) -> Snapshot | None:
         return self.coordinator.data
+
+
+class SettingEntity(HubEntity):
+    """A knob whose value lives in ``hub.settings``, not in the cycle result.
+
+    It must stay available when a cycle fails: Home Assistant drops service calls
+    to unavailable entities, and a restored ``unavailable`` state would reset it.
+    """
+
+    def __init__(self, hub: Hub, platform: str, key: str, name: str, serial: str | None = None, field: str | None = None):
+        super().__init__(hub, platform, key, name, serial)
+        self.field = field or key
+
+    @property
+    def available(self) -> bool:
+        return True
 
     def get(self):
         value = getattr(self.coordinator.settings, self.field)
@@ -45,15 +71,3 @@ class HubEntity(CoordinatorEntity[Hub]):
         self.put(value)
         self.async_write_ha_state()
         self.coordinator.request()
-
-
-class SettingEntity(HubEntity):
-    """A knob whose value lives in ``hub.settings``, not in the cycle result.
-
-    It must stay available when a cycle fails: Home Assistant drops service calls
-    to unavailable entities, and a restored ``unavailable`` state would reset it.
-    """
-
-    @property
-    def available(self) -> bool:
-        return True

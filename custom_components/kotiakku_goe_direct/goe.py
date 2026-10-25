@@ -10,6 +10,10 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core.model import Command
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,14 +54,15 @@ def parse_nrg(payload) -> int | None:
         return None
 
 
-def command_pairs(cmd) -> tuple[tuple[str, str], ...]:
+def command_pairs(cmd: Command) -> tuple[tuple[str, str], ...]:
     # frc=0 (Neutral) is never used: in Basic/default mode Neutral keeps charging.
     if cmd.on:
         return (("fup", "false"), ("psm", str(cmd.psm)), ("lot", str(cmd.lot)), ("amp", str(cmd.amp)), ("frc", "2"))
     return (("frc", "1"), ("fup", "false"))
 
 
-def _wanted(cmd) -> dict[str, int]:
+def wanted_state(cmd: Command) -> dict[str, int]:
+    """Live go-e keys that show ``cmd`` is in effect."""
     return {"frc": 2, "psm": cmd.psm, "lot": cmd.lot, "amp": cmd.amp} if cmd.on else {"frc": 1}
 
 
@@ -112,15 +117,15 @@ class GoeMqtt:
         if old != value:
             self._on_status(serial, key, old, value)
 
-    def status(self, serial: str, cmd) -> str:
+    def status(self, serial: str, cmd: Command) -> str:
         """``match``, ``contradiction`` (a known live key differs) or ``unconfirmed``."""
-        wanted, live = _wanted(cmd), self.live.get(serial, {})
+        wanted, live = wanted_state(cmd), self.live.get(serial, {})
         known = {k: live.get(k) for k in wanted}
         if any(v is not None and v != wanted[k] for k, v in known.items()):
             return "contradiction"
         return "match" if None not in known.values() else "unconfirmed"
 
-    async def send(self, serial: str, cmd, now: datetime) -> bool:
+    async def send(self, serial: str, cmd: Command, now: datetime) -> bool:
         """Publish ``cmd`` unless live already matches or the last send is too recent.
 
         go-e may not echo keys that did not change, so an unconfirmed command

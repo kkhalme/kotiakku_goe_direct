@@ -34,19 +34,8 @@ def pick(
     series = slots(prices, step=step)
     if blocked:
         series = [s for s in series if not any(s[0] < e and s[1] > b for b, e in blocked)]
-    windows, _reason = planner.choose_windows(
-        series,
-        now,
-        min_h,
-        max_h,
-        ceiling,
-        pct,
-        eur,
-        daily_h,
-        daily_pct,
-        daily_eur,
-        tomorrow_valid,
-    )
+    knobs = planner.WindowKnobs(min_h, max_h, ceiling, pct, eur, daily_h, daily_pct, daily_eur)
+    windows, _reason = planner.choose_windows(series, now, knobs, tomorrow_valid)
     return windows
 
 
@@ -74,7 +63,17 @@ def attrs_for(base, today, tomorrow=None):
 
 def run_plan(attrs, now=NOW, today_kwh=None, tomorrow_kwh=None, history=None, epoch_seen=None, **knobs):
     settings = Settings(**{"window_flex_pct": 0, "window_flex_eur": 0, **knobs})
-    return planner.plan(attrs, now, settings, today_kwh, tomorrow_kwh, 60.17, 24.94, history, epoch_seen)
+    return planner.plan(
+        attrs,
+        now,
+        settings,
+        lat=60.17,
+        lon=24.94,
+        today_kwh=today_kwh,
+        tomorrow_kwh=tomorrow_kwh,
+        history=history,
+        epoch_seen=epoch_seen,
+    )
 
 
 def test_seed_is_cheapest_min_hours():
@@ -274,24 +273,32 @@ def test_midnight_keeps_the_window_from_cached_yesterday():
     assert (after.windows[0].start, after.windows[0].end) == (before.windows[0].start, before.windows[0].end)
 
 
-def test_imported_v1_cache_keeps_the_active_overnight_window():
-    cheap = [0.01] * 8
-    evening_day = date(2026, 3, 15)
-    start, today = _day_attrs(evening_day, [0.2] * 88 + cheap)
-    _tomorrow_start, tomorrow = _day_attrs(date(2026, 3, 16), cheap + [0.2] * 88)
+def test_update_history_marks_when_a_new_epoch_is_first_seen():
+    _start, day15 = _day_attrs(date(2026, 3, 15), [0.1] * 96)
+    _next, day16 = _day_attrs(date(2026, 3, 16), [0.2] * 96)
+    _after, day17 = _day_attrs(date(2026, 3, 17), [0.3] * 96)
     evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
-    knobs = {"window_min_h": 4, "window_max_h": 4, "window_flex_pct": 0, "window_flex_eur": 0}
-    before = run_plan({"raw_today": today, "raw_tomorrow": tomorrow, "tomorrow_valid": True}, now=evening, **knobs)
-    cached = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), 12.0)
-    days, seen = planner.imported_price_cache(
-        {"price_days": cached, "epoch_seen": {"1": evening.timestamp()}, "seen": {"surplus": True}}
+    days, seen, seen_ts = planner.update_history(
+        {"raw_today": day15, "raw_tomorrow": day16, "tomorrow_valid": True}, evening, {}, {}, 12.0
     )
-    assert seen == {"1": evening.timestamp()}
-    assert days["2026-03-15"]["kwh"] == 12.0
-    after_midnight = datetime(2026, 3, 16, 0, 30, tzinfo=UTC)
-    after = run_plan({"raw_today": tomorrow}, now=after_midnight, history=days, **knobs)
-    assert (after.windows[0].start, after.windows[0].end) == (before.windows[0].start, before.windows[0].end)
-    assert after.windows[0].start == start.replace(hour=22)
+    assert seen_ts is None and days["2026-03-15"]["kwh"] == 12.0
+    published = datetime(2026, 3, 16, 14, tzinfo=UTC)
+    attrs = {"raw_today": day16, "raw_tomorrow": day17, "tomorrow_valid": True}
+    days, seen, seen_ts = planner.update_history(attrs, published, days, seen, None)
+    assert seen_ts == published.timestamp() and set(days) == {"2026-03-15", "2026-03-16"}
+    _days, _seen, later_ts = planner.update_history(attrs, published + timedelta(minutes=15), days, seen, None)
+    assert later_ts == published.timestamp()
+    assert planner.update_history(None, published, days, seen, None) == (days, seen, None)
+
+
+def test_history_view_names_cached_days():
+    evening = datetime(2026, 3, 15, 20, tzinfo=UTC)
+    _start, today = _day_attrs(date(2026, 3, 15), [0.1] * 48 + [0.3] * 48)
+    days = planner.remember_day({}, evening, planner.price_slots({"raw_today": today}, evening), 5.0)
+    view = planner.history_view(days, datetime(2026, 3, 16, 1, tzinfo=UTC))
+    assert view["yesterday_avg"] == pytest.approx(0.2)
+    assert view["raw_today"] == [] and len(view["raw_yesterday"]) == 96
+    assert view["days"] == [{"date": "2026-03-15", "kwh": 5.0, "slot_count": 96, "avg": pytest.approx(0.2)}]
 
 
 def test_new_epoch_keeps_only_the_window_already_running():
