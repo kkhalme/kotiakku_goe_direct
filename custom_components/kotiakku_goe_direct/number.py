@@ -10,7 +10,8 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
-from homeassistant.helpers.restore_state import RestoreEntity, RestoreStateData
+from homeassistant.helpers import restore_state
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
 from .entity import SettingEntity
@@ -91,8 +92,7 @@ class KnobNumber(SettingEntity, RestoreEntity, NumberEntity):
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is None and self._knob.replaces:
-            data = await RestoreStateData.async_get_instance(self.hass)
-            stored = data.last_states.get(f"number.{DOMAIN}_{self._knob.replaces}")
+            stored = restore_state.async_get(self.hass).last_states.get(f"number.{DOMAIN}_{self._knob.replaces}")
             last = stored.state if stored is not None else None
         try:
             value = float(last.state) if last is not None else None
