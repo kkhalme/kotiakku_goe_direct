@@ -17,10 +17,11 @@ KOTIAKKU_AVG_S = 300
 
 POLICY_SOLAR_PRIORITY = "SolarPriority"
 POLICY_SOLAR_AND_GRID = "SolarAndGrid"
+POLICY_DAILY_TRIP = "DailyTrip"
 POLICY_FORCE_ON = "Force on"
 POLICY_FORCE_OFF = "Force off"
-POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID, POLICY_FORCE_ON, POLICY_FORCE_OFF)
-SURPLUS_POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID)
+POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID, POLICY_DAILY_TRIP, POLICY_FORCE_ON, POLICY_FORCE_OFF)
+SURPLUS_POLICIES = (POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID, POLICY_DAILY_TRIP)
 
 PHASE_1 = "1-phase"
 PHASE_3 = "3-phase"
@@ -48,7 +49,8 @@ class Settings:
     electricity_price_ceiling: float = 0.2
     window_flex_pct: float = 20.0
     window_flex_eur: float = 0.02
-    daily_trip_deadline_h: float = 7.0
+    daily_trip_charge_after_h: float = 17.0
+    daily_trip_charge_before_h: float = 7.0
     daily_trip_price_flex_pct: float = 5.0
     daily_trip_price_flex_eur: float = 0.03
     soc_on_pct: float = 92
@@ -143,6 +145,7 @@ class Plan:
     epoch_seen: datetime | None = None
     carried: int = 0
     surplus_priced_out: list[Window] = field(default_factory=list)
+    trip_windows: list[Window] = field(default_factory=list)
 
     def in_window(self, now: datetime) -> bool:
         return any(w.start <= now < w.end for w in self.windows)
@@ -151,7 +154,7 @@ class Plan:
         return next((w for w in self.surplus_priced_out if w.start <= now < w.end), None)
 
     def next_boundary(self, now: datetime) -> datetime | None:
-        spans = self.windows + self.surplus_priced_out
+        spans = self.windows + self.trip_windows + self.surplus_priced_out
         edges = [t for w in spans for t in (w.start, w.end) if t > now]
         return min(edges, default=None)
 
@@ -204,6 +207,7 @@ class ChargerDecision:
     limited: bool = False
     start_pending: bool = False
     priced_out: bool = False
+    windows: list[Window] = field(default_factory=list)
 
 
 @dataclass

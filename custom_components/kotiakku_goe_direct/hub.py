@@ -408,10 +408,12 @@ class Hub(DataUpdateCoordinator[Snapshot]):
 
     def _log_plan(self, plan: Plan) -> None:
         windows = [(w.start, w.end) for w in plan.windows]
-        if windows != self._last_windows:
+        trips = [(w.start, w.end) for w in plan.trip_windows]
+        if (windows, trips) != self._last_windows:
             spans = ", ".join(f"{s:%a %H:%M}–{e:%H:%M}" for s, e in windows) or "none"
-            _LOGGER.info("plan %s: %s (tomorrow prices %s)", plan.reason, spans, plan.tomorrow_ok)
-            self._last_windows = windows
+            extra = ", ".join(f"{s:%a %H:%M}–{e:%H:%M}" for s, e in trips) or "none"
+            _LOGGER.info("plan %s: %s, daily trip extra %s (tomorrow prices %s)", plan.reason, spans, extra, plan.tomorrow_ok)
+            self._last_windows = (windows, trips)
 
     def _log_roles(self, decision: Decision) -> None:
         for serial, d in decision.chargers.items():

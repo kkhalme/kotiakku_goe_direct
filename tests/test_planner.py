@@ -468,6 +468,107 @@ def test_daily_trip_deadline_is_local_wall_clock():
     assert result.windows[0].start == datetime(2026, 3, 15, 2, tzinfo=HEL)
 
 
+def _trip_prices(**spans):
+    """Two days at 0.25 with a 0.04 night after the deadline and ``{slot: price}`` 2 h runs."""
+    prices = [0.25] * 192
+    prices[184:192] = [0.04] * 8
+    for start, price in spans.values():
+        prices[start : start + 8] = [price] * 8
+    return attrs_for(BASE, prices[:96], (BASE + 86400, prices[96:]))
+
+
+def _spans(windows):
+    return [(w.start.timestamp() - BASE, w.end.timestamp() - BASE) for w in windows]
+
+
+@pytest.mark.parametrize("price", [0.15, 0.22])
+def test_daily_trip_adds_a_dearer_window_before_the_deadline(price):
+    result = run_plan(_trip_prices(night=(100, price)))
+    assert _spans(result.windows) == [(184 * SLOT, 192 * SLOT)]
+    assert _spans(result.trip_windows) == [(100 * SLOT, 108 * SLOT)]
+    assert result.trip_windows[0].avg == pytest.approx(price)
+    assert result.next_boundary(NOW).timestamp() == BASE + 100 * SLOT
+
+
+def test_daily_trip_needs_no_extra_window_when_one_already_ends_by_the_deadline():
+    result = run_plan(_trip_prices(night=(100, 0.05)))
+    assert _spans(result.windows) == [(100 * SLOT, 108 * SLOT)]
+    assert result.trip_windows == []
+
+
+def test_daily_trip_window_stops_at_the_deadline():
+    prices = _trip_prices(dawn=(120, 0.03))
+    result = run_plan(prices, window_flex_pct=20, window_flex_eur=0.02)
+    assert _spans(result.windows) == [(120 * SLOT, 128 * SLOT)]
+    assert _spans(result.trip_windows) == [(116 * SLOT, 124 * SLOT)]
+
+
+def test_daily_trip_ignores_the_morning_before_the_epoch_was_seen():
+    attrs = _trip_prices(morning=(40, 0.10), night=(108, 0.15))
+    whole_day = {"daily_trip_charge_after_h": 7}
+    assert _spans(run_plan(attrs, **whole_day).trip_windows) == [(40 * SLOT, 48 * SLOT)]
+    seen = BASE + 14 * 3600
+    result = run_plan(attrs, now=datetime.fromtimestamp(seen, UTC), epoch_seen=seen, **whole_day)
+    assert _spans(result.trip_windows) == [(108 * SLOT, 116 * SLOT)]
+
+
+def test_daily_trip_charges_only_after_the_charge_after_hour():
+    attrs = _trip_prices(afternoon=(56, 0.10), night=(108, 0.15))
+    assert _spans(run_plan(attrs).trip_windows) == [(108 * SLOT, 116 * SLOT)]
+    assert _spans(run_plan(attrs, daily_trip_charge_after_h=7).trip_windows) == [(56 * SLOT, 64 * SLOT)]
+    assert _spans(run_plan(attrs, daily_trip_charge_after_h=16.5).trip_windows) == [(108 * SLOT, 116 * SLOT)]
+
+
+def test_daily_trip_afternoon_window_does_not_count():
+    attrs = _trip_prices(afternoon=(56, 0.05), night=(108, 0.15))
+    evening = run_plan(attrs)
+    assert _spans(evening.windows) == [(56 * SLOT, 64 * SLOT), (184 * SLOT, 192 * SLOT)]
+    assert _spans(evening.trip_windows) == [(108 * SLOT, 116 * SLOT)]
+    assert run_plan(attrs, daily_trip_charge_after_h=7).trip_windows == []
+
+
+def test_daily_trip_after_hour_earlier_than_before_hour_is_the_same_morning():
+    attrs = _trip_prices(evening=(92, 0.10), night=(104, 0.15))
+    assert _spans(run_plan(attrs).trip_windows) == [(92 * SLOT, 100 * SLOT)]
+    morning = run_plan(attrs, daily_trip_charge_after_h=1)
+    assert _spans(morning.trip_windows) == [(104 * SLOT, 112 * SLOT)]
+    assert run_plan(attrs, daily_trip_charge_after_h=6).trip_windows == []
+
+
+def test_daily_trip_without_prices_or_with_deadline_at_epoch_start():
+    assert run_plan(None).trip_windows == []
+    assert run_plan({}).trip_windows == []
+    unpublished = attrs_for(BASE, [0.25] * 96)
+    assert _spans(run_plan(unpublished).trip_windows) == [(0, 8 * SLOT)]
+    assert run_plan(unpublished, daily_trip_charge_before_h=0).trip_windows == []
+
+
+def test_daily_trip_window_running_at_publication_is_kept():
+    knobs = {"daily_trip_charge_before_h": 16}
+    day_before = [0.25] * 96
+    day_before[12:20] = [0.04] * 8
+    today = [0.25] * 96
+    today[52:60] = [0.22] * 8
+    tomorrow = [0.25] * 96
+    tomorrow[8:16] = [0.04] * 8
+    _s, before_items = _day_attrs(date(2026, 3, 14), day_before)
+    _s, today_items = _day_attrs(date(2026, 3, 15), today)
+    _s, tomorrow_items = _day_attrs(date(2026, 3, 16), tomorrow)
+    evening = datetime(2026, 3, 14, 20, tzinfo=UTC)
+    days = planner.remember_day({}, evening, planner.price_slots({"raw_today": before_items}, evening), None)
+    trip = (datetime(2026, 3, 15, 13, tzinfo=UTC), datetime(2026, 3, 15, 15, tzinfo=UTC))
+    noon = run_plan({"raw_today": today_items}, now=datetime(2026, 3, 15, 12, tzinfo=UTC), history=days, **knobs)
+    assert [(w.start, w.end) for w in noon.windows] == [(datetime(2026, 3, 14, 3, tzinfo=UTC), datetime(2026, 3, 14, 5, tzinfo=UTC))]
+    assert [(w.start, w.end) for w in noon.trip_windows] == [trip]
+    published = {"raw_today": today_items, "raw_tomorrow": tomorrow_items, "tomorrow_valid": True}
+    seen = datetime(2026, 3, 15, 14, tzinfo=UTC)
+    after = run_plan(published, now=seen, history=days, epoch_seen=seen.timestamp(), **knobs)
+    assert [(w.start, w.end) for w in after.windows] == [(datetime(2026, 3, 16, 2, tzinfo=UTC), datetime(2026, 3, 16, 4, tzinfo=UTC))]
+    assert [(w.start, w.end) for w in after.trip_windows] == [trip]
+    assert after.next_boundary(seen) == trip[1]
+    assert run_plan(published, now=seen, history=days, **knobs).trip_windows == []
+
+
 def test_min_hours_clamped_and_swapped():
     result = run_plan(attrs_for(BASE, [0.04] * 32), window_min_h=5, window_max_h=2)
     assert round((result.windows[0].end - result.windows[0].start).total_seconds() / 3600, 2) == 2

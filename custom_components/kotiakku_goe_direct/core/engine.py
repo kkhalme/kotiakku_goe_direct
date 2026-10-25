@@ -13,6 +13,7 @@ from .model import (
     MIN_AMP,
     MIN_W,
     OFF,
+    POLICY_DAILY_TRIP,
     POLICY_FORCE_OFF,
     POLICY_FORCE_ON,
     POLICY_SOLAR_AND_GRID,
@@ -35,6 +36,7 @@ from .model import (
     Plan,
     Sample,
     Settings,
+    Window,
     psm_of,
 )
 from .planner import local_midnight
@@ -146,13 +148,27 @@ def reconciled_reading(
     return solar, previous.house_w, previous.ev_w
 
 
+def charger_windows(settings: Settings, serial: str, plan: Plan, now: datetime) -> list[Window]:
+    """Windows the policy will still run at full power under the current plan, in time order.
+
+    Force On Until Unplug does not change them. Force on is full all the time and
+    has none; SolarPriority has none while solar is enough.
+    """
+    policy = settings.policy.get(serial, POLICY_FORCE_OFF)
+    if policy == POLICY_DAILY_TRIP:
+        spans = plan.windows + plan.trip_windows
+    elif policy == POLICY_SOLAR_AND_GRID or (policy == POLICY_SOLAR_PRIORITY and not plan.enough):
+        spans = plan.windows
+    else:
+        return []
+    return sorted((w for w in spans if w.end > now), key=lambda w: (w.start, w.end))
+
+
 def role(settings: Settings, serial: str, plan: Plan, now: datetime, until: bool, keep: bool) -> str:
     policy = settings.policy.get(serial, POLICY_FORCE_OFF)
     if until or policy == POLICY_FORCE_ON:
         return ROLE_FULL
-    if plan.in_window(now) and (
-        policy == POLICY_SOLAR_AND_GRID or (policy == POLICY_SOLAR_PRIORITY and not plan.enough)
-    ):
+    if any(w.start <= now < w.end for w in charger_windows(settings, serial, plan, now)):
         return ROLE_FULL
     if keep:
         return ROLE_KEEP
@@ -307,6 +323,7 @@ def decide(
         victim = session and any(o.taking and roles[o.serial] == ROLE_SURPLUS for o in order[:rank])
         _probe_keep(settings, c, memory.of(c.serial), now, keep, switches, victim)
     roles = {c.serial: role(settings, c.serial, plan, now, until[c.serial], keep[c.serial]) for c in chargers}
+    planned = {c.serial: charger_windows(settings, c.serial, plan, now) for c in chargers}
 
     if house.sample is not None:
         memory.sample = _take_sample(house, chargers, roles, now)
@@ -326,7 +343,7 @@ def decide(
         if r != ROLE_SURPLUS or (c.idle_complete and not m.cut):
             m.low_since = m.phase_since = None
             m.on_since = m.offer_w = m.offer_since = m.start_armed_at = None
-            decisions[c.serial] = ChargerDecision(r, _fixed_command(settings, r))
+            decisions[c.serial] = ChargerDecision(r, _fixed_command(settings, r), windows=planned[c.serial])
             continue
         running, share, hold, pending, target_w = m.surplus_on, None, False, False, 0
         if priced_out:
@@ -394,6 +411,7 @@ def decide(
             limited=limited,
             start_pending=pending,
             priced_out=priced_out,
+            windows=planned[c.serial],
         )
         if remaining > 0:
             remaining -= min(reserve, remaining)

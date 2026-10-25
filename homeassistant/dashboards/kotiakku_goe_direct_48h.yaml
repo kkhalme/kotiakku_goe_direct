@@ -349,26 +349,11 @@ views:
                     }
                     return false;
                   }
-                  function numOrNull(v) {
-                    const n = Number(v);
-                    return v != null && Number.isFinite(n) ? n : null;
-                  }
-                  function enoughAt(t) {
-                    const thr = Number(((hass.states['number.kotiakku_goe_direct_solar_enough_kwh'] || {}).state));
-                    if (!Number.isFinite(thr) || thr <= 0) return false;
-                    const se = ((hass.states['binary_sensor.kotiakku_goe_direct_solar_enough'] || {}).attributes) || {};
-                    const usable = parseTs(se.usable_end);
-                    const solarLeft = Number.isFinite(usable) && t < usable;
-                    const v = numOrNull(!solarLeft && se.tomorrow_ok === true ? se.tomorrow_kwh : se.today_kwh);
-                    return v != null && v >= thr;
-                  }
                   const serial = entity.entity_id.split('_').pop();
                   const policy = String(((hass.states['select.kotiakku_goe_direct_policy_' + serial] || {}).state) || '');
-                  const solar = policy === 'SolarPriority';
-                  const solarAndGrid = policy === 'SolarAndGrid';
                   const until = String(((hass.states['switch.kotiakku_goe_direct_until_unplug_' + serial] || {}).state) || '') === 'on';
                   const force = policy === 'Force on' || until;
-                  const windows = windowsFrom(((hass.states['sensor.kotiakku_goe_direct_window'] || {}).attributes) || {});
+                  const windows = windowsFrom(((hass.states['sensor.kotiakku_goe_direct_role_' + serial] || {}).attributes) || {});
                   const full = 32 * 230 * 3 / 1000;
                   const now = Date.now();
                   const pts = [];
@@ -379,9 +364,7 @@ views:
                     const live = !Number.isFinite(slotEnd) || slotEnd > now;
                     let on = 0;
                     if (!live) on = 0;
-                    else if (force) on = full;
-                    else if (solarAndGrid && inWin(windows, t)) on = full;
-                    else if (solar && !enoughAt(t) && inWin(windows, t)) on = full;
+                    else if (force || inWin(windows, t)) on = full;
                     pts.push([t, on]);
                   }
                   return pts;

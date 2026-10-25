@@ -8,6 +8,7 @@ from core.model import (
     CAR_IDLE,
     CAR_WAITCAR,
     PHASE_3,
+    POLICY_DAILY_TRIP,
     POLICY_FORCE_OFF,
     POLICY_FORCE_ON,
     POLICY_SOLAR_AND_GRID,
@@ -336,6 +337,71 @@ def test_enough_solar_skips_solarpriority_window_only():
     sim.plan = make_plan(window, enough=True)
     sim.step(0)
     assert sim.role("A") == ROLE_SURPLUS and sim.role("B") == ROLE_FULL
+
+
+def test_daily_trip_is_full_in_every_window_and_only_it_uses_the_trip_window():
+    window = Window(T0 - timedelta(hours=1), T0 + timedelta(hours=1), 0.02)
+    trip = Window(T0 + timedelta(hours=3), T0 + timedelta(hours=5), 0.15)
+    sim = Sim("A", "B", "C", policy=POLICY_DAILY_TRIP)
+    sim.settings.policy["B"] = POLICY_SOLAR_AND_GRID
+    sim.settings.policy["C"] = POLICY_SOLAR_PRIORITY
+    sim.plan = make_plan([window], enough=True)
+    sim.plan.trip_windows = [trip]
+    sim.step(0)
+    assert [sim.role(s) for s in "ABC"] == [ROLE_FULL, ROLE_FULL, ROLE_SURPLUS]
+    assert sim.decision.next_wakeup == window.end
+    sim.step(0, dt=2 * 3600)
+    assert [sim.role(s) for s in "ABC"] == [ROLE_SURPLUS] * 3
+    assert sim.decision.next_wakeup == trip.start
+    sim.step(0, dt=3600)
+    assert sim.role("A") == ROLE_FULL and sim.cmd("A") == (2, 32)
+    assert sim.role("B") == ROLE_SURPLUS and sim.role("C") == ROLE_SURPLUS
+    sim.step(0, dt=2 * 3600)
+    assert sim.role("A") == ROLE_SURPLUS
+
+
+def test_charger_windows_follow_the_policy_and_the_current_enough_solar():
+    past = Window(T0 - timedelta(hours=3), T0 - timedelta(hours=1), 0.01)
+    trip = Window(T0 + timedelta(hours=1), T0 + timedelta(hours=3), 0.15)
+    window = Window(T0 + timedelta(hours=5), T0 + timedelta(hours=7), 0.02)
+    sim = Sim("A", "B", "C", "D", "E", policy=POLICY_DAILY_TRIP)
+    others = (POLICY_SOLAR_AND_GRID, POLICY_SOLAR_PRIORITY, POLICY_FORCE_ON, POLICY_FORCE_OFF)
+    for serial, policy in zip("BCDE", others, strict=True):
+        sim.settings.policy[serial] = policy
+    sim.plan = make_plan([past, window], enough=True)
+    sim.plan.trip_windows = [trip]
+
+    def windows(serial):
+        return sim.decision.chargers[serial].windows
+
+    sim.step(0)
+    assert windows("A") == [trip, window]
+    assert windows("B") == [window]
+    assert windows("C") == windows("D") == windows("E") == []
+    sim.plan.enough = False
+    sim.step(0)
+    assert windows("C") == [window]
+    sim.plan.enough = True
+    sim.step(0)
+    assert windows("C") == []
+
+
+def test_until_unplug_does_not_change_charger_windows():
+    window = Window(T0 + timedelta(hours=1), T0 + timedelta(hours=3), 0.02)
+    sim = Sim("A", "B")
+    sim.settings.policy["B"] = POLICY_SOLAR_AND_GRID
+    sim.plan = make_plan([window])
+    sim.settings.until_unplug.update(A=True, B=True)
+    sim.step(0)
+    assert sim.role("A") == sim.role("B") == ROLE_FULL
+    assert sim.decision.chargers["A"].windows == sim.decision.chargers["B"].windows == [window]
+    sim.step(0, dt=4 * 3600)
+    assert sim.decision.chargers["A"].windows == []
+
+
+def test_daily_trip_runs_surplus_outside_windows():
+    sim = Sim(policy=POLICY_DAILY_TRIP).step(6000)
+    assert sim.role() == ROLE_SURPLUS and sim.cmd() == (1, 26)
 
 
 def priced_out(start_min, end_min, avg=0.3):
