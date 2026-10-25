@@ -552,8 +552,9 @@ def trip_window(slots, now, windows, knobs: WindowKnobs, tomorrow_valid: bool, s
     """Extra (start_ts, end_ts, avg) window in the daily-trip range, or ``None``.
 
     Needed only when ``windows`` give less than ``min_h`` between the charge-after
-    hour (or ``seen``, when later) and the charge-before deadline. It ignores the
-    price ceiling for its seed and never grows out of the range.
+    hour (or ``seen``, when later) and the charge-before deadline. The seed is
+    refused when its average is above the electricity price ceiling, and the
+    window never grows out of the range or through a slot above that ceiling.
     """
     start, deadline = _trip_range(now, knobs, tomorrow_valid)
     lo = start if seen is None else max(start, seen)
@@ -561,7 +562,7 @@ def trip_window(slots, now, windows, knobs: WindowKnobs, tomorrow_valid: bool, s
         return None
     head = [s for s in slots if s[0] >= lo - TS_EPS_S and s[1] <= deadline + EPS_S]
     seed = find_seed(head, knobs.min_s)
-    if seed is None:
+    if seed is None or seed[0] > knobs.ceiling + PRICE_EPS:
         return None
     return _window(head, seed, knobs)
 

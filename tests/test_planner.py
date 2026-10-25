@@ -488,7 +488,7 @@ def _spans(windows):
     return [(w.start.timestamp() - BASE, w.end.timestamp() - BASE) for w in windows]
 
 
-@pytest.mark.parametrize("price", [0.15, 0.22])
+@pytest.mark.parametrize("price", [0.15, 0.2])
 def test_daily_trip_adds_a_dearer_window_before_the_deadline(price):
     result = run_plan(_trip_prices(night=(100, price)))
     assert _spans(result.windows) == [(184 * SLOT, 192 * SLOT)]
@@ -546,16 +546,50 @@ def test_daily_trip_without_prices_or_with_deadline_at_epoch_start():
     assert run_plan(None).trip_windows == []
     assert run_plan({}).trip_windows == []
     unpublished = attrs_for(BASE, [0.25] * 96)
-    assert _spans(run_plan(unpublished).trip_windows) == [(0, 8 * SLOT)]
+    assert run_plan(unpublished).trip_windows == []
+    morning = [0.25] * 96
+    morning[0:8] = [0.15] * 8
+    morning[40:48] = [0.05] * 8
+    planned = run_plan(attrs_for(BASE, morning))
+    assert _spans(planned.windows) == [(40 * SLOT, 48 * SLOT)]
+    assert _spans(planned.trip_windows) == [(0, 8 * SLOT)]
     assert run_plan(unpublished, daily_trip_charge_before_h=0).trip_windows == []
 
 
+def test_daily_trip_window_does_not_override_the_electricity_price_ceiling():
+    above = run_plan(_trip_prices(night=(100, 0.22)))
+    assert _spans(above.windows) == [(184 * SLOT, 192 * SLOT)]
+    assert above.trip_windows == []
+
+    at_ceiling = run_plan(_trip_prices(night=(100, 0.2)))
+    assert _spans(at_ceiling.trip_windows) == [(100 * SLOT, 108 * SLOT)]
+    assert at_ceiling.trip_windows[0].avg == pytest.approx(0.2)
+
+    raised = run_plan(_trip_prices(night=(100, 0.22)), electricity_price_ceiling=0.22)
+    assert _spans(raised.trip_windows) == [(100 * SLOT, 108 * SLOT)]
+
+    prices = [0.25] * 192
+    prices[184:192] = [0.04] * 8
+    prices[100:108] = [0.10] * 8
+    prices[108:120] = [0.15] * 12
+    prices[120:124] = [0.21] * 4
+    grown = run_plan(
+        attrs_for(BASE, prices[:96], (BASE + 86400, prices[96:])),
+        window_flex_pct=100,
+        window_flex_eur=1,
+        window_max_h=6,
+    )
+    assert _spans(grown.trip_windows) == [(100 * SLOT, 120 * SLOT)]
+    assert grown.trip_windows[0].avg == pytest.approx((8 * 0.10 + 12 * 0.15) / 20)
+
+
 def test_daily_trip_window_running_at_publication_is_kept():
-    knobs = {"daily_trip_charge_before_h": 16}
+    """The cheap night crosses 22:00, so the afternoon stays a trip and not a second window."""
+    knobs = {"daily_trip_charge_before_h": 16, "daily_trip_charge_after_h": 23}
     day_before = [0.25] * 96
-    day_before[12:20] = [0.04] * 8
+    day_before[82:90] = [0.04] * 8
     today = [0.25] * 96
-    today[52:60] = [0.22] * 8
+    today[52:60] = [0.18] * 8
     tomorrow = [0.25] * 96
     tomorrow[8:16] = [0.04] * 8
     _s, before_items = _day_attrs(date(2026, 3, 14), day_before)
@@ -565,7 +599,7 @@ def test_daily_trip_window_running_at_publication_is_kept():
     days = planner.remember_day({}, evening, planner.price_slots({"raw_today": before_items}, evening), None)
     trip = (datetime(2026, 3, 15, 13, tzinfo=UTC), datetime(2026, 3, 15, 15, tzinfo=UTC))
     noon = run_plan({"raw_today": today_items}, now=datetime(2026, 3, 15, 12, tzinfo=UTC), history=days, **knobs)
-    assert [(w.start, w.end) for w in noon.windows] == [(datetime(2026, 3, 14, 3, tzinfo=UTC), datetime(2026, 3, 14, 5, tzinfo=UTC))]
+    assert [(w.start, w.end) for w in noon.windows] == [(datetime(2026, 3, 14, 20, 30, tzinfo=UTC), datetime(2026, 3, 14, 22, 30, tzinfo=UTC))]
     assert [(w.start, w.end) for w in noon.trip_windows] == [trip]
     published = {"raw_today": today_items, "raw_tomorrow": tomorrow_items, "tomorrow_valid": True}
     seen = datetime(2026, 3, 15, 14, tzinfo=UTC)
