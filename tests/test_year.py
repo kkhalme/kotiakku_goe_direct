@@ -10,6 +10,7 @@ from core.engine import decide
 from core.model import (
     CAR_CHARGING,
     CAR_WAITCAR,
+    POLICY_DAILY_TRIP,
     POLICY_FORCE_OFF,
     POLICY_FORCE_ON,
     POLICY_SOLAR_AND_GRID,
@@ -62,6 +63,12 @@ def shoulder_price(t, day):
     return 0.055 if 11 <= h < 15 else 0.16 if 16.5 <= h < 20.5 else 0.11
 
 
+def evening_valley_price(t, day):
+    if 21 <= t.hour < 24:
+        return 0.10 if day % 2 == 0 else 0.04
+    return 0.12
+
+
 def april_clouds(t):
     return 0.25 if 10 <= t.hour < 13 else 0.9
 
@@ -77,6 +84,7 @@ SPECS = {
     "october": (datetime(2026, 10, 10, tzinfo=HEL), 6, 0.35, shoulder_price),
     "dst-spring": (datetime(2026, 3, 28, tzinfo=HEL), 1, 0.5, shoulder_price),
     "dst-autumn": (datetime(2026, 10, 24, tzinfo=HEL), 5, 0.35, shoulder_price),
+    "november-evening-valley": (datetime(2026, 11, 15, tzinfo=HEL), 3, 0.3, evening_valley_price),
 }
 
 
@@ -131,6 +139,7 @@ def simulate(name, policy=POLICY_SOLAR_PRIORITY, b_policy=POLICY_FORCE_OFF, n_ch
                 "plan": plan,
                 "roles": {s: d.role for s, d in decision.chargers.items()},
                 "cmd": {s: d.command for s, d in decision.chargers.items()},
+                "windows": {s: d.windows for s, d in decision.chargers.items()},
                 "surplus_on": any(
                     d.role == ROLE_SURPLUS and d.command.on for d in decision.chargers.values()
                 ),
@@ -272,6 +281,44 @@ def test_force_on_beside_surplus_and_both_full_in_window():
     winter, _ = simulate("midwinter-clear", b_policy=POLICY_SOLAR_PRIORITY)
     window = [t for t in winter if full(t)]
     assert window and all(t["cmd"]["B"].amp == 32 and t["cmd"]["B"].psm == 2 for t in window)
+
+
+def _full_before(ticks, deadline):
+    after = (deadline - timedelta(days=1)).replace(hour=17)
+    return hours(ticks, lambda t: full(t) and after <= t["now"] < deadline)
+
+
+@pytest.mark.parametrize("name", sorted(SPECS))
+def test_daily_trip_charges_before_every_deadline(name):
+    ticks, _ = simulate(name, policy=POLICY_DAILY_TRIP)
+    seven = ticks[0]["now"].replace(hour=7)
+    assert _full_before(ticks, seven) >= 2
+    assert _full_before(ticks, seven + timedelta(days=1)) >= 2
+
+
+def test_daily_trip_adds_tonight_when_the_plan_moves_to_a_cheaper_tomorrow():
+    trip, _ = simulate("november-evening-valley", policy=POLICY_DAILY_TRIP)
+    grid, _ = simulate("november-evening-valley", policy=POLICY_SOLAR_AND_GRID)
+    start = trip[0]["now"]
+    assert _full_before(grid, start.replace(hour=7) + timedelta(days=1)) == 0
+    evening = [t for t in trip if start.replace(hour=21) <= t["now"] < start.replace(hour=23)]
+    assert len(evening) == 8
+    for t in evening:
+        assert full(t) and not t["plan"].in_window(t["now"])
+        assert any(w.start <= t["now"] < w.end and w in t["plan"].trip_windows for w in t["windows"]["A"])
+        assert all(w.avg > t["plan"].windows[0].avg for w in t["plan"].trip_windows)
+
+
+@pytest.mark.parametrize("policy", [POLICY_SOLAR_PRIORITY, POLICY_SOLAR_AND_GRID, POLICY_DAILY_TRIP])
+@pytest.mark.parametrize("name", ["april-mixed", "midsummer-clear", "november-evening-valley"])
+def test_charger_windows_are_exactly_the_full_power_ticks(name, policy):
+    ticks, _ = simulate(name, policy=policy)
+    for t in ticks:
+        own = t["windows"]["A"]
+        assert full(t) == any(w.start <= t["now"] < w.end for w in own), t["now"]
+        assert all(w.end > t["now"] for w in own)
+        if policy == POLICY_SOLAR_PRIORITY and t["plan"].enough:
+            assert own == []
 
 
 def test_solarandgrid_still_charges_full_on_enough_solar():

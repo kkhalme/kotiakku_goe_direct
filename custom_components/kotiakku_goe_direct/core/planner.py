@@ -452,6 +452,49 @@ def _daily_deadline(day: datetime, hours: float) -> float:
     return local_midnight(day.date(), day.tzinfo).replace(hour=minutes // 60, minute=minutes % 60).timestamp()
 
 
+def _trip_day(now: datetime, tomorrow_valid: bool) -> datetime:
+    """Local midnight of the daily-trip deadline day: the epoch's second day when published, else its first."""
+    return local_midnight(now.date() + timedelta(days=1 if tomorrow_valid else 0), now.tzinfo)
+
+
+def _trip_range(now: datetime, after_h: float, before_h: float, tomorrow_valid: bool) -> tuple[float, float]:
+    """(start, deadline) of the epoch anchored at ``now``. The start is the last ``after_h`` before the deadline; equal hours span a day."""
+    day = _trip_day(now, tomorrow_valid)
+    start_day = day if after_h < before_h else local_midnight(day.date() - timedelta(days=1), now.tzinfo)
+    return _daily_deadline(start_day, after_h), _daily_deadline(day, before_h)
+
+
+def _covered_s(windows, lo: float, hi: float) -> float:
+    spans = sorted((max(s, lo), min(e, hi)) for s, e, *_ in windows if min(e, hi) > max(s, lo))
+    total, reach = 0.0, lo
+    for start, end in spans:
+        if end > reach:
+            total += end - max(start, reach)
+            reach = end
+    return total
+
+
+def trip_window(
+    slots, now, windows, min_h, max_h, ceiling, flex_pct, flex_eur, before_h, after_h, tomorrow_valid, seen=None
+):
+    """Extra (start_ts, end_ts, avg) window in the daily-trip range, or ``None``.
+
+    Needed only when ``windows`` give less than ``min_h`` between the charge-after
+    hour (or ``seen``, when later) and the charge-before deadline. It ignores the
+    price ceiling for its seed and never grows out of the range.
+    """
+    start, deadline = _trip_range(now, after_h, before_h, tomorrow_valid)
+    lo = start if seen is None else max(start, seen)
+    min_s, max_s = min_h * 3600.0, max_h * 3600.0
+    if deadline - lo < min_s - EPS_S or _covered_s(windows, lo, deadline) + EPS_S >= min_s:
+        return None
+    head = [s for s in slots if s[0] >= lo - 1 and s[1] <= deadline + EPS_S]
+    seed = find_seed(head, min_s)
+    if seed is None:
+        return None
+    return _window(head, seed, max_s, ceiling, flex_pct, flex_eur)
+
+
 def _prefer_daily_trip(search, seed, min_s, ceiling, deadline, pct, eur):
     """Cheapest min window ending by ``deadline``, when it is within the looser price allowance."""
     if pct <= 0 and eur <= 0:
@@ -482,8 +525,8 @@ def choose_windows(slots, now, min_h, max_h, ceiling, flex_pct, flex_eur, daily_
     tomorrow_dt = local_midnight(now.date() + timedelta(days=1), tz)
     tomorrow = tomorrow_dt.timestamp()
     day_after = local_midnight(now.date() + timedelta(days=2), tz).timestamp()
-    deadline_day = tomorrow_dt if tomorrow_valid else today
-    seed = _prefer_daily_trip(search, seed, min_s, ceiling, _daily_deadline(deadline_day, daily_h), daily_pct, daily_eur)
+    deadline = _daily_deadline(_trip_day(now, tomorrow_valid), daily_h)
+    seed = _prefer_daily_trip(search, seed, min_s, ceiling, deadline, daily_pct, daily_eur)
     windows = [_window(search, seed, max_s, ceiling, flex_pct, flex_eur)]
     first = windows[0]
     if tomorrow_valid and any(s[0] >= tomorrow - 1 for s in search) and not (first[0] < day_after and first[1] > today_22):
@@ -546,29 +589,32 @@ def plan(
         float(settings.electricity_price_ceiling),
         max(float(settings.window_flex_pct), 0.0),
         max(float(settings.window_flex_eur), 0.0),
-        min(24.0, max(0.0, float(settings.daily_trip_deadline_h))),
+        min(24.0, max(0.0, float(settings.daily_trip_charge_before_h))),
         max(float(settings.daily_trip_price_flex_pct), 0.0),
         max(float(settings.daily_trip_price_flex_eur), 0.0),
     )
-    carried = []
+    trip_knobs = (*knobs[:6], min(24.0, max(0.0, float(settings.daily_trip_charge_after_h))))
+    carried, trips = [], []
     if attrs is None:
         windows, reason = [], "no_source"
     else:
         anchor = day_start(now, offset).replace(hour=12)
-        windows, reason = choose_windows(
-            mask_slots(_span(slots, now, offset), forecast, limit), anchor, *knobs, next_published(offset)
-        )
+        search = mask_slots(_span(slots, now, offset), forecast, limit)
+        windows, reason = choose_windows(search, anchor, *knobs, next_published(offset))
+        previous_trips = []
         if epoch_seen is not None:
-            previous, _reason = choose_windows(
-                mask_slots(_span(slots, now, offset - 1), forecast, limit),
-                day_start(now, offset - 1).replace(hour=12),
-                *knobs,
-                next_published(offset - 1),
-            )
+            earlier = mask_slots(_span(slots, now, offset - 1), forecast, limit)
+            earlier_anchor = day_start(now, offset - 1).replace(hour=12)
+            previous, _reason = choose_windows(earlier, earlier_anchor, *knobs, next_published(offset - 1))
+            earlier_trip = trip_window(earlier, earlier_anchor, previous, *trip_knobs, next_published(offset - 1))
+            previous_trips = [] if earlier_trip is None else [earlier_trip]
             carried = carry_windows(windows, previous, epoch_seen)
             if carried and not windows:
                 reason = "planned"
             windows = list(windows) + carried
+        trip = trip_window(search, anchor, windows, *trip_knobs, next_published(offset), epoch_seen)
+        trips = [] if trip is None else [trip]
+        trips += carry_windows(list(windows) + trips, previous_trips, epoch_seen)
     priced_out = priced_out_spans(slots, float(settings.surplus_charging_price_ceiling))
     tomorrow_ok = published
     epoch_ts = None if attrs is None else epoch_day(slots, now, offset, published)
@@ -596,4 +642,5 @@ def plan(
         epoch_seen=None if epoch_seen is None else dt(epoch_seen),
         carried=len(carried),
         surplus_priced_out=[Window(dt(s), dt(e), avg) for s, e, avg in priced_out],
+        trip_windows=[Window(dt(s), dt(e), avg) for s, e, avg in trips],
     )

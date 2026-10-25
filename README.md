@@ -36,19 +36,19 @@ All on the **Kotiakku go-e Direct** device.
 
 Per charger (`<serial>`):
 
-- `select.kotiakku_goe_direct_policy_<serial>`: **SolarPriority**, **SolarAndGrid**, **Force on**, **Force off** (default).
+- `select.kotiakku_goe_direct_policy_<serial>`: **SolarPriority**, **SolarAndGrid**, **DailyTrip**, **Force on**, **Force off** (default).
 - `number.kotiakku_goe_direct_priority_<serial>`: leftover order, 1 is highest; ties go to the earlier charger slot.
 - `switch.kotiakku_goe_direct_until_unplug_<serial>`: Force On Until Unplug, 22 kW until that car unplugs.
 - `switch.kotiakku_goe_direct_after_charge_complete_keep_enable_<serial>` (default on) and `switch.kotiakku_goe_direct_after_charge_complete_keep_<serial>`: see *Keep* below.
-- `sensor.kotiakku_goe_direct_role_<serial>`: `full`, `keep`, `surplus` or `off`, with the command, car, nrg, share, hold deadlines and `priced_out` as attributes.
+- `sensor.kotiakku_goe_direct_role_<serial>`: `full`, `keep`, `surplus` or `off`, with the command, car, nrg, share, hold deadlines and `priced_out` as attributes. `windows` lists the running and upcoming windows this charger's policy will charge at 22 kW under current conditions (`start`, `end`, `avg`, and `trip` for a DailyTrip trip window). SolarAndGrid has the windows, and DailyTrip also has its trip windows. SolarPriority has the windows only while solar is not enough, so the list empties or refills when Enough solar flips. Force on and Force off have none. Force On Until Unplug does not change the list.
 
 Shared:
 
-- `sensor.kotiakku_goe_direct_window`: first planned window start; `windows`, `blocked`, `reason`, `tomorrow_ok`, `source_entity` attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on inside a window.
+- `sensor.kotiakku_goe_direct_window`: first planned window start; `windows`, `trip_windows` (DailyTrip only), `blocked`, `reason`, `tomorrow_ok`, `source_entity` attributes. `binary_sensor.kotiakku_goe_direct_window_active` is on inside a window.
 - `binary_sensor.kotiakku_goe_direct_solar_enough`: SolarPriority skips 22 kW; attributes `gating_day`, `gating_kwh`, `today_kwh`, `tomorrow_kwh`, `usable_end`.
 - `sensor.kotiakku_goe_direct_available_surplus`: surplus from the latest Kotiakku average still free for surplus chargers (W).
 - `binary_sensor.kotiakku_goe_direct_surplus_priced_out`: on while the spot slot is above the surplus charging price ceiling; attributes `ceiling`, `until`, `avg`, `spans` (upcoming priced-out spans).
-- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, window price flex percentage 20 % / 0.02 €, daily trip deadline 7 h, daily trip price flex percentage 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, Off-Sun PV Power Below 1 kW, keep amp 6 A.
+- Numbers (defaults): window min / max 2 / 5 h, price ceiling 0.2, window price flex percentage 20 % / 0.02 €, daily trip charge after hour 17 h, daily trip charge before hour 7 h, daily trip price flex percentage 5 % / 0.03 €, SoC on 92 %, SoC hysteresis 2 %, surplus start 2000 W, surplus charging price ceiling 0.25, hold 15 min, per-charger amp cap 32 A, max 1-phase amp 32 A, group lot 50 A, enough solar 40 kWh, Off-Sun PV Power Below 1 kW, keep amp 6 A.
 - Selects: keep phase (3-phase), surplus preferred start phase (1-phase).
 
 ## Behaviour
@@ -57,17 +57,18 @@ Shared:
 
 Each charger has one role, first match wins:
 
-1. **full** (22 kW: `psm=2`, `amp=32`, `lot=50`, `frc=2`): Force On Until Unplug, **Force on**, **SolarAndGrid** inside a window, or **SolarPriority** inside a window when solar is not enough.
+1. **full** (22 kW: `psm=2`, `amp=32`, `lot=50`, `frc=2`): Force On Until Unplug, **Force on**, **SolarAndGrid** or **DailyTrip** inside a window, **DailyTrip** inside its trip window, or **SolarPriority** inside a window when solar is not enough.
 2. **keep** (`psm`/`amp` from the keep knobs, `lot=50`, `frc=2`): the keep switch is on.
-3. **surplus**: **SolarPriority** or **SolarAndGrid** outside full power.
+3. **surplus**: **SolarPriority**, **SolarAndGrid** or **DailyTrip** outside full power.
 4. **off** (`frc=1`): everything else, including **Force off**.
 
 ### Charge windows
 
 - Price slots are today's and (after ~14:00) tomorrow's curve. A slot is removed when the forecast power overlapping it, in kW, is at or above *Off-Sun PV Power Below*. Solcast `detailedForecast` (`pv_estimate`) is that power for each half hour. A missing series spreads the day's kWh by sun elevation and uses the same comparison. A day without a forecast is not blocked. `blocked` is those ranges for the chart.
 - The window is the cheapest contiguous run of at least *window min* hours. If its average is above the ceiling there is no window. It then grows one slot at a time toward the cheaper neighbour, within *window max*. The flex ceiling is fixed from that seed: its average plus the looser of flex % and flex €. A slot above the flex ceiling or the electricity price ceiling stops that direction, and slots beyond the wall are not entered.
-- Daily trip: the cheapest minimum window that ends by the local deadline is used when its average is within the looser of the daily-trip % and €/kWh (defaults 5 % and 0.03 €) of the cheapest window. The deadline is 07:00 on the second day when Nordpool `tomorrow_valid` is set, and 07:00 this morning when it is not, so a window kept for this morning stays after midnight. Prices that spill past midnight do not publish the next day. Both at 0 keeps the cheapest window. The chosen window still grows as above.
+- Daily trip: the cheapest minimum window that ends by the local deadline (*daily trip charge before hour*) is used when its average is within the looser of the daily-trip % and €/kWh (defaults 5 % and 0.03 €) of the cheapest window. The deadline is 07:00 on the second day when Nordpool `tomorrow_valid` is set, and 07:00 this morning when it is not, so a window kept for this morning stays after midnight. Prices that spill past midnight do not publish the next day. Both at 0 keeps the cheapest window. The chosen window still grows as above.
 - If tomorrow's prices are in and that window does not overlap local today 22:00 through the end of tomorrow, a second window is seeded inside tomorrow.
+- **DailyTrip** guarantees *window min* hours before each deadline. The trip range runs from the last *daily trip charge after hour* before the deadline above, so the evening before with 17 → 7, the same morning with 1 → 7, and a whole day when both are equal. It starts no earlier than when this price epoch was first seen. When the windows give less than *window min* inside the range, an afternoon window before 17:00 for example, a trip window is added: the cheapest *window min* run inside the range. It ignores the electricity price ceiling, grows as above but never out of the range, and is usually dearer than the windows. Only DailyTrip chargers use it. A trip window that was running when a new epoch arrived is kept until it ends. DailyTrip otherwise behaves as SolarAndGrid: Enough solar does not skip its windows, because tomorrow's sun comes after the trip.
 - The plan depends on prices, forecasts and knobs, not on the clock: a window that has ended stays the plan until the inputs change.
 - The search is a two-day price epoch: today + tomorrow once `tomorrow_valid` is set, otherwise yesterday + today from the stored cache. Midnight therefore does not drop a window that crosses midnight. When a new epoch arrives, a window that was already running is kept until it ends; one that had not started is dropped. `sensor.kotiakku_goe_direct_spot_price_history` exposes that cache (yesterday's average as the state).
 - **Enough solar**: the gating day is today until tomorrow's prices are in and today's last period at or above *Off-Sun PV Power Below* has ended (any production when the limit is 0); then tomorrow. Enough means that day's forecast kWh is at least *enough solar*.
@@ -110,6 +111,8 @@ Each charger has one role, first match wins:
 | High priority taking its whole offer, leftover rises 2.5 kW | High's `amp` rises; second stays off |
 | Cheap window ends at 3-phase, leftover 6 kW | Surplus continues on 3-phase (`amp=8`), no phase switch |
 | SolarPriority window, enough solar | No 22 kW; surplus may run |
+| DailyTrip, tonight 0.10, tomorrow night 0.04 (charge after 17 h, before 7 h) | Window tomorrow night, plus a trip window tonight at 22 kW |
+| DailyTrip, cheap window 14:00–16:00 (charge after 17 h) | That window, plus a trip window between 17:00 and 07:00 |
 | Car Complete, `nrg` 0 | Not offered leftover; keep after 60 s |
 | Surplus running, next slot's spot 0.30 (ceiling 0.25) | `frc=1` at the slot edge, no 6 A hold; back on at the first slot at or under 0.25 |
 

@@ -49,6 +49,7 @@ class WindowSensor(HubEntity, SensorEntity):
             "end": _iso(first and first.end),
             "avg": first and first.avg,
             "windows": [{"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg} for w in plan.windows],
+            "trip_windows": [{"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg} for w in plan.trip_windows],
             "blocked": [{"start": _iso(s), "end": _iso(e)} for s, e in plan.blocked],
             "reason": plan.reason,
             "tomorrow_ok": plan.tomorrow_ok,
@@ -134,11 +135,14 @@ class RoleSensor(HubEntity, SensorEntity):
     def extra_state_attributes(self):
         d = self._decision()
         live = self.coordinator.goe.live.get(self.serial, {})
-        command = None
+        command = windows = None
         if d:
             command = {"frc": 2, "psm": d.command.psm, "amp": d.command.amp, "lot": d.command.lot} if d.command.on else {"frc": 1}
+            trips = self.snapshot.plan.trip_windows
+            windows = [{"start": _iso(w.start), "end": _iso(w.end), "avg": w.avg, "trip": w in trips} for w in d.windows]
         return {
             "command": command,
+            "windows": windows,
             "car": live.get("car"),
             "nrg_w": live.get("nrg"),
             "share_w": d and d.share_w,

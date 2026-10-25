@@ -34,7 +34,11 @@ KNOBS = (
     Knob("electricity_price_ceiling", "Electricity price ceiling", -1, 5, 0.001, None, "mdi:currency-eur"),
     Knob("window_flex_pct", "Window price flex percentage", 0, 100, 1, PERCENTAGE, "mdi:percent-outline"),
     Knob("window_flex_eur", "Window price flex euro", 0, 1, 0.001, None, "mdi:currency-eur"),
-    Knob("daily_trip_deadline_h", "Daily trip deadline", 0, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline"),
+    Knob("daily_trip_charge_after_h", "Daily trip charge after hour", 0, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline"),
+    Knob(
+        "daily_trip_charge_before_h", "Daily trip charge before hour", 0, 24, 0.25, UnitOfTime.HOURS, "mdi:timer-outline",
+        "daily_trip_deadline_h",
+    ),
     Knob("daily_trip_price_flex_pct", "Daily trip price flex percentage", 0, 100, 1, PERCENTAGE, "mdi:percent-outline"),
     Knob("daily_trip_price_flex_eur", "Daily trip price flex euro", 0, 1, 0.001, None, "mdi:currency-eur"),
     Knob("soc_on_pct", "Surplus SoC on", 0, 100, 1, PERCENTAGE, "mdi:battery-charging-80"),
